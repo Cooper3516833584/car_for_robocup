@@ -1,0 +1,24 @@
+# 当前 ROCK 5A 实机部署服务（本车专用）。
+# 通用移植模板见 deploy/mission-screen-launcher.service.example。
+# 串口屏设备参数已从 ExecStart 移入统一 TOML 配置（[devices.screen]），
+# 通过 CAR_CONFIG 传给 launcher；launcher 会把同一个配置传给被启动的任务。
+[Unit]
+Description=Serial-screen competition mission launcher (current ROCK 5A car)
+Requires=sound-light-alarm.service
+After=sound-light-alarm.service dev-serial-by\x2did-usb\x2djixin.pro_CMSIS\x2dDAP_LU_LU_2022_8888\x2dif00.device
+Wants=dev-serial-by\x2did-usb\x2djixin.pro_CMSIS\x2dDAP_LU_LU_2022_8888\x2dif00.device
+
+[Service]
+Type=simple
+User=radxa
+Group=radxa
+SupplementaryGroups=dialout gpio pwm
+WorkingDirectory=/home/radxa/car/code
+Environment=CAR_CONFIG=/home/radxa/car/configs/cooper_rock5a_l150.toml
+ExecStart=/usr/bin/python3 /home/radxa/car/code/mission_screen_launcher.py --delay-s 10
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
