@@ -41,6 +41,8 @@ python3 code/main_task2.py --config configs/my_car.toml
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — 配置结构、优先级、两套轮距
 - [docs/HARDWARE_PORTING.md](docs/HARDWARE_PORTING.md) — 换主控板步骤
 - [docs/CALIBRATION.md](docs/CALIBRATION.md) — 实车标定操作顺序
+- [docs/HARDWARE_MEASUREMENTS.md](docs/HARDWARE_MEASUREMENTS.md) — RoboCup 差速底盘测量记录表（当前未实测）
+- [docs/LOGGING_AND_REPLAY.md](docs/LOGGING_AND_REPLAY.md) — JSONL 记录、回放和运行摘要
 - [docs/platforms/rock5a.md](docs/platforms/rock5a.md) — 当前 ROCK 5A 实车接线
 
 ## 正式驱动组件
