@@ -1,5 +1,10 @@
 # Target architecture
 
+The component boundaries are inspired by linorobot2's differential-drive
+interfaces; this repository uses a standalone Python implementation and does
+not copy linorobot2 source or require ROS 2. See
+[REFERENCE_AND_LICENSE_NOTES.md](REFERENCE_AND_LICENSE_NOTES.md).
+
 The new differential motion path is layered so mission logic does not depend
 on a board protocol:
 

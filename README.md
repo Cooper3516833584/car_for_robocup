@@ -53,6 +53,8 @@ py -3 -m unittest discover -s code/test -p "test_*.py"
 
 Runtime events use bounded asynchronous JSONL logging. `logs/` is ignored by Git. Staged software and physical acceptance requirements are in [docs/INTEGRATION_ACCEPTANCE.md](docs/INTEGRATION_ACCEPTANCE.md).
 
+The differential module boundaries follow common linorobot2 interface ideas but use this repository's Python/C10B/D500 implementation. See [docs/REFERENCE_AND_LICENSE_NOTES.md](docs/REFERENCE_AND_LICENSE_NOTES.md).
+
 ## Measurements and calibration
 
 The example profile contains software-test placeholders only. Record actual wheel geometry, body footprint, sensor extrinsics, motor signs, and C10B protocol behavior in [docs/HARDWARE_MEASUREMENTS.md](docs/HARDWARE_MEASUREMENTS.md), then follow [docs/CALIBRATION.md](docs/CALIBRATION.md). Do not set measured flags based on the example values. T265 SDK import remains optional and is needed only when starting a real T265 source.
