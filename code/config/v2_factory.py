@@ -1,8 +1,69 @@
-"""Future v2 component builders, kept explicit until components exist."""
+"""V2 component builders; hardware-specific imports stay inside the builder."""
+
+from __future__ import annotations
+
+from typing import Callable
+
+from .v2_models import DifferentialRobotConfig
 
 
-def build_differential_drive(*args, **kwargs):
-    raise NotImplementedError("DifferentialDrive is introduced in migration step 07")
+def build_differential_drive(
+    config: DifferentialRobotConfig,
+    *,
+    fake: bool = False,
+    hardware_lock_path: str | None = "/run/lock/car-hardware.lock",
+    clock: Callable[[], float] | None = None,
+):
+    """Build the SI drive facade; fake construction never opens a device.
+
+    The caller must validate ``HARDWARE_MISSION`` readiness before starting a
+    real backend. Device opening happens only when the returned drive starts.
+    """
+
+    from components.differential_drive import DifferentialDrive
+    from components.differential_kinematics import DifferentialGeometry
+
+    drive_config = config.drive
+    kwargs = {} if clock is None else {"clock": clock}
+    if fake:
+        from components.c10b_diff_backend import FakeDriveBackend
+
+        backend = FakeDriveBackend(max_wheel_speed_m_s=drive_config.max_wheel_speed_m_s)
+        lock_path = None
+    else:
+        from components.c10b_diff_backend import C10BDifferentialBackend
+        from components.rear_motor import RearMotorDriver
+
+        rear_driver = RearMotorDriver(
+            device=config.c10b.port,
+            max_wheel_speed_mm_s=drive_config.max_wheel_speed_m_s * 1000.0,
+            track_width_mm=drive_config.firmware_track_width_m * 1000.0,
+            min_turn_radius_mm=drive_config.firmware_min_turn_radius_m * 1000.0,
+            allow_in_place_rotation=drive_config.allow_in_place_rotation,
+            command_timeout_s=drive_config.command_timeout_s,
+        )
+        backend = C10BDifferentialBackend(
+            rear_driver,
+            protocol_mode=drive_config.protocol_mode,
+            firmware_track_width_m=drive_config.firmware_track_width_m,
+            firmware_min_turn_radius_m=drive_config.firmware_min_turn_radius_m,
+            allow_in_place_rotation=drive_config.allow_in_place_rotation,
+            max_wheel_speed_m_s=drive_config.max_wheel_speed_m_s,
+        )
+        lock_path = hardware_lock_path
+
+    return DifferentialDrive(
+        backend,
+        geometry=DifferentialGeometry(config.geometry.drive_track_width_m),
+        max_wheel_speed_m_s=drive_config.max_wheel_speed_m_s,
+        max_linear_speed_m_s=drive_config.max_linear_speed_m_s,
+        max_angular_speed_rad_s=drive_config.max_angular_speed_rad_s,
+        max_linear_accel_m_s2=drive_config.max_linear_accel_m_s2,
+        max_angular_accel_rad_s2=drive_config.max_angular_accel_rad_s2,
+        command_timeout_s=drive_config.command_timeout_s,
+        hardware_lock_path=lock_path,
+        **kwargs,
+    )
 
 
 def build_t265_source(*args, **kwargs):

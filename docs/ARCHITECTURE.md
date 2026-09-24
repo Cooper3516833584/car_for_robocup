@@ -29,9 +29,17 @@ sensor poses and fused field poses remain distinct. Navigation consumes a
 canonical pose and emits `Twist2D`; it does not construct serial frames or
 write sensor-specific angles.
 
-The existing Ackermann entry points and production behavior remain the
-baseline during this structural step. Differential components are introduced
-in later migration steps and should be selected explicitly by the new RoboCup
-runtime. Unmeasured or unverified geometry remains configuration, never a
-hard-coded assumption; formal hardware mode is gated until the relevant
-measurements and backend are verified.
+`AckermannDrive` and the existing Task 1/Task 2 entry points are the legacy
+production path. They remain available while the differential path is brought
+up, but the new RoboCup runtime should use `DifferentialDrive` explicitly.
+Both drive types use the shared `HardwareControlLock` so only one process owns
+the physical base. Unmeasured or unverified geometry remains configuration,
+never a hard-coded assumption; formal hardware mode is gated until the
+relevant measurements and backend are verified.
+
+`DifferentialDrive` applies limits in `v/omega` space, rate-limits from the
+previously applied twist using monotonic time, then converts and proportionally
+scales wheel targets. Its watchdog stops the backend when no command arrives
+within `command_timeout_s`; the existing C10B sender retains its independent
+watchdog as a lower-level fallback. Explicit `stop()` bypasses acceleration
+ramping and clears limiter state.

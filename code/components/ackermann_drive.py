@@ -9,6 +9,12 @@ import os
 import threading
 from typing import Final
 
+from .hardware_control_lock import (
+    DEFAULT_HARDWARE_LOCK_PATH as _DEFAULT_HARDWARE_LOCK_PATH,
+    HardwareControlLock,
+    HardwareLockError,
+)
+
 from .rear_motor import (
     ChassisCommand,
     MotorDirection,
@@ -31,23 +37,13 @@ from .vehicle_defaults import (
     DEFAULT_WHEELBASE_MM as _DEFAULT_WHEELBASE_MM,
 )
 
-try:
-    import fcntl
-except ModuleNotFoundError:  # Unit tests on Windows never start hardware.
-    fcntl = None
-
-
 # Legacy backward-compatible defaults equal to the verified Cooper ROCK 5A +
 # WHEELTEC L150 profile.  Production entries build the drive from the TOML
 # profile through ``AckermannDrive.from_config`` / ``config.factory``.
 DEFAULT_WHEELBASE_MM: Final[float] = _DEFAULT_WHEELBASE_MM
 DEFAULT_TRACK_WIDTH_MM: Final[float] = _DEFAULT_PHYSICAL_TRACK_WIDTH_MM
 DEFAULT_FIRMWARE_TRACK_WIDTH_MM: Final[float] = _DEFAULT_FIRMWARE_TRACK_WIDTH_MM
-DEFAULT_HARDWARE_LOCK_PATH: Final[str] = "/run/lock/car-hardware.lock"
-
-
-class HardwareLockError(RuntimeError):
-    """Another process already controls the servo or C10B driver board."""
+DEFAULT_HARDWARE_LOCK_PATH: Final[str] = _DEFAULT_HARDWARE_LOCK_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,8 +218,7 @@ class AckermannDrive:
         self._speed_mm_s = 0.0
         self._direction = MotorDirection.FORWARD
         self._rear_differential_linked = True
-        self._hardware_lock_path = None if hardware_lock_path is None else os.fspath(hardware_lock_path)
-        self._hardware_lock_file = None
+        self._hardware_control_lock = HardwareControlLock(hardware_lock_path)
 
     @property
     def is_running(self) -> bool:
@@ -461,22 +456,7 @@ class AckermannDrive:
             raise RuntimeError("Ackermann drive is not running")
 
     def _acquire_hardware_lock(self) -> None:
-        if self._hardware_lock_path is None:
-            return
-        if fcntl is None:
-            raise HardwareLockError("hardware locking is unavailable on this platform")
-        try:
-            lock_file = open(self._hardware_lock_path, "w", encoding="utf-8")
-        except OSError as exc:
-            raise HardwareLockError(f"cannot open hardware lock {self._hardware_lock_path}: {exc}") from exc
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            lock_file.close()
-            raise HardwareLockError(f"hardware lock is held: {self._hardware_lock_path}") from exc
-        self._hardware_lock_file = lock_file
+        self._hardware_control_lock.acquire()
 
     def _release_hardware_lock(self) -> None:
-        if self._hardware_lock_file is not None:
-            self._hardware_lock_file.close()
-            self._hardware_lock_file = None
+        self._hardware_control_lock.release()

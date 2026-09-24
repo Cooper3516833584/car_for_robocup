@@ -12,6 +12,8 @@ from core.types import WheelSpeeds
 
 
 class DriveBackend(Protocol):
+    def start(self) -> None: ...
+
     def command_wheel_speeds(self, wheel_speeds: WheelSpeeds) -> None: ...
 
     def stop(self) -> None: ...
@@ -107,6 +109,9 @@ class C10BDifferentialBackend:
         except UnsupportedWheelCommand as exc:
             raise UnsupportedFirmwareMotion(str(exc)) from exc
 
+    def start(self) -> None:
+        self.rear_driver.start()
+
     def stop(self) -> None:
         self.rear_driver.stop()
 
@@ -145,6 +150,9 @@ class FakeDriveBackend:
         self.commands.append(wheel_speeds)
         self.command_times_s.append(float(self.clock()))
         self.stopped = False
+
+    def start(self) -> None:
+        self.stopped = True
 
     def stop(self) -> None:
         self.stop_count += 1
