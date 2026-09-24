@@ -109,6 +109,7 @@ def wheel_speeds_to_chassis(
     track_width_mm: float = DEFAULT_TRACK_WIDTH_MM,
     min_turn_radius_mm: float = DEFAULT_MIN_TURN_RADIUS_MM,
     allow_in_place_rotation: bool = False,
+    enforce_min_turn_radius: bool = True,
 ) -> ChassisCommand:
     """Convert two rear-wheel targets to a feasible C10B Ackermann command.
 
@@ -147,7 +148,8 @@ def wheel_speeds_to_chassis(
             )
 
     if (
-        not math.isclose(linear, 0.0, abs_tol=1e-9)
+        enforce_min_turn_radius
+        and not math.isclose(linear, 0.0, abs_tol=1e-9)
         and not math.isclose(angular_rad_s, 0.0, abs_tol=1e-12)
     ):
         radius_mm = abs(linear / angular_rad_s)
@@ -316,8 +318,19 @@ class RearMotorDriver:
         signed_speed = speed * direction.value
         return self.set_wheels(signed_speed, signed_speed)
 
-    def set_wheels(self, left_mm_s: float, right_mm_s: float) -> ChassisCommand:
-        """Atomically set signed left/right speeds when the firmware can do so."""
+    def set_wheels(
+        self,
+        left_mm_s: float,
+        right_mm_s: float,
+        *,
+        enforce_min_turn_radius: bool = True,
+    ) -> ChassisCommand:
+        """Set signed wheel speeds in mm/s.
+
+        Radius enforcement remains enabled for legacy callers. Only a verified
+        differential-firmware adapter may disable that old-firmware gate;
+        speed and serial-protocol limits still apply.
+        """
 
         command = wheel_speeds_to_chassis(
             left_mm_s,
@@ -326,6 +339,7 @@ class RearMotorDriver:
             track_width_mm=self.track_width_mm,
             min_turn_radius_mm=self.min_turn_radius_mm,
             allow_in_place_rotation=self.allow_in_place_rotation,
+            enforce_min_turn_radius=enforce_min_turn_radius,
         )
         self._set_command(command)
         return command
