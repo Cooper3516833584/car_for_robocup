@@ -1,9 +1,15 @@
 # 小车上位机代码结构
 
-正式比赛入口为 `code/main_task1.py`（任务1）与 `code/main_task2.py`（任务2），
-两者共用 `code/main_radar_camera_line_following.py` 的比赛核心。
+旧 Ackermann 比赛入口 `code/main_task1.py`（任务1）与 `code/main_task2.py`（任务2）保留为 legacy，继续使用原比赛核心。
+新差速 RoboCup runtime 使用独立入口 `code/main_robocup.py`，不导入旧任务 runtime。
 可复用硬件模块放在 `code/components`，硬件抽象层在 `code/hal`，
 统一 TOML 配置在 `configs/` 与 `code/config/`，所有测试放在 `code/test`。
+
+差速 runtime 可先在无硬件环境运行合成传感器 dry-run：
+
+```powershell
+py -3 code\main_robocup.py --config configs\robocup_diffdrive.example.toml --mode dry-run
+```
 
 ## 🚀 其他学校快速开始
 
