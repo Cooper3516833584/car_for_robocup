@@ -50,6 +50,20 @@ from .runtime_state import (
 from .factory import (
     build_steering_calibration,
 )
+from .v2_loader import load_v2_config
+from .v2_models import (
+    CalibrationStatusConfig,
+    ConfigV2Error,
+    DifferentialDriveConfig,
+    DifferentialGeometryConfig,
+    DifferentialRobotConfig,
+    FusionConfig,
+    NavigationConfig as DifferentialNavigationConfig,
+    SafetyConfig,
+    SensorMount3DConfig,
+    T265Config,
+)
+from .v2_runtime import RuntimeMode, runtime_constraints, validate_runtime_readiness
 
 __all__ = [
     "AlarmGPIOConfig",
@@ -88,4 +102,18 @@ __all__ = [
     "load_runtime_radar_center_cm",
     "save_runtime_radar_center_cm",
     "build_steering_calibration",
+    "CalibrationStatusConfig",
+    "ConfigV2Error",
+    "DifferentialDriveConfig",
+    "DifferentialGeometryConfig",
+    "DifferentialRobotConfig",
+    "FusionConfig",
+    "DifferentialNavigationConfig",
+    "RuntimeMode",
+    "SafetyConfig",
+    "SensorMount3DConfig",
+    "T265Config",
+    "load_v2_config",
+    "runtime_constraints",
+    "validate_runtime_readiness",
 ]

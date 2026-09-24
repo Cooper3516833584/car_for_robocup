@@ -1,0 +1,87 @@
+# WARNING: Dimensions and sensor mounts below are temporary software-test
+# placeholders. They are not measurements for this car. Keep measured flags
+# false until values have been measured on the actual platform.
+schema_version = 2
+robot_name = "robocup_diffdrive"
+
+[calibration]
+geometry_measured = false
+sensor_extrinsics_measured = false
+c10b_diff_firmware_verified = false
+
+[vehicle.geometry]
+drive_track_width_m = 0.164
+wheel_diameter_m = 0.100
+body_length_m = 0.450
+body_width_m = 0.350
+drive_axle_to_body_center_x_m = 0.000
+front_support_x_m = 0.180
+rear_support_x_m = -0.180
+
+[vehicle.drive]
+kinematics = "differential"
+protocol_mode = "ackermann_firmware_compat"
+max_wheel_speed_m_s = 0.30
+max_linear_speed_m_s = 0.20
+max_angular_speed_rad_s = 0.80
+max_linear_accel_m_s2 = 0.30
+max_angular_accel_rad_s2 = 1.00
+command_timeout_s = 0.25
+firmware_track_width_m = 0.164
+firmware_min_turn_radius_m = 0.350
+allow_in_place_rotation = true
+
+[devices.c10b]
+port = "COM3"
+baudrate = 115200
+
+[devices.d500]
+enabled = true
+port = "COM4"
+baudrate = 230400
+
+[sensors.d500.mount]
+x_m = 0.0
+y_m = 0.0
+z_m = 0.20
+roll_rad = 0.0
+pitch_rad = 0.0
+yaw_rad = 0.0
+
+[devices.t265]
+enabled = true
+serial = ""
+
+[sensors.t265.mount]
+x_m = 0.0
+y_m = 0.0
+z_m = 0.25
+roll_rad = 0.0
+pitch_rad = 0.0
+yaw_rad = 0.0
+
+[fusion]
+t265_max_age_s = 0.15
+d500_max_age_s = 0.50
+t265_min_tracker_confidence = 2
+position_correction_gain = 0.15
+yaw_correction_gain = 0.10
+max_position_innovation_m = 0.80
+max_yaw_innovation_rad = 1.05
+max_single_position_correction_m = 0.08
+max_single_yaw_correction_rad = 0.15
+
+[navigation]
+position_tolerance_m = 0.03
+yaw_tolerance_rad = 0.0523598776
+lookahead_m = 0.30
+rotate_in_place_threshold_rad = 0.70
+slowdown_distance_m = 0.50
+
+[safety]
+require_measured_geometry_for_hardware_mission = true
+require_verified_c10b_diff_firmware_for_curved_motion = true
+require_measured_extrinsics_for_hardware_mission = true
+stop_if_pose_lost_s = 0.30
+hardware_probe_max_linear_speed_m_s = 0.10
+hardware_probe_max_angular_speed_rad_s = 0.35

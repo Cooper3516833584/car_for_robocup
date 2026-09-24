@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 logs/
+configs/robocup_diffdrive.toml
 
 # On-site runtime state (现场可改，不属于车辆静态标定)
 runtime/
