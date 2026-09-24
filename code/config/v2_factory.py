@@ -66,8 +66,18 @@ def build_differential_drive(
     )
 
 
-def build_t265_source(*args, **kwargs):
-    raise NotImplementedError("T265 source is introduced in migration step 08")
+def build_t265_source(config: DifferentialRobotConfig, *, fake: bool = False, samples=()):
+    """Build an optional T265 source without importing the SDK for fake mode."""
+
+    if not config.t265.enabled:
+        return None
+    if fake:
+        from components.t265_driver import FakeT265PoseSource
+
+        return FakeT265PoseSource(samples)
+    from components.t265_driver import RealSenseT265PoseSource
+
+    return RealSenseT265PoseSource(config.t265.serial)
 
 
 def build_pose_fusion(*args, **kwargs):
