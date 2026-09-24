@@ -623,6 +623,10 @@ def build_runtime(
     )
     if not d500_fake and d500_source is not None:
         d500_source.on_update = runtime.on_d500_update
+    if mode is RuntimeMode.DRY_RUN:
+        # A short synthetic goal ensures the default acceptance command
+        # exercises planning and the fake actuation path without touching hardware.
+        runtime.mission.set_navigation_goal(NavigationGoal(0.8, 0.0))
     return runtime
 
 

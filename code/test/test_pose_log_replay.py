@@ -54,6 +54,11 @@ class PoseLogReplayTests(unittest.TestCase):
         self.assertEqual(len(events), 101)
         outlier_result = next(estimate for t, estimate in estimates if abs(t - 6.0) < 1e-8 and estimate.d500_accepted is False)
         self.assertEqual(outlier_result.rejection_reason, "position_innovation_gate")
+        t265_dropout = next(
+            estimate for t, estimate in estimates
+            if abs(t - 8.0) < 1e-8 and estimate.state.value == "t265_degraded"
+        )
+        self.assertEqual(t265_dropout.state.value, "t265_degraded")
         final = estimates[-1][1]
         self.assertEqual(final.state.value, "ok")
         self.assertAlmostEqual(final.pose.x_m, 1.0, delta=0.10)

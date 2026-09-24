@@ -36,6 +36,8 @@ class RobocupRuntimeTests(unittest.TestCase):
         self.assertIsInstance(runtime.drive.backend, FakeDriveBackend)
         results = runtime.run_steps(2, period_s=0.001)
         self.assertEqual(len(results), 2)
+        self.assertTrue(any(result.navigation is not None for result in results))
+        self.assertTrue(runtime.drive.backend.commands)
         self.assertTrue(runtime.t265_source.stopped)
         self.assertTrue(runtime.d500_source.stopped)
         self.assertEqual(runtime.drive.backend.close_count, 1)
