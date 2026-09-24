@@ -77,6 +77,10 @@ yaw_tolerance_rad = 0.0523598776
 lookahead_m = 0.30
 rotate_in_place_threshold_rad = 0.70
 slowdown_distance_m = 0.50
+safety_margin_m = 0.05
+path_yaw_gain = 1.5
+final_yaw_gain = 1.5
+degraded_speed_scale = 0.4
 
 [safety]
 require_measured_geometry_for_hardware_mission = true

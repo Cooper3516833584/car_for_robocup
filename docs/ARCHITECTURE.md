@@ -43,3 +43,19 @@ scales wheel targets. Its watchdog stops the backend when no command arrives
 within `command_timeout_s`; the existing C10B sender retains its independent
 watchdog as a lower-level fallback. Explicit `stop()` bypasses acceleration
 ramping and clears limiter state.
+
+`DifferentialNavigator` plans in a 2-D occupancy grid and emits only
+`Twist2D`; `DifferentialDrive` remains the only motion-output component. The
+planner inflates obstacles by the body-corner radius and safety margin, which
+also keeps an in-place rotation clear of nearby obstacles. In compatibility
+firmware mode the controller separates rotation and straight motion so it
+does not request a rejected tight-radius arc. Legacy `navigation.py` remains
+the Ackermann-only rollback path.
+
+`DifferentialNavigator` plans in a 2-D occupancy grid and emits only
+`Twist2D`; `DifferentialDrive` remains the only motion-output component. The
+planner inflates obstacles by the body-corner radius and safety margin, which
+also keeps an in-place rotation clear of nearby obstacles. In compatibility
+firmware mode the controller separates rotation and straight motion so it
+does not request a rejected tight-radius arc. Legacy `navigation.py` remains
+the Ackermann-only rollback path.
