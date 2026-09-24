@@ -29,13 +29,13 @@ sensor poses and fused field poses remain distinct. Navigation consumes a
 canonical pose and emits `Twist2D`; it does not construct serial frames or
 write sensor-specific angles.
 
-`AckermannDrive` and the existing Task 1/Task 2 entry points are the legacy
-production path. They remain available while the differential path is brought
-up, but the new RoboCup runtime should use `DifferentialDrive` explicitly.
-Both drive types use the shared `HardwareControlLock` so only one process owns
-the physical base. Unmeasured or unverified geometry remains configuration,
-never a hard-coded assumption; formal hardware mode is gated until the
-relevant measurements and backend are verified.
+`AckermannDrive` and the existing Task 1/Task 2 entry points remain available
+for the older vehicle and are legacy-only. The active RoboCup runtime uses
+`DifferentialDrive` and must not import steering or Ackermann modules. Both
+drive types use the shared `HardwareControlLock` so only one process owns the
+physical base. Unmeasured or unverified geometry remains configuration, never
+a hard-coded assumption; formal hardware mode is gated until the relevant
+measurements and backend are verified.
 
 `DifferentialDrive` applies limits in `v/omega` space, rate-limits from the
 previously applied twist using monotonic time, then converts and proportionally
@@ -44,13 +44,6 @@ within `command_timeout_s`; the existing C10B sender retains its independent
 watchdog as a lower-level fallback. Explicit `stop()` bypasses acceleration
 ramping and clears limiter state.
 
-`DifferentialNavigator` plans in a 2-D occupancy grid and emits only
-`Twist2D`; `DifferentialDrive` remains the only motion-output component. The
-planner inflates obstacles by the body-corner radius and safety margin, which
-also keeps an in-place rotation clear of nearby obstacles. In compatibility
-firmware mode the controller separates rotation and straight motion so it
-does not request a rejected tight-radius arc. Legacy `navigation.py` remains
-the Ackermann-only rollback path.
 
 `DifferentialNavigator` plans in a 2-D occupancy grid and emits only
 `Twist2D`; `DifferentialDrive` remains the only motion-output component. The

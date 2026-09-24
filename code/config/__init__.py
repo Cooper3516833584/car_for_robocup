@@ -1,119 +1,69 @@
-"""Unified TOML configuration for the competition car.
+"""Lazy config exports; importing schema-v2 modules stays independent of v1 hardware."""
 
-This package is the *composition/root* layer: it loads the TOML profile,
-validates it into strongly-typed dataclasses and builds validated application
-objects.  Business components never load TOML themselves; they receive already
-validated objects built here.
-"""
+from importlib import import_module as _import_module
 
-from .models import (
-    AlarmGPIOConfig,
-    CameraDeviceConfig,
-    CameraLineConfig,
-    CameraPerspectiveConfig,
-    CarConfig,
-    DevicesConfig,
-    HC14DeviceConfig,
-    HardwareConfig,
-    MissionCommonConfig,
-    MissionControlConfig,
-    MissionsConfig,
-    MotorDeviceConfig,
-    ProfileConfig,
-    RadarDeviceConfig,
-    RadarMountConfig,
-    RuntimeStateConfig,
-    ScreenDeviceConfig,
-    SensorCameraConfig,
-    SensorRadarConfig,
-    SensorsConfig,
-    SteeringCalibrationConfig,
-    SteeringPWMConfig,
-    Task1Config,
-    Task2Config,
-    VehicleConfig,
-    VehicleDriveConfig,
-    VehicleGeometryConfig,
-)
-from .loader import (
-    CAR_CONFIG_ENV_VAR,
-    DEFAULT_CONFIG_FILENAME,
-    ConfigError,
-    load_car_config,
-    resolve_config_path,
-)
-from .runtime_state import (
-    RuntimeRadarCenterState,
-    load_runtime_radar_center_cm,
-    save_runtime_radar_center_cm,
-)
-from .factory import (
-    build_steering_calibration,
-)
-from .v2_loader import load_v2_config
-from .v2_models import (
-    CalibrationStatusConfig,
-    ConfigV2Error,
-    DifferentialDriveConfig,
-    DifferentialGeometryConfig,
-    DifferentialRobotConfig,
-    FusionConfig,
-    NavigationConfig as DifferentialNavigationConfig,
-    SafetyConfig,
-    SensorMount3DConfig,
-    T265Config,
-)
-from .v2_runtime import RuntimeMode, runtime_constraints, validate_runtime_readiness
+_EXPORT_MODULES = {
+    'AlarmGPIOConfig': 'models',
+    'CameraDeviceConfig': 'models',
+    'CameraLineConfig': 'models',
+    'CameraPerspectiveConfig': 'models',
+    'CarConfig': 'models',
+    'DevicesConfig': 'models',
+    'HC14DeviceConfig': 'models',
+    'HardwareConfig': 'models',
+    'MissionCommonConfig': 'models',
+    'MissionControlConfig': 'models',
+    'MissionsConfig': 'models',
+    'MotorDeviceConfig': 'models',
+    'ProfileConfig': 'models',
+    'RadarDeviceConfig': 'models',
+    'RadarMountConfig': 'models',
+    'RuntimeStateConfig': 'models',
+    'ScreenDeviceConfig': 'models',
+    'SensorCameraConfig': 'models',
+    'SensorRadarConfig': 'models',
+    'SensorsConfig': 'models',
+    'SteeringCalibrationConfig': 'models',
+    'SteeringPWMConfig': 'models',
+    'Task1Config': 'models',
+    'Task2Config': 'models',
+    'VehicleConfig': 'models',
+    'VehicleDriveConfig': 'models',
+    'VehicleGeometryConfig': 'models',
+    'CAR_CONFIG_ENV_VAR': 'loader',
+    'DEFAULT_CONFIG_FILENAME': 'loader',
+    'ConfigError': 'loader',
+    'load_car_config': 'loader',
+    'resolve_config_path': 'loader',
+    'RuntimeRadarCenterState': 'runtime_state',
+    'load_runtime_radar_center_cm': 'runtime_state',
+    'save_runtime_radar_center_cm': 'runtime_state',
+    'build_steering_calibration': 'factory',
+    'CalibrationStatusConfig': 'v2_models',
+    'ConfigV2Error': 'v2_models',
+    'DifferentialDriveConfig': 'v2_models',
+    'DifferentialGeometryConfig': 'v2_models',
+    'DifferentialRobotConfig': 'v2_models',
+    'FusionConfig': 'v2_models',
+    'DifferentialNavigationConfig': 'v2_models',
+    'RuntimeMode': 'v2_runtime',
+    'SafetyConfig': 'v2_models',
+    'SensorMount3DConfig': 'v2_models',
+    'T265Config': 'v2_models',
+    'load_v2_config': 'v2_loader',
+    'runtime_constraints': 'v2_runtime',
+    'validate_runtime_readiness': 'v2_runtime',
+}
+__all__ = tuple(_EXPORT_MODULES)
 
-__all__ = [
-    "AlarmGPIOConfig",
-    "CameraDeviceConfig",
-    "CameraLineConfig",
-    "CameraPerspectiveConfig",
-    "CarConfig",
-    "DevicesConfig",
-    "HC14DeviceConfig",
-    "HardwareConfig",
-    "MissionCommonConfig",
-    "MissionControlConfig",
-    "MissionsConfig",
-    "MotorDeviceConfig",
-    "ProfileConfig",
-    "RadarDeviceConfig",
-    "RadarMountConfig",
-    "RuntimeStateConfig",
-    "ScreenDeviceConfig",
-    "SensorCameraConfig",
-    "SensorRadarConfig",
-    "SensorsConfig",
-    "SteeringCalibrationConfig",
-    "SteeringPWMConfig",
-    "Task1Config",
-    "Task2Config",
-    "VehicleConfig",
-    "VehicleDriveConfig",
-    "VehicleGeometryConfig",
-    "CAR_CONFIG_ENV_VAR",
-    "DEFAULT_CONFIG_FILENAME",
-    "ConfigError",
-    "load_car_config",
-    "resolve_config_path",
-    "RuntimeRadarCenterState",
-    "load_runtime_radar_center_cm",
-    "save_runtime_radar_center_cm",
-    "build_steering_calibration",
-    "CalibrationStatusConfig",
-    "ConfigV2Error",
-    "DifferentialDriveConfig",
-    "DifferentialGeometryConfig",
-    "DifferentialRobotConfig",
-    "FusionConfig",
-    "DifferentialNavigationConfig",
-    "RuntimeMode",
-    "SafetyConfig",
-    "SensorMount3DConfig",
-    "T265Config",
-    "load_v2_config",
-    "runtime_constraints",
-    "validate_runtime_readiness",
-]
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = _import_module(f".{module_name}", __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORT_MODULES))

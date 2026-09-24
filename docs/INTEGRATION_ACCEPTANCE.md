@@ -12,7 +12,7 @@ py -3 -m unittest discover -s code/test -p "test_*.py"
 git diff --check
 ```
 
-Acceptance: zero syntax errors, all new tests pass, and only the eight documented legacy skips remain. The current baseline is 530 tests with 8 skips; update this count after changing tests.
+Acceptance: zero syntax errors, all new tests pass, and only the eight documented legacy skips remain. The current baseline is 531 tests with 8 skips; update this count after changing tests.
 
 ## Stage 1 — hardware-free dry-run
 
