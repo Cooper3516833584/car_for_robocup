@@ -80,5 +80,9 @@ def build_t265_source(config: DifferentialRobotConfig, *, fake: bool = False, sa
     return RealSenseT265PoseSource(config.t265.serial)
 
 
-def build_pose_fusion(*args, **kwargs):
-    raise NotImplementedError("pose fusion is introduced in migration step 10")
+def build_pose_fusion(config: DifferentialRobotConfig):
+    """Build the pure pose-fusion state object from validated v2 settings."""
+
+    from components.pose_fusion import PoseFusion
+
+    return PoseFusion(config.fusion)
