@@ -87,6 +87,23 @@ class RobocupRuntimeTests(unittest.TestCase):
         self.assertEqual(result.command.angular_z_rad_s, 0.0)
         runtime.close()
 
+    def test_logging_failure_cannot_interrupt_safe_stop(self) -> None:
+        class BrokenLogger:
+            def emit(self, *_args, **_kwargs):
+                raise OSError("disk unavailable")
+
+            def close(self):
+                raise OSError("disk unavailable")
+
+        runtime = self.make_runtime()
+        runtime.event_logger = BrokenLogger()
+        runtime.start()
+        runtime.mission.finish()
+        result = runtime.step(now_s=10.0)
+        self.assertEqual(result.mission_state, RobocupMissionState.FINISHED)
+        self.assertEqual(result.command.linear_x_m_s, 0.0)
+        runtime.close()
+
 
 if __name__ == "__main__":
     unittest.main()

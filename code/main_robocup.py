@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import sys
 
+from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
@@ -35,7 +36,6 @@ def configure_logging(log_dir: str | None) -> None:
     if log_dir:
         directory = Path(log_dir)
         directory.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(directory / "robocup-runtime.log", encoding="utf-8"))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -53,14 +53,35 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_runtime_config(args.config)
         mode = RuntimeMode(args.mode)
+        if not config.calibration.geometry_measured or not config.calibration.sensor_extrinsics_measured:
+            logging.warning(
+                "configuration contains unmeasured geometry or sensor mounts; autonomous hardware mission remains gated"
+            )
         runtime = build_runtime(
             config,
             mode,
             replay_file=args.replay_file,
             mission_profile=args.mission_profile,
         )
+        if args.log_dir is not None:
+            runtime.event_logger = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
     except (RuntimeReadinessError, FileNotFoundError, ValueError, NotImplementedError) as exc:
         logging.error("cannot start RoboCup runtime: %s", exc)
+        if isinstance(exc, RuntimeReadinessError) and args.log_dir is not None:
+            try:
+                readiness_log = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
+                readiness_log.emit(
+                    {
+                        "t": 0.0,
+                        "type": "safety",
+                        "event_code": "UNMEASURED_CONFIG_REJECT",
+                        "reason": str(exc),
+                    },
+                    priority=True,
+                )
+                readiness_log.close()
+            except Exception:
+                logging.exception("could not record readiness rejection")
         return 2
 
     try:
@@ -69,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 NavigationGoal(args.goal_x, args.goal_y, args.goal_yaw)
             )
         if mode in {RuntimeMode.DRY_RUN, RuntimeMode.REPLAY}:
-            results = runtime.run_steps(args.steps)
+            results = runtime.run_replay() if mode is RuntimeMode.REPLAY and args.replay_file else runtime.run_steps(args.steps)
             logging.info("completed %d runtime steps; mission=%s", len(results), runtime.mission.state.value)
             return 0 if runtime.mission.state.value not in {"error", "safe_stop"} else 1
         runtime.run()

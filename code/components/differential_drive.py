@@ -75,10 +75,21 @@ class DifferentialDrive:
         self._last_twist = Twist2D(0.0, 0.0)
         self._last_update_s: float | None = None
         self._last_command_s: float | None = None
+        self._watchdog_stop_count = 0
 
     @property
     def is_running(self) -> bool:
         return self._started
+
+    @property
+    def watchdog_stop_count(self) -> int:
+        with self._lock:
+            return self._watchdog_stop_count
+
+    @property
+    def last_limited_twist(self) -> Twist2D:
+        with self._lock:
+            return self._last_twist
 
     def start(self) -> "DifferentialDrive":
         with self._lock:
@@ -167,6 +178,7 @@ class DifferentialDrive:
                 return False
             self._stop_locked()
             self._last_update_s = now
+            self._watchdog_stop_count += 1
             return True
 
     def stop(self) -> None:

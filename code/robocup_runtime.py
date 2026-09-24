@@ -12,8 +12,10 @@ from typing import Callable, Iterable
 
 from components.differential_drive import DifferentialDrive
 from components.differential_navigation import DifferentialNavigator, NavigationOutput, NavigationState
+from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
+from components.pose_log_replay import PoseLogEvent, read_pose_events
 from components.radar_pose_adapter import RadarPoseAdapter
 from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, T265RawPose
 from components.t265_pose_adapter import T265PoseAdapter
@@ -167,6 +169,8 @@ class RobocupRuntime:
         mission_profile: str = "default",
         constraints: RuntimeConstraints | None = None,
         world: NavigationGrid | None = None,
+        event_logger: JsonlEventLogger | None = None,
+        replay_events: tuple[PoseLogEvent, ...] = (),
     ) -> None:
         self.config = config
         self.mode = mode
@@ -182,6 +186,13 @@ class RobocupRuntime:
         self.clock = clock
         self.constraints = constraints or runtime_constraints(config, mode)
         self.world = world
+        self.event_logger = event_logger
+        self._replay_events = replay_events
+        self._replay_index = 0
+        self._start_time_s: float | None = None
+        self._current_step_s: float | None = None
+        self._last_safety_state: RobocupMissionState | None = None
+        self._last_watchdog_stop_count = drive.watchdog_stop_count
         self._d500_events: queue.SimpleQueue[tuple[object, float]] = queue.SimpleQueue()
         self._started = False
         self._closed = False
@@ -204,7 +215,9 @@ class RobocupRuntime:
                 started_sources.append(self.t265_source)
             if self.mode in {RuntimeMode.DRY_RUN, RuntimeMode.REPLAY}:
                 self.drive.start()
+            self._start_time_s = float(self.clock())
             self._started = True
+            self._emit("runtime_started", mode=self.mode.value, priority=True)
             return self
         except BaseException:
             for source in reversed(started_sources):
@@ -218,11 +231,31 @@ class RobocupRuntime:
         now = float(self.clock() if now_s is None else now_s)
         if not math.isfinite(now):
             raise ValueError("runtime clock must be finite monotonic time")
+        self._current_step_s = now
+        watchdog_stops = self.drive.watchdog_stop_count
+        if watchdog_stops > self._last_watchdog_stop_count:
+            self._emit("safety", event_code="WATCHDOG_STOP", count=watchdog_stops - self._last_watchdog_stop_count, priority=True)
+            self._last_watchdog_stop_count = watchdog_stops
         navigation_output: NavigationOutput | None = None
         try:
             self._consume_t265(now)
             self._consume_d500(now)
+            if self.mode is RuntimeMode.REPLAY:
+                self._consume_replay(now)
             estimate = self.fusion.estimate(now)
+            self._emit(
+                "fused_pose",
+                x_m=None if estimate.pose is None else estimate.pose.x_m,
+                y_m=None if estimate.pose is None else estimate.pose.y_m,
+                yaw_rad=None if estimate.pose is None else estimate.pose.yaw_rad,
+                state=estimate.state.value,
+                age_s=estimate.age_s,
+                source_flags=estimate.source_flags,
+                d500_accepted=estimate.d500_accepted,
+                d500_innovation_m=estimate.last_d500_innovation_m,
+                d500_innovation_yaw_rad=estimate.last_d500_innovation_yaw_rad,
+                rejection_reason=estimate.rejection_reason,
+            )
             self.mission.on_localization(estimate)
 
             command = Twist2D(0.0, 0.0)
@@ -245,6 +278,14 @@ class RobocupRuntime:
                         str(navigation_output.diagnostics.get("reason", navigation_output.state.value))
                     )
                     command = Twist2D(0.0, 0.0)
+                self._emit(
+                    "navigation",
+                    state=navigation_output.state.value,
+                    diagnostics=navigation_output.diagnostics,
+                    path=navigation_output.path,
+                    command=command,
+                    goal=self.navigator.goal,
+                )
 
             if self.mission.state in {
                 RobocupMissionState.SAFE_STOP,
@@ -254,6 +295,15 @@ class RobocupRuntime:
             } or estimate.state is PoseFusionState.LOST:
                 command = Twist2D(0.0, 0.0)
                 self._safe_stop_drive()
+                if self._last_safety_state is not self.mission.state:
+                    self._emit(
+                        "safety",
+                        event_code="POSE_LOST" if estimate.state is PoseFusionState.LOST else self.mission.state.value.upper(),
+                        state=self.mission.state.value,
+                        reason=self.mission.last_error or estimate.state.value,
+                        priority=True,
+                    )
+                    self._last_safety_state = self.mission.state
             elif self.mode is RuntimeMode.HARDWARE_PROBE:
                 command = Twist2D(0.0, 0.0)
             elif command.linear_x_m_s != 0.0 or command.angular_z_rad_s != 0.0:
@@ -263,11 +313,28 @@ class RobocupRuntime:
             elif self.drive.is_running:
                 self.drive.stop()
 
+            limited = self.drive.last_limited_twist
+            wheels = self.drive.kinematics.twist_to_wheels(limited)
+            self._emit(
+                "drive_command",
+                requested_v_m_s=command.linear_x_m_s,
+                requested_omega_rad_s=command.angular_z_rad_s,
+                limited_v_m_s=limited.linear_x_m_s,
+                limited_omega_rad_s=limited.angular_z_rad_s,
+                left_target_m_s=wheels.left_m_s,
+                right_target_m_s=wheels.right_m_s,
+                protocol_mode=self.config.drive.protocol_mode,
+                actuation_enabled=self.drive.is_running,
+            )
+
             return RuntimeStep(now, estimate, self.mission.state, command, navigation_output)
         except Exception as exc:
             self._error = f"{type(exc).__name__}: {exc}"
             self.mission.request_error(self._error)
             self._safe_stop_drive()
+            if type(exc).__name__ in {"UnsupportedFirmwareMotion", "UnsupportedWheelCommand"} or "turn radius" in str(exc).lower():
+                self._emit("c10b_reject", event_code="C10B_REJECT", reason=self._error, priority=True)
+            self._emit("runtime_error", error=self._error, priority=True)
             LOG.exception("RoboCup runtime step failed")
             estimate = self.fusion.estimate(now)
             return RuntimeStep(now, estimate, self.mission.state, Twist2D(0.0, 0.0), navigation_output, self._error)
@@ -305,9 +372,25 @@ class RobocupRuntime:
         finally:
             self.close()
 
+    def run_replay(self) -> list[RuntimeStep]:
+        """Run recorded event times without sleeping or consulting wall time."""
+        if not self._started:
+            self.start()
+        results: list[RuntimeStep] = []
+        assert self._start_time_s is not None
+        try:
+            for timestamp in sorted({event.t_s for event in self._replay_events}):
+                results.append(self.step(now_s=self._start_time_s + timestamp))
+                if self.mission.state in {RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
+                    break
+        finally:
+            self.close()
+        return results
+
     def close(self) -> None:
         if self._closed:
             return
+        self._emit("runtime_closed", mission_state=self.mission.state.value, priority=True)
         # Stop the base first; source shutdown can block while joining workers.
         self._safe_stop_drive()
         for source in (self.t265_source, self.d500_source):
@@ -317,6 +400,11 @@ class RobocupRuntime:
             self.drive.close()
         except Exception:
             LOG.exception("failed to close drive")
+        if self.event_logger is not None:
+            try:
+                self.event_logger.close()
+            except Exception:
+                LOG.exception("failed to close JSONL diagnostics logger")
         self._closed = True
 
     def _consume_t265(self, now_s: float) -> None:
@@ -328,6 +416,28 @@ class RobocupRuntime:
         update = self.t265_adapter.adapt(raw, now_s=now_s)
         if update.pose is not None and update.quality.valid:
             self.fusion.update_t265(update.pose, update.quality)
+            self._emit(
+                "t265_pose",
+                x_m=update.pose.x_m,
+                y_m=update.pose.y_m,
+                yaw_rad=update.pose.yaw_rad,
+                confidence=update.quality.position_confidence,
+                age_s=update.quality.age_s,
+                raw_translation_xyz=raw.translation_xyz,
+                raw_quaternion_xyzw=raw.quaternion_xyzw,
+                tracker_confidence=raw.tracker_confidence,
+                mapper_confidence=raw.mapper_confidence,
+            )
+        else:
+            self._emit(
+                "t265_rejected",
+                reason=update.reason or "invalid",
+                event_code="LOW_T265_CONFIDENCE" if update.reason == "tracker_confidence_too_low" else "T265_REJECT",
+                confidence=raw.tracker_confidence,
+                raw_translation_xyz=raw.translation_xyz,
+                raw_quaternion_xyzw=raw.quaternion_xyzw,
+                mapper_confidence=raw.mapper_confidence,
+            )
 
     def _consume_d500(self, now_s: float) -> None:
         if self.d500_fake:
@@ -337,6 +447,7 @@ class RobocupRuntime:
             if sample is not None:
                 pose = self.radar_adapter.to_map_base_pose(sample, timestamp_s=sample.timestamp_s)
                 self.fusion.update_d500(pose, PoseQuality("d500", True, False, age_s=max(0.0, now_s - sample.timestamp_s)))
+                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad)
         else:
             while True:
                 try:
@@ -345,14 +456,54 @@ class RobocupRuntime:
                     break
                 pose = self.radar_adapter.to_map_base_pose(legacy_pose, timestamp_s=timestamp_s)
                 self.fusion.update_d500(pose, PoseQuality("d500", True, False, age_s=max(0.0, now_s - timestamp_s)))
+                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad)
 
     def on_d500_update(self, update) -> None:
         """Thread-safe callback passed to the real D500 component."""
 
         if not update.odometry.accepted:
+            self._emit("d500_rejected", reason=update.odometry.rejection_reason or "odometry_rejected", priority=True)
             return
         pose = update.global_pose or update.odometry.pose
         self._d500_events.put((pose, float(self.clock())))
+        icp = update.odometry.icp
+        self._emit(
+            "d500_diagnostic",
+            raw_pose_cm=(pose.x_cm, pose.y_cm),
+            raw_yaw_cw_deg=pose.yaw_cw_deg,
+            icp_mean_error_cm=None if icp is None else icp.mean_error_cm,
+            icp_matched_points=None if icp is None else icp.matched_points,
+            icp_iterations=None if icp is None else icp.iterations,
+            wall_fusion_status=None if update.wall_fusion is None else update.wall_fusion.status.value,
+        )
+
+    def _consume_replay(self, now_s: float) -> None:
+        if self._start_time_s is None:
+            return
+        replay_t = max(0.0, now_s - self._start_time_s)
+        while self._replay_index < len(self._replay_events):
+            event = self._replay_events[self._replay_index]
+            if event.t_s > replay_t + 1e-9:
+                break
+            pose = Pose2D(event.pose.x_m, event.pose.y_m, event.pose.yaw_rad, self._start_time_s + event.t_s)
+            if event.source == "t265":
+                self.fusion.update_t265(pose, event.quality)
+                self._emit("t265_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, replay=True)
+            else:
+                self.fusion.update_d500(pose, event.quality)
+                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, replay=True)
+            self._replay_index += 1
+
+    def _emit(self, event_type: str, *, priority: bool = False, **fields) -> None:
+        if self.event_logger is None:
+            return
+        try:
+            event_time = self._current_step_s if self._current_step_s is not None else float(self.clock())
+            relative_t = 0.0 if self._start_time_s is None else max(0.0, event_time - self._start_time_s)
+            self.event_logger.emit({"t": relative_t, "type": event_type, **fields}, priority=priority)
+        except Exception:
+            # A diagnostics sink is never allowed to break the safety loop.
+            pass
 
     def _safe_stop_drive(self) -> None:
         if self.drive.is_running:
@@ -381,14 +532,14 @@ def build_runtime(
     clock: Callable[[], float] = time.monotonic,
     fake_sample_count: int = 32,
     world: NavigationGrid | None = None,
+    event_logger: JsonlEventLogger | None = None,
 ) -> RobocupRuntime:
     """Build all runtime dependencies without starting a device."""
 
     readiness = validate_runtime_readiness(config, mode)
     if readiness:
         raise RuntimeReadinessError("; ".join(readiness))
-    if mode is RuntimeMode.REPLAY and replay_file:
-        raise NotImplementedError("pose-log replay source is added in migration step 13")
+    replay_events = read_pose_events(replay_file) if mode is RuntimeMode.REPLAY and replay_file else ()
     fake_mode = mode in {RuntimeMode.DRY_RUN, RuntimeMode.REPLAY}
     now = float(clock())
     period_s = 0.05
@@ -403,7 +554,11 @@ def build_runtime(
     )
     radar_adapter = RadarPoseAdapter()
 
-    if fake_mode:
+    if mode is RuntimeMode.REPLAY and replay_file:
+        t265_source = None
+        d500_source = None
+        d500_fake = False
+    elif fake_mode:
         t265_samples = [
             T265RawPose(
                 translation_xyz=(0.0, 0.0, 0.0),
@@ -463,6 +618,8 @@ def build_runtime(
         mission_profile=mission_profile,
         constraints=constraints,
         world=world,
+        event_logger=event_logger,
+        replay_events=tuple(replay_events),
     )
     if not d500_fake and d500_source is not None:
         d500_source.on_update = runtime.on_d500_update
