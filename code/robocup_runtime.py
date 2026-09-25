@@ -75,9 +75,15 @@ class FakeD500PoseSample:
 
 @dataclass(frozen=True, slots=True)
 class D500PoseObservation:
+    """D500 local/map poses and absolute-wall acceptance as separate facts."""
+
     local_pose: Pose2D | None
-    global_pose: Pose2D | None
+    map_pose: Pose2D | None
     mode: D500LocalizationMode
+    map_alignment_established: bool
+    map_pose_valid: bool
+    absolute_observation_available: bool
+    absolute_observation_accepted: bool
     confidence: float | None
     timestamp_s: float
 
@@ -221,7 +227,8 @@ class RobocupRuntime:
         self.d500_abs_reject_low_confidence = 0
         self.d500_abs_reject_position_gate = 0
         self.d500_abs_reject_yaw_gate = 0
-        self._last_d500_global_update_s: float | None = None
+        self._last_d500_absolute_update_s: float | None = None
+        self._last_d500_map_pose_update_s: float | None = None
         self._d500_global_pending = False
         self._started = False
         self._closed = False
@@ -503,7 +510,10 @@ class RobocupRuntime:
                 confidence = None
                 pose = None
                 accepted_absolute = False
-                if mode is D500LocalizationMode.GLOBAL and observation.global_pose is not None:
+                absolute_correction_accepted = False
+                if observation.map_pose_valid:
+                    self._last_d500_map_pose_update_s = observation.timestamp_s
+                if observation.absolute_observation_accepted and observation.map_pose is not None:
                     confidence = observation.confidence
                     if confidence is None or confidence < self.config.d500_localization.min_confidence:
                         self.d500_abs_reject_low_confidence += 1
@@ -511,8 +521,8 @@ class RobocupRuntime:
                     else:
                         prior = self.fusion.estimate(now_s).pose
                         if self.fusion.global_anchor_established and prior is not None:
-                            position_jump = math.hypot(observation.global_pose.x_m - prior.x_m, observation.global_pose.y_m - prior.y_m)
-                            yaw_jump = abs((observation.global_pose.yaw_rad - prior.yaw_rad + math.pi) % (2.0 * math.pi) - math.pi)
+                            position_jump = math.hypot(observation.map_pose.x_m - prior.x_m, observation.map_pose.y_m - prior.y_m)
+                            yaw_jump = abs((observation.map_pose.yaw_rad - prior.yaw_rad + math.pi) % (2.0 * math.pi) - math.pi)
                             if position_jump > self.config.d500_localization.max_position_jump_m:
                                 self.d500_abs_reject_position_gate += 1
                                 self._emit("d500_abs_rejected", reason="position_gate", innovation_m=position_jump)
@@ -520,30 +530,42 @@ class RobocupRuntime:
                                 self.d500_abs_reject_yaw_gate += 1
                                 self._emit("d500_abs_rejected", reason="yaw_gate", innovation_yaw_rad=yaw_jump)
                             else:
-                                pose = observation.global_pose
+                                pose = observation.map_pose
                                 accepted_absolute = True
-                                self.d500_abs_accept_count += 1
                         else:
-                            pose = observation.global_pose
+                            pose = observation.map_pose
                             accepted_absolute = True
-                            self.d500_abs_accept_count += 1
                 quality = PoseQuality(
-                    "d500_global" if mode is D500LocalizationMode.GLOBAL else "d500_local",
+                    "d500_wall_absolute" if observation.absolute_observation_accepted else "d500_local_or_propagated",
                     True,
-                    mode is not D500LocalizationMode.GLOBAL,
-                    position_confidence=confidence if mode is D500LocalizationMode.GLOBAL else None,
-                    heading_confidence=confidence if mode is D500LocalizationMode.GLOBAL else None,
+                    not observation.absolute_observation_accepted,
+                    position_confidence=confidence if observation.absolute_observation_accepted else None,
+                    heading_confidence=confidence if observation.absolute_observation_accepted else None,
                     age_s=max(0.0, now_s - observation.timestamp_s),
                 )
                 if accepted_absolute and pose is not None:
                     self.fusion.update_d500_absolute(pose, quality)
-                    if self.fusion.estimate(now_s).d500_accepted:
-                        self._last_d500_global_update_s = observation.timestamp_s
+                    absolute_correction_accepted = self.fusion.estimate(now_s).d500_accepted is True
+                    if absolute_correction_accepted:
+                        self._last_d500_absolute_update_s = observation.timestamp_s
+                        self.d500_abs_accept_count += 1
                     self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, d500_mode=mode.value, confidence=confidence)
+                elif observation.map_pose_valid and observation.map_pose is not None:
+                    self._emit("d500_pose", x_m=observation.map_pose.x_m, y_m=observation.map_pose.y_m, yaw_rad=observation.map_pose.yaw_rad, d500_mode="GLOBAL_PREDICTED", confidence=None)
                 elif observation.local_pose is not None:
-                    self._emit("d500_pose", x_m=observation.local_pose.x_m, y_m=observation.local_pose.y_m, yaw_rad=observation.local_pose.yaw_rad, d500_mode=mode.value, confidence=None)
+                    self._emit("d500_pose", x_m=observation.local_pose.x_m, y_m=observation.local_pose.y_m, yaw_rad=observation.local_pose.yaw_rad, d500_mode=D500LocalizationMode.LOCAL_ONLY.value, confidence=None)
                 else:
                     self._emit("d500_rejected", reason="localization_lost", d500_mode=D500LocalizationMode.LOST.value)
+                now = float(now_s)
+                self._emit(
+                    "d500_localization_status",
+                    d500_map_alignment_established=observation.map_alignment_established,
+                    d500_map_pose_valid=observation.map_pose_valid,
+                    d500_absolute_observation_available=observation.absolute_observation_available,
+                    d500_absolute_observation_accepted=absolute_correction_accepted,
+                    d500_last_absolute_age_s=None if self._last_d500_absolute_update_s is None else max(0.0, now - self._last_d500_absolute_update_s),
+                    d500_last_map_pose_age_s=None if self._last_d500_map_pose_update_s is None else max(0.0, now - self._last_d500_map_pose_update_s),
+                )
 
     def on_d500_update(self, update) -> None:
         """Thread-safe callback passed to the real D500 component."""
@@ -554,13 +576,25 @@ class RobocupRuntime:
         timestamp_s = float(self.clock())
         local_pose = self.radar_adapter.to_map_base_pose(update.odometry.pose, timestamp_s=timestamp_s)
         confidence = update.global_confidence
-        global_pose = None
-        if update.global_is_absolute and update.global_pose is not None:
-            global_pose = self.radar_adapter.to_map_base_pose(update.global_pose, timestamp_s=timestamp_s)
-        mode = D500LocalizationMode.GLOBAL if global_pose is not None else D500LocalizationMode.LOCAL_ONLY
-        self._d500_events.put(D500PoseObservation(local_pose, global_pose, mode, confidence, timestamp_s))
+        map_pose = None
+        if update.map_pose_valid and update.global_pose is not None:
+            map_pose = self.radar_adapter.to_map_base_pose(update.global_pose, timestamp_s=timestamp_s)
+        mode = D500LocalizationMode.GLOBAL if update.map_pose_valid else D500LocalizationMode.LOCAL_ONLY
+        self._d500_events.put(
+            D500PoseObservation(
+                local_pose,
+                map_pose,
+                mode,
+                update.map_alignment_established,
+                update.map_pose_valid,
+                update.absolute_observation_available,
+                update.absolute_observation_accepted,
+                confidence,
+                timestamp_s,
+            )
+        )
         icp = update.odometry.icp
-        diagnostic_pose = update.global_pose if global_pose is not None else update.odometry.pose
+        diagnostic_pose = update.global_pose if update.map_pose_valid and update.global_pose is not None else update.odometry.pose
         self._emit(
             "d500_diagnostic",
             raw_pose_cm=(diagnostic_pose.x_cm, diagnostic_pose.y_cm),
@@ -569,7 +603,11 @@ class RobocupRuntime:
             icp_matched_points=None if icp is None else icp.matched_points,
             icp_iterations=None if icp is None else icp.iterations,
             wall_fusion_status=None if update.wall_fusion is None else update.wall_fusion.status.value,
-            d500_candidate_mode="GLOBAL" if global_pose is not None else "LOCAL_ONLY",
+            d500_candidate_mode=mode.value.upper(),
+            d500_map_alignment_established=update.map_alignment_established,
+            d500_map_pose_valid=update.map_pose_valid,
+            d500_absolute_observation_available=update.absolute_observation_available,
+            d500_absolute_observation_accepted=update.absolute_observation_accepted,
             global_confidence=confidence,
         )
 
@@ -656,8 +694,8 @@ class RobocupRuntime:
         ):
             return True
         return (
-            self._last_d500_global_update_s is not None
-            and now_s - self._last_d500_global_update_s <= self.config.fusion.d500_max_age_s
+            self._last_d500_absolute_update_s is not None
+            and now_s - self._last_d500_absolute_update_s <= self.config.fusion.d500_max_age_s
         )
 
     @staticmethod

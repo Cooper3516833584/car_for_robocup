@@ -74,7 +74,10 @@ def radar_update(*, local_x_cm: float, global_x_cm: float, confidence: float = 0
             rejection_reason=None,
         ),
         global_pose=RadarPose2D(global_x_cm, 0.0, 0.0),
-        global_is_absolute=True,
+        map_alignment_established=True,
+        map_pose_valid=True,
+        absolute_observation_available=True,
+        absolute_observation_accepted=True,
         global_confidence=confidence,
         wall_fusion=None,
     )
@@ -164,7 +167,10 @@ class HardwareFakeIntegrationTests(unittest.TestCase):
         runtime.mission.set_navigation_goal(NavigationGoal(2.0, 0.0))
         local_only = radar_update(local_x_cm=0.0, global_x_cm=0.0)
         local_only.global_pose = None
-        local_only.global_is_absolute = False
+        local_only.map_alignment_established = False
+        local_only.map_pose_valid = False
+        local_only.absolute_observation_available = False
+        local_only.absolute_observation_accepted = False
         local_only.global_confidence = None
         d500.emit(local_only)
         waiting = runtime.step()

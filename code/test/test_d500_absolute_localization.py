@@ -91,7 +91,10 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         update = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 200.0, 0.0), icp=None),
             global_pose=RadarPose2D(150.0, 250.0, 10.0),
-            global_is_absolute=True,
+            map_alignment_established=True,
+            map_pose_valid=True,
+            absolute_observation_available=True,
+            absolute_observation_accepted=True,
             global_confidence=0.9,
             wall_fusion=None,
         )
@@ -103,7 +106,11 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(estimate.pose.yaw_rad, -0.1745329252)
 
         local_runtime = self._runtime()
-        update.global_is_absolute = False
+        update.map_alignment_established = False
+        update.map_pose_valid = False
+        update.absolute_observation_available = False
+        update.absolute_observation_accepted = False
+        update.global_pose = None
         update.global_confidence = None
         local_runtime.on_d500_update(update)
         local_runtime._consume_d500(1.0)
@@ -119,7 +126,10 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         sample = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 100.0, 0.0), icp=None),
             global_pose=RadarPose2D(120.0, 100.0, 0.0),
-            global_is_absolute=True,
+            map_alignment_established=True,
+            map_pose_valid=True,
+            absolute_observation_available=True,
+            absolute_observation_accepted=True,
             global_confidence=0.2,
             wall_fusion=None,
         )
@@ -142,7 +152,10 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         low = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(20.0, 10.0, 0.0), icp=None),
             global_pose=RadarPose2D(420.0, 310.0, -11.4591559),
-            global_is_absolute=True,
+            map_alignment_established=True,
+            map_pose_valid=True,
+            absolute_observation_available=True,
+            absolute_observation_accepted=True,
             global_confidence=0.2,
             wall_fusion=None,
         )
@@ -159,6 +172,52 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(anchored.x_m, 4.2, places=6)
         self.assertAlmostEqual(anchored.y_m, 3.1, places=6)
         self.assertAlmostEqual(anchored.yaw_rad, 0.2, places=6)
+        runtime.close()
+
+    def test_propagated_map_pose_does_not_refresh_absolute_freshness(self) -> None:
+        now = [1.0]
+        config = ready_config()
+        with patch.object(
+            robocup_runtime,
+            "build_differential_drive",
+            side_effect=lambda cfg, **kwargs: fake_drive(cfg, clock=kwargs["clock"]),
+        ):
+            runtime = robocup_runtime.build_runtime(
+                config,
+                RuntimeMode.HARDWARE_MISSION,
+                clock=lambda: now[0],
+            )
+
+        def update(*, absolute: bool, x_cm: float):
+            return types.SimpleNamespace(
+                odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(x_cm, 0.0, 0.0), icp=None),
+                global_pose=RadarPose2D(x_cm, 0.0, 0.0),
+                map_alignment_established=True,
+                map_pose_valid=True,
+                absolute_observation_available=absolute,
+                absolute_observation_accepted=absolute,
+                global_confidence=0.9 if absolute else None,
+                wall_fusion=None,
+            )
+
+        runtime.on_d500_update(update(absolute=True, x_cm=100.0))
+        runtime._consume_d500(now[0])
+        self.assertEqual(runtime._last_d500_absolute_update_s, 1.0)
+        self.assertEqual(runtime._last_d500_map_pose_update_s, 1.0)
+        self.assertTrue(runtime._hardware_global_localization_ready(now[0]))
+
+        now[0] = 1.0 + config.fusion.d500_max_age_s + 0.1
+        runtime.on_d500_update(update(absolute=False, x_cm=110.0))
+        runtime._consume_d500(now[0])
+        self.assertEqual(runtime._last_d500_absolute_update_s, 1.0)
+        self.assertEqual(runtime._last_d500_map_pose_update_s, now[0])
+        self.assertFalse(runtime._hardware_global_localization_ready(now[0]))
+
+        now[0] = 3.0
+        runtime.on_d500_update(update(absolute=True, x_cm=100.0))
+        runtime._consume_d500(now[0])
+        self.assertEqual(runtime._last_d500_absolute_update_s, 3.0)
+        self.assertTrue(runtime._hardware_global_localization_ready(now[0]))
         runtime.close()
 
 

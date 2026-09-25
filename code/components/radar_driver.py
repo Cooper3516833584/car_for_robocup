@@ -1599,12 +1599,17 @@ class DroneGlobalPointMap:
 
 @dataclass(frozen=True, slots=True)
 class RadarLocalizationUpdate:
+    """One ICP update with map validity separate from a fresh wall correction."""
+
     scan: RadarScan
     odometry: RadarOdometryUpdate
     global_pose: Pose2D | None
     global_points_cm: tuple[tuple[float, float], ...] = field(default_factory=tuple)
     wall_fusion: WallFusionResult | None = None
-    global_is_absolute: bool = False
+    map_alignment_established: bool = False
+    map_pose_valid: bool = False
+    absolute_observation_available: bool = False
+    absolute_observation_accepted: bool = False
     global_confidence: float | None = None
 
 
@@ -1786,7 +1791,6 @@ class D500RadarComponent:
         self._state_lock = threading.RLock()
         self._wall_scan_count = 0
         self._wall_attempt_index = 0
-        self._absolute_alignment_established = False
         self._wall_x_residual_history: deque[_WallResidualSample] = deque(
             maxlen=wall_fusion_config.consistency_history_size
         )
@@ -1860,7 +1864,6 @@ class D500RadarComponent:
             self.wall_fusion_config = fusion_config
             self._wall_scan_count = 0
             self._wall_attempt_index = 0
-            self._absolute_alignment_established = False
             self._reset_wall_residual_history(fusion_config)
             return self.wall_localizer
 
@@ -1872,7 +1875,6 @@ class D500RadarComponent:
             self._wall_x_residual_history.clear()
             self._wall_y_residual_history.clear()
             self._wall_yaw_residual_history.clear()
-            self._absolute_alignment_established = False
 
     def _reset_wall_residual_history(self, config: WallFusionConfig) -> None:
         self._wall_x_residual_history = deque(
@@ -2109,7 +2111,6 @@ class D500RadarComponent:
                                 status=WallFusionStatus.HARD_REJECTED,
                             )
                         if wall_fusion.accepted:
-                            self._absolute_alignment_established = True
                             global_pose = wall_fusion.fused_global_pose
                             if self.global_correction_mode is GlobalCorrectionMode.LEGACY_REWRITE_ODOMETRY:
                                 corrected_local_pose = alignment.pose_to_local(global_pose)
@@ -2138,15 +2139,25 @@ class D500RadarComponent:
                     )
                     self.global_map.add_points(global_points)
             with self._state_lock:
-                global_is_absolute = self._absolute_alignment_established
+                map_alignment_established = self._alignment is not None
+            map_pose_valid = bool(odometry_update.accepted and map_alignment_established and global_pose is not None)
+            absolute_observation_available = bool(
+                wall_fusion is not None and wall_fusion.observation is not None
+            )
+            absolute_observation_accepted = bool(
+                wall_fusion is not None and wall_fusion.accepted
+            )
             update = RadarLocalizationUpdate(
                 scan,
                 odometry_update,
                 global_pose,
                 global_points,
                 wall_fusion,
-                global_is_absolute,
-                _wall_pose_confidence(wall_fusion) if wall_fusion is not None and wall_fusion.accepted else (0.70 if global_is_absolute else None),
+                map_alignment_established,
+                map_pose_valid,
+                absolute_observation_available,
+                absolute_observation_accepted,
+                _wall_pose_confidence(wall_fusion) if absolute_observation_accepted else None,
             )
             updates.append(update)
             _safe_callback(self.on_update, update)

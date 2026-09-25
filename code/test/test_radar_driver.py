@@ -621,6 +621,12 @@ class WallLineFusionTests(unittest.TestCase):
         self.assertFalse(first.wall_fusion.accepted)
         self.assertFalse(second.wall_fusion.accepted)
         self.assertTrue(third.wall_fusion.accepted)
+        self.assertTrue(first.map_alignment_established)
+        self.assertTrue(first.map_pose_valid)
+        self.assertFalse(first.absolute_observation_accepted)
+        self.assertTrue(third.map_pose_valid)
+        self.assertTrue(third.absolute_observation_available)
+        self.assertTrue(third.absolute_observation_accepted)
 
     def test_moving_absolute_observations_accept_stable_residual(self) -> None:
         identity = DroneGlobalAlignment(0.0, 0.0, 0.0)
