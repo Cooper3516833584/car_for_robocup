@@ -14,6 +14,11 @@ from config.v2_runtime import RuntimeMode, runtime_constraints, validate_runtime
 
 
 class ConfigV2Tests(unittest.TestCase):
+    def test_differential_navigator_factory_has_one_definition(self) -> None:
+        factory = Path(__file__).resolve().parents[1] / "config" / "v2_factory.py"
+        source = factory.read_text(encoding="utf-8")
+        self.assertEqual(source.count("def build_differential_navigator("), 1)
+
     def test_example_loads_as_schema_v2(self) -> None:
         config = load_v2_config(DEFAULT_V2_CONFIG)
         self.assertEqual(config.schema_version, 2)

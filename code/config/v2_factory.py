@@ -96,14 +96,6 @@ def build_differential_navigator(config: DifferentialRobotConfig):
     return DifferentialNavigator(config.geometry, config.drive, config.navigation)
 
 
-def build_differential_navigator(config: DifferentialRobotConfig):
-    """Build the pure planner/controller from validated v2 models."""
-
-    from components.differential_navigation import DifferentialNavigator
-
-    return DifferentialNavigator(config.geometry, config.drive, config.navigation)
-
-
 def build_competition_world(config: DifferentialRobotConfig):
     """Build the configured static competition map without hardware side effects."""
 
