@@ -155,6 +155,32 @@ class HardwareFakeIntegrationTests(unittest.TestCase):
         self.assertTrue(runtime.drive.backend.stopped)
         runtime.close()
 
+    def test_required_global_pose_blocks_local_only_motion_until_wall_anchor(self) -> None:
+        clock = FakeClock(25.0)
+        t265 = FakeT265([t265_sample(25.0)])
+        d500 = FakeD500()
+        runtime = self.build_runtime(clock, t265, d500)
+        runtime.start()
+        runtime.mission.set_navigation_goal(NavigationGoal(2.0, 0.0))
+        local_only = radar_update(local_x_cm=0.0, global_x_cm=0.0)
+        local_only.global_pose = None
+        local_only.global_is_absolute = False
+        local_only.global_confidence = None
+        d500.emit(local_only)
+        waiting = runtime.step()
+        self.assertIsNone(waiting.error)
+        self.assertIsNone(waiting.navigation)
+        self.assertFalse(runtime.drive.is_running)
+
+        clock.advance(0.05)
+        t265.samples.append(t265_sample(clock()))
+        d500.emit(radar_update(local_x_cm=0.0, global_x_cm=0.0))
+        anchored = runtime.step()
+        self.assertIsNone(anchored.error)
+        self.assertIsNotNone(anchored.navigation)
+        self.assertTrue(runtime.drive.backend.commands)
+        runtime.close()
+
     def test_competition_map_builder_failure_refuses_runtime(self) -> None:
         config = ready_config()
         clock = FakeClock(40.0)

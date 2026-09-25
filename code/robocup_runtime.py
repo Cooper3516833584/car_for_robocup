@@ -214,6 +214,8 @@ class RobocupRuntime:
         self.d500_abs_reject_low_confidence = 0
         self.d500_abs_reject_position_gate = 0
         self.d500_abs_reject_yaw_gate = 0
+        self._last_d500_global_update_s: float | None = None
+        self._d500_global_pending = False
         self._started = False
         self._closed = False
         self._error: str | None = None
@@ -253,10 +255,10 @@ class RobocupRuntime:
             raise ValueError("runtime clock must be finite monotonic time")
         self._current_step_s = now
         watchdog_stops = self.drive.watchdog_stop_count
+        navigation_output: NavigationOutput | None = None
         if watchdog_stops > self._last_watchdog_stop_count:
             self._emit("safety", event_code="WATCHDOG_STOP", count=watchdog_stops - self._last_watchdog_stop_count, priority=True)
             self._last_watchdog_stop_count = watchdog_stops
-        navigation_output: NavigationOutput | None = None
         try:
             self._consume_t265(now)
             self._consume_d500(now)
@@ -277,9 +279,13 @@ class RobocupRuntime:
                 rejection_reason=estimate.rejection_reason,
             )
             localization_loss_pending = self._handle_localization(estimate, now)
+            d500_global_pending = not self._hardware_global_localization_ready(now)
+            if d500_global_pending and not self._d500_global_pending:
+                self._emit("safety", event_code="D500_GLOBAL_PENDING", state=self.mission.state.value, priority=True)
+            self._d500_global_pending = d500_global_pending
 
             command = Twist2D(0.0, 0.0)
-            if not localization_loss_pending and self.mode is not RuntimeMode.HARDWARE_PROBE and self.mission.state in {
+            if not localization_loss_pending and not d500_global_pending and self.mode is not RuntimeMode.HARDWARE_PROBE and self.mission.state in {
                 RobocupMissionState.NAVIGATING,
                 RobocupMissionState.RETURNING,
             }:
@@ -324,15 +330,18 @@ class RobocupRuntime:
                         priority=True,
                     )
                     self._last_safety_state = self.mission.state
-            elif localization_loss_pending:
+            elif localization_loss_pending or d500_global_pending:
                 command = Twist2D(0.0, 0.0)
                 if self.drive.is_running:
                     self.drive.stop()
                 self._emit(
                     "safety",
-                    event_code="POSE_LOSS_PENDING",
+                    event_code="POSE_LOSS_PENDING" if localization_loss_pending else "D500_GLOBAL_PENDING",
                     state=self.mission.state.value,
-                    elapsed_s=0.0 if self._pose_lost_since_s is None else max(0.0, now - self._pose_lost_since_s),
+                    elapsed_s=(
+                        0.0 if self._pose_lost_since_s is None
+                        else max(0.0, now - self._pose_lost_since_s)
+                    ) if localization_loss_pending else None,
                 )
             elif self.mode is RuntimeMode.HARDWARE_PROBE:
                 command = Twist2D(0.0, 0.0)
@@ -519,6 +528,8 @@ class RobocupRuntime:
                     age_s=max(0.0, now_s - observation.timestamp_s),
                 )
                 self.fusion.update_d500(pose, quality)
+                if mode == "GLOBAL" and self.fusion.estimate(now_s).d500_accepted:
+                    self._last_d500_global_update_s = observation.timestamp_s
                 self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, d500_mode=mode, confidence=confidence)
 
     def on_d500_update(self, update) -> None:
@@ -544,7 +555,7 @@ class RobocupRuntime:
             icp_matched_points=None if icp is None else icp.matched_points,
             icp_iterations=None if icp is None else icp.iterations,
             wall_fusion_status=None if update.wall_fusion is None else update.wall_fusion.status.value,
-            d500_mode="GLOBAL" if global_pose is not None else "LOCAL_ONLY",
+            d500_candidate_mode="GLOBAL" if global_pose is not None else "LOCAL_ONLY",
             global_confidence=confidence,
         )
 
@@ -622,6 +633,18 @@ class RobocupRuntime:
             return True
         self.mission.on_localization(estimate)
         return False
+
+    def _hardware_global_localization_ready(self, now_s: float) -> bool:
+        if (
+            self.mode is not RuntimeMode.HARDWARE_MISSION
+            or not self.config.d500.enabled
+            or not self.config.d500_localization.require_global_for_hardware
+        ):
+            return True
+        return (
+            self._last_d500_global_update_s is not None
+            and now_s - self._last_d500_global_update_s <= self.config.fusion.d500_max_age_s
+        )
 
     @staticmethod
     def _stop_source(source) -> None:
