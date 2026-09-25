@@ -51,3 +51,9 @@ git diff --check
 ```
 
 Rerun relevant kinematics, backend, frame adapter, fusion, navigation, config, and watchdog tests after changing those layers. Keep real hardware tests out of default unit discovery. One migration step per commit; do not run destructive reset/clean commands, rewrite remotes, or push without direct instruction.
+
+## Temporary scripts and workspace layout
+
+Paths in this file are relative to the repository root.
+
+Put temporary, throwaway, and one-off scripts (SSH helpers, hardware probes, scratch automation) in the untracked `tools/` directory next to the repository checkout. Do not put them in the repository working tree, including its committed `tools/`, and remove them once they are no longer needed. The test command above still runs from the repository root.
