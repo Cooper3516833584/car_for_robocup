@@ -67,6 +67,14 @@ class FakeD500PoseSample:
     timestamp_s: float
 
 
+@dataclass(frozen=True, slots=True)
+class D500PoseObservation:
+    local_pose: Pose2D
+    global_pose: Pose2D | None
+    confidence: float | None
+    timestamp_s: float
+
+
 class FakeD500PoseSource:
     """Small deterministic legacy-pose source for dry-run and unit tests."""
 
@@ -198,7 +206,11 @@ class RobocupRuntime:
         self._current_step_s: float | None = None
         self._last_safety_state: RobocupMissionState | None = None
         self._last_watchdog_stop_count = drive.watchdog_stop_count
-        self._d500_events: queue.SimpleQueue[tuple[object, float]] = queue.SimpleQueue()
+        self._d500_events: queue.SimpleQueue[D500PoseObservation] = queue.SimpleQueue()
+        self.d500_abs_accept_count = 0
+        self.d500_abs_reject_low_confidence = 0
+        self.d500_abs_reject_position_gate = 0
+        self.d500_abs_reject_yaw_gate = 0
         self._started = False
         self._closed = False
         self._error: str | None = None
@@ -455,30 +467,72 @@ class RobocupRuntime:
         else:
             while True:
                 try:
-                    legacy_pose, timestamp_s = self._d500_events.get_nowait()
+                    observation = self._d500_events.get_nowait()
                 except queue.Empty:
                     break
-                pose = self.radar_adapter.to_map_base_pose(legacy_pose, timestamp_s=timestamp_s)
-                self.fusion.update_d500(pose, PoseQuality("d500", True, False, age_s=max(0.0, now_s - timestamp_s)))
-                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad)
+                mode = "LOCAL_ONLY"
+                pose = observation.local_pose
+                confidence = None
+                if observation.global_pose is not None:
+                    confidence = observation.confidence
+                    if confidence is None or confidence < self.config.d500_localization.min_confidence:
+                        self.d500_abs_reject_low_confidence += 1
+                        self._emit("d500_abs_rejected", reason="low_confidence", confidence=confidence)
+                    else:
+                        prior = self.fusion.estimate(now_s).pose
+                        if prior is not None:
+                            position_jump = math.hypot(observation.global_pose.x_m - prior.x_m, observation.global_pose.y_m - prior.y_m)
+                            yaw_jump = abs((observation.global_pose.yaw_rad - prior.yaw_rad + math.pi) % (2.0 * math.pi) - math.pi)
+                            if position_jump > self.config.d500_localization.max_position_jump_m:
+                                self.d500_abs_reject_position_gate += 1
+                                self._emit("d500_abs_rejected", reason="position_gate", innovation_m=position_jump)
+                            elif yaw_jump > self.config.d500_localization.max_yaw_jump_rad:
+                                self.d500_abs_reject_yaw_gate += 1
+                                self._emit("d500_abs_rejected", reason="yaw_gate", innovation_yaw_rad=yaw_jump)
+                            else:
+                                pose = observation.global_pose
+                                mode = "GLOBAL"
+                                self.d500_abs_accept_count += 1
+                        else:
+                            pose = observation.global_pose
+                            mode = "GLOBAL"
+                            self.d500_abs_accept_count += 1
+                quality = PoseQuality(
+                    "d500_global" if mode == "GLOBAL" else "d500_local",
+                    True,
+                    mode != "GLOBAL",
+                    position_confidence=confidence if mode == "GLOBAL" else None,
+                    heading_confidence=confidence if mode == "GLOBAL" else None,
+                    age_s=max(0.0, now_s - observation.timestamp_s),
+                )
+                self.fusion.update_d500(pose, quality)
+                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, d500_mode=mode, confidence=confidence)
 
     def on_d500_update(self, update) -> None:
         """Thread-safe callback passed to the real D500 component."""
 
         if not update.odometry.accepted:
-            self._emit("d500_rejected", reason=update.odometry.rejection_reason or "odometry_rejected", priority=True)
+            self._emit("d500_rejected", reason=update.odometry.rejection_reason or "odometry_rejected", d500_mode="LOST", priority=True)
             return
-        pose = update.global_pose or update.odometry.pose
-        self._d500_events.put((pose, float(self.clock())))
+        timestamp_s = float(self.clock())
+        local_pose = self.radar_adapter.to_map_base_pose(update.odometry.pose, timestamp_s=timestamp_s)
+        confidence = update.global_confidence
+        global_pose = None
+        if update.global_is_absolute and update.global_pose is not None:
+            global_pose = self.radar_adapter.to_map_base_pose(update.global_pose, timestamp_s=timestamp_s)
+        self._d500_events.put(D500PoseObservation(local_pose, global_pose, confidence, timestamp_s))
         icp = update.odometry.icp
+        diagnostic_pose = update.global_pose if global_pose is not None else update.odometry.pose
         self._emit(
             "d500_diagnostic",
-            raw_pose_cm=(pose.x_cm, pose.y_cm),
-            raw_yaw_cw_deg=pose.yaw_cw_deg,
+            raw_pose_cm=(diagnostic_pose.x_cm, diagnostic_pose.y_cm),
+            raw_yaw_cw_deg=diagnostic_pose.yaw_cw_deg,
             icp_mean_error_cm=None if icp is None else icp.mean_error_cm,
             icp_matched_points=None if icp is None else icp.matched_points,
             icp_iterations=None if icp is None else icp.iterations,
             wall_fusion_status=None if update.wall_fusion is None else update.wall_fusion.status.value,
+            d500_mode="GLOBAL" if global_pose is not None else "LOCAL_ONLY",
+            global_confidence=confidence,
         )
 
     def _consume_replay(self, now_s: float) -> None:
@@ -594,7 +648,16 @@ def build_runtime(
     else:
         t265_source = RealSenseT265PoseSource(config.t265.serial) if config.t265.enabled else None
         if config.d500.enabled:
-            from components.radar_driver import D500RadarComponent, RadarMount
+            from components.radar_driver import (
+                D500RadarComponent,
+                DroneGlobalAlignment,
+                GlobalCorrectionMode,
+                RadarMount,
+                WallFusionConfig,
+                WallLineConfig,
+                WallLineLocalizer,
+            )
+            from localization.field_reference import build_field_wall_reference
 
             mount = RadarMount(
                 x_forward_cm=config.d500_mount.x_m * 100.0,
@@ -604,8 +667,16 @@ def build_runtime(
             d500_source = D500RadarComponent(
                 port=config.d500.port,
                 mount=mount,
+                alignment=DroneGlobalAlignment(0.0, 0.0, 0.0) if config.d500_localization.enable_wall_absolute else None,
                 on_update=None,
+                global_correction_mode=GlobalCorrectionMode.UPDATE_ALIGNMENT,
             )
+            if config.d500_localization.enable_wall_absolute:
+                d500_source.enable_wall_fusion(
+                    build_field_wall_reference(config.d500_localization),
+                    line_config=WallLineConfig(),
+                    fusion_config=WallFusionConfig.car_slow_drift(),
+                )
         else:
             d500_source = None
         d500_fake = False

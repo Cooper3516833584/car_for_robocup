@@ -58,6 +58,7 @@ class ConfigV2Tests(unittest.TestCase):
             "c10b_diff_firmware_verified = false": "c10b_diff_firmware_verified = true",
             "measured = false\nstatic_obstacles = []": "measured = true\nstatic_obstacles = []",
             "safety_margin_m = 0.10\nmeasured = false": "safety_margin_m = 0.10\nmeasured = true",
+            "reference_measured = false": "reference_measured = true",
             'protocol_mode = "ackermann_firmware_compat"': 'protocol_mode = "differential_vx_vz"',
         })
         self.assertEqual(validate_runtime_readiness(config, RuntimeMode.HARDWARE_MISSION), [])

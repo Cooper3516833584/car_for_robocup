@@ -118,6 +118,36 @@ class D500Config:
 
 
 @dataclass(frozen=True, slots=True)
+class D500LocalizationConfig:
+    enable_icp: bool
+    enable_wall_absolute: bool
+    require_global_for_hardware: bool
+    reference_measured: bool
+    field_width_m: float
+    field_height_m: float
+    back_wall_x_m: float = 0.0
+    right_wall_y_m: float = 0.0
+    use_front_wall: bool = False
+    use_left_wall: bool = False
+    min_confidence: float = 0.65
+    max_position_jump_m: float = 0.50
+    max_yaw_jump_rad: float = 0.35
+
+    def __post_init__(self) -> None:
+        if not self.enable_icp:
+            raise ConfigV2Error("sensors.d500.localization.enable_icp must remain true for D500 pose output")
+        _positive("sensors.d500.localization.field_width_m", self.field_width_m)
+        _positive("sensors.d500.localization.field_height_m", self.field_height_m)
+        _finite("sensors.d500.localization.back_wall_x_m", self.back_wall_x_m)
+        _finite("sensors.d500.localization.right_wall_y_m", self.right_wall_y_m)
+        confidence = _finite("sensors.d500.localization.min_confidence", self.min_confidence)
+        if not 0.0 <= confidence <= 1.0:
+            raise ConfigV2Error("sensors.d500.localization.min_confidence must be in [0, 1]")
+        _positive("sensors.d500.localization.max_position_jump_m", self.max_position_jump_m)
+        _positive("sensors.d500.localization.max_yaw_jump_rad", self.max_yaw_jump_rad)
+
+
+@dataclass(frozen=True, slots=True)
 class T265Config:
     enabled: bool
     serial: str
@@ -219,6 +249,7 @@ class SafetyConfig:
     require_measured_extrinsics_for_hardware_mission: bool = True
     require_measured_map_for_hardware_mission: bool = True
     require_measured_footprint_for_hardware_mission: bool = True
+    require_measured_d500_reference_for_hardware_mission: bool = True
 
     def __post_init__(self) -> None:
         _positive("safety.stop_if_pose_lost_s", self.stop_if_pose_lost_s)
@@ -235,6 +266,7 @@ class DifferentialRobotConfig:
     drive: DifferentialDriveConfig
     c10b: C10BConfig
     d500: D500Config
+    d500_localization: D500LocalizationConfig
     d500_mount: SensorMount3DConfig
     t265: T265Config
     t265_mount: SensorMount3DConfig

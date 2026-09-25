@@ -38,6 +38,13 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
     if config.safety.require_measured_footprint_for_hardware_mission and not config.footprint.measured:
         errors.append("hardware mission requires a measured robot footprint")
     if (
+        config.d500.enabled
+        and config.d500_localization.require_global_for_hardware
+        and config.safety.require_measured_d500_reference_for_hardware_mission
+        and not config.d500_localization.reference_measured
+    ):
+        errors.append("hardware mission requires a measured D500 field reference")
+    if (
         config.safety.require_verified_c10b_diff_firmware_for_curved_motion
         and config.drive.protocol_mode == "differential_vx_vz"
         and not config.calibration.c10b_diff_firmware_verified

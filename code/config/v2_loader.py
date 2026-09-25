@@ -20,6 +20,7 @@ from .v2_models import (
     DifferentialDriveConfig,
     DifferentialGeometryConfig,
     DifferentialRobotConfig,
+    D500LocalizationConfig,
     FusionConfig,
     FootprintConfig,
     NavigationConfig,
@@ -87,8 +88,8 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         raise ConfigV2Error("sensors must contain [sensors.d500] and [sensors.t265]")
     d500_sensor = _table(sensors, "d500", "sensors.d500")
     t265_sensor = _table(sensors, "t265", "sensors.t265")
-    if set(d500_sensor) != {"mount"} or set(t265_sensor) != {"mount"}:
-        raise ConfigV2Error("each sensor table must contain exactly one [mount] table")
+    if set(d500_sensor) != {"mount", "localization"} or set(t265_sensor) != {"mount"}:
+        raise ConfigV2Error("D500 sensor config requires [mount] and [localization]; T265 requires [mount]")
 
     navigation_table = _table(document, "navigation", "navigation")
     navigation_map = _table(navigation_table, "map", "navigation.map")
@@ -103,6 +104,11 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         drive=_build(DifferentialDriveConfig, _table(vehicle, "drive", "vehicle.drive"), "vehicle.drive"),
         c10b=_build(C10BConfig, _table(devices, "c10b", "devices.c10b"), "devices.c10b"),
         d500=_build(D500Config, _table(devices, "d500", "devices.d500"), "devices.d500"),
+        d500_localization=_build(
+            D500LocalizationConfig,
+            _table(d500_sensor, "localization", "sensors.d500.localization"),
+            "sensors.d500.localization",
+        ),
         d500_mount=_build(SensorMount3DConfig, _table(d500_sensor, "mount", "sensors.d500.mount"), "sensors.d500.mount"),
         t265=_build(T265Config, _table(devices, "t265", "devices.t265"), "devices.t265"),
         t265_mount=_build(SensorMount3DConfig, _table(t265_sensor, "mount", "sensors.t265.mount"), "sensors.t265.mount"),
