@@ -111,8 +111,4 @@ def build_competition_world(config: DifferentialRobotConfig):
         static_obstacles=map_config.static_obstacles,
         allowed_regions=map_config.allowed_regions,
     )
-    return build_competition_navigation_grid(
-        spec,
-        config.footprint.robot_radius_m,
-        config.footprint.safety_margin_m,
-    )
+    return build_competition_navigation_grid(spec)

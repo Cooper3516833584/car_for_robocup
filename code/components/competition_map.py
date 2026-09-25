@@ -21,10 +21,8 @@ class CompetitionMapSpec:
 
 def build_competition_navigation_grid(
     spec: CompetitionMapSpec,
-    robot_radius_m: float,
-    safety_margin_m: float,
 ) -> NavigationGrid:
-    """Create a grid with obstacle/allowed-region occupancy and conservative inflation.
+    """Rasterize physical map occupancy without applying robot clearance.
 
     Rectangles are ``(x_min, y_min, x_max, y_max)`` in map metres. The outer
     cell ring is blocked so planned robot centers cannot travel along the map edge.
@@ -35,10 +33,6 @@ def build_competition_navigation_grid(
         raise ValueError("map dimensions and resolution must be finite and positive")
     if not all(math.isfinite(value) for value in (spec.origin_x_m, spec.origin_y_m)):
         raise ValueError("map origin must be finite")
-    if not math.isfinite(robot_radius_m) or robot_radius_m < 0.0:
-        raise ValueError("robot radius must be finite and non-negative")
-    if not math.isfinite(safety_margin_m) or safety_margin_m < 0.0:
-        raise ValueError("safety margin must be finite and non-negative")
     width_f = spec.width_m / spec.resolution_m
     height_f = spec.height_m / spec.resolution_m
     width, height = round(width_f), round(height_f)
@@ -54,7 +48,7 @@ def build_competition_navigation_grid(
         origin_y_m=spec.origin_y_m,
     )
     min_x, min_y, max_x, max_y = raw.bounds
-    raw_blocked: set[tuple[int, int]] = set()
+    blocked: set[tuple[int, int]] = set()
     for y in range(height):
         for x in range(width):
             cell = (x, y)
@@ -63,19 +57,7 @@ def build_competition_navigation_grid(
             outside_allowed = bool(allowed) and not any(_contains(rect, wx, wy) for rect in allowed)
             inside_obstacle = any(_contains(rect, wx, wy) for rect in obstacles)
             if on_boundary or outside_allowed or inside_obstacle:
-                raw_blocked.add(cell)
-
-    inflate = robot_radius_m + safety_margin_m
-    blocked = set(raw_blocked)
-    if inflate:
-        cells = math.ceil(inflate / spec.resolution_m)
-        for ox, oy in raw_blocked:
-            cx, cy = raw.cell_to_world((ox, oy))
-            for y in range(max(0, oy - cells), min(height, oy + cells + 1)):
-                for x in range(max(0, ox - cells), min(width, ox + cells + 1)):
-                    wx, wy = raw.cell_to_world((x, y))
-                    if math.hypot(wx - cx, wy - cy) <= inflate + spec.resolution_m * math.sqrt(2.0) / 2.0:
-                        blocked.add((x, y))
+                blocked.add(cell)
     return NavigationGrid(
         width,
         height,

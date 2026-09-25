@@ -112,8 +112,6 @@ allowed_regions = []
 
 [navigation.footprint]
 # Provisional placeholder only; keep measured=false until the robot is measured.
-robot_radius_m = 0.30
-safety_margin_m = 0.10
 measured = false
 
 [safety]

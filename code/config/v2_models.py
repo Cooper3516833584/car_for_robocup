@@ -229,14 +229,7 @@ class CompetitionMapConfig:
 
 @dataclass(frozen=True, slots=True)
 class FootprintConfig:
-    robot_radius_m: float
-    safety_margin_m: float
     measured: bool
-
-    def __post_init__(self) -> None:
-        _positive("navigation.footprint.robot_radius_m", self.robot_radius_m)
-        if _finite("navigation.footprint.safety_margin_m", self.safety_margin_m) < 0.0:
-            raise ConfigV2Error("navigation.footprint.safety_margin_m must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
