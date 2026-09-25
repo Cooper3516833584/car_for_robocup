@@ -510,7 +510,7 @@ class RobocupRuntime:
                         self._emit("d500_abs_rejected", reason="low_confidence", confidence=confidence)
                     else:
                         prior = self.fusion.estimate(now_s).pose
-                        if prior is not None:
+                        if self.fusion.global_anchor_established and prior is not None:
                             position_jump = math.hypot(observation.global_pose.x_m - prior.x_m, observation.global_pose.y_m - prior.y_m)
                             yaw_jump = abs((observation.global_pose.yaw_rad - prior.yaw_rad + math.pi) % (2.0 * math.pi) - math.pi)
                             if position_jump > self.config.d500_localization.max_position_jump_m:

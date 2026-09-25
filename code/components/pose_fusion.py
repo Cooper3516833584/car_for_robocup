@@ -63,6 +63,7 @@ class PoseFusion:
         self._d500_pose: Pose2D | None = None
         self._d500_quality: PoseQuality | None = None
         self._map_T_t265_odom: Pose2D | None = None
+        self._global_anchor_established = False
         self._last_d500_innovation_m: float | None = None
         self._last_d500_innovation_yaw_rad: float | None = None
         self._last_d500_accepted: bool | None = None
@@ -73,6 +74,10 @@ class PoseFusion:
     @property
     def map_T_t265_odom(self) -> Pose2D | None:
         return self._map_T_t265_odom
+
+    @property
+    def global_anchor_established(self) -> bool:
+        return self._global_anchor_established
 
     def update_t265(self, pose: Pose2D, quality: PoseQuality) -> None:
         if not _pose_valid(pose, quality):
@@ -85,6 +90,7 @@ class PoseFusion:
                 self._map_T_t265_odom = compose_pose2d(
                     self._d500_pose, inverse_pose2d(pose)
                 )
+                self._global_anchor_established = True
                 self._last_d500_accepted = True
                 self._last_d500_rejection = None
 
@@ -227,6 +233,7 @@ class PoseFusion:
     def _accept_d500(self, pose: Pose2D, quality: PoseQuality) -> None:
         self._d500_pose = pose
         self._d500_quality = quality
+        self._global_anchor_established = True
         self._last_d500_accepted = True
         self._last_d500_rejection = None
 

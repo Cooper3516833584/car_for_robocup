@@ -16,6 +16,7 @@ from components.radar_driver import GlobalCorrectionMode, Pose2D as RadarPose2D
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D, PoseQuality
+from core.frames import compose_pose2d
 from localization.field_reference import build_field_wall_reference
 import robocup_runtime
 
@@ -132,6 +133,32 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         runtime.on_d500_update(sample)
         runtime._consume_d500(1.0)
         self.assertEqual(runtime.d500_abs_reject_position_gate, 1)
+        runtime.close()
+
+    def test_first_reliable_global_pose_anchors_across_local_odom_origin(self) -> None:
+        runtime = self._runtime()
+        odom_pose = Pose2D(0.2, 0.1, 0.0, 1.0)
+        runtime.fusion.update_t265(odom_pose, PoseQuality("t265", True, False))
+        low = types.SimpleNamespace(
+            odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(20.0, 10.0, 0.0), icp=None),
+            global_pose=RadarPose2D(420.0, 310.0, -11.4591559),
+            global_is_absolute=True,
+            global_confidence=0.2,
+            wall_fusion=None,
+        )
+        runtime.on_d500_update(low)
+        runtime._consume_d500(1.0)
+        self.assertFalse(runtime.fusion.global_anchor_established)
+
+        low.global_confidence = 0.9
+        runtime.on_d500_update(low)
+        runtime._consume_d500(1.0)
+        self.assertTrue(runtime.fusion.global_anchor_established)
+        self.assertEqual(runtime.d500_abs_accept_count, 1)
+        anchored = compose_pose2d(runtime.fusion.map_T_t265_odom, odom_pose)
+        self.assertAlmostEqual(anchored.x_m, 4.2, places=6)
+        self.assertAlmostEqual(anchored.y_m, 3.1, places=6)
+        self.assertAlmostEqual(anchored.yaw_rad, 0.2, places=6)
         runtime.close()
 
 
