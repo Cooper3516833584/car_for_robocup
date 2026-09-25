@@ -37,6 +37,12 @@ class RuntimeReadinessError(RuntimeError):
     """The configured robot is not ready for the requested runtime mode."""
 
 
+class D500LocalizationMode(Enum):
+    GLOBAL = "global"
+    LOCAL_ONLY = "local_only"
+    LOST = "lost"
+
+
 class RobocupMissionState(Enum):
     INIT = "init"
     WAIT_FOR_LOCALIZATION = "wait_for_localization"
@@ -69,8 +75,9 @@ class FakeD500PoseSample:
 
 @dataclass(frozen=True, slots=True)
 class D500PoseObservation:
-    local_pose: Pose2D
+    local_pose: Pose2D | None
     global_pose: Pose2D | None
+    mode: D500LocalizationMode
     confidence: float | None
     timestamp_s: float
 
@@ -484,7 +491,7 @@ class RobocupRuntime:
             sample = self.d500_source.read()
             if sample is not None:
                 pose = self.radar_adapter.to_map_base_pose(sample, timestamp_s=sample.timestamp_s)
-                self.fusion.update_d500(pose, PoseQuality("d500", True, False, age_s=max(0.0, now_s - sample.timestamp_s)))
+                self.fusion.update_d500_absolute(pose, PoseQuality("d500", True, False, age_s=max(0.0, now_s - sample.timestamp_s)))
                 self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad)
         else:
             while True:
@@ -492,10 +499,11 @@ class RobocupRuntime:
                     observation = self._d500_events.get_nowait()
                 except queue.Empty:
                     break
-                mode = "LOCAL_ONLY"
-                pose = observation.local_pose
+                mode = observation.mode
                 confidence = None
-                if observation.global_pose is not None:
+                pose = None
+                accepted_absolute = False
+                if mode is D500LocalizationMode.GLOBAL and observation.global_pose is not None:
                     confidence = observation.confidence
                     if confidence is None or confidence < self.config.d500_localization.min_confidence:
                         self.d500_abs_reject_low_confidence += 1
@@ -513,24 +521,29 @@ class RobocupRuntime:
                                 self._emit("d500_abs_rejected", reason="yaw_gate", innovation_yaw_rad=yaw_jump)
                             else:
                                 pose = observation.global_pose
-                                mode = "GLOBAL"
+                                accepted_absolute = True
                                 self.d500_abs_accept_count += 1
                         else:
                             pose = observation.global_pose
-                            mode = "GLOBAL"
+                            accepted_absolute = True
                             self.d500_abs_accept_count += 1
                 quality = PoseQuality(
-                    "d500_global" if mode == "GLOBAL" else "d500_local",
+                    "d500_global" if mode is D500LocalizationMode.GLOBAL else "d500_local",
                     True,
-                    mode != "GLOBAL",
-                    position_confidence=confidence if mode == "GLOBAL" else None,
-                    heading_confidence=confidence if mode == "GLOBAL" else None,
+                    mode is not D500LocalizationMode.GLOBAL,
+                    position_confidence=confidence if mode is D500LocalizationMode.GLOBAL else None,
+                    heading_confidence=confidence if mode is D500LocalizationMode.GLOBAL else None,
                     age_s=max(0.0, now_s - observation.timestamp_s),
                 )
-                self.fusion.update_d500(pose, quality)
-                if mode == "GLOBAL" and self.fusion.estimate(now_s).d500_accepted:
-                    self._last_d500_global_update_s = observation.timestamp_s
-                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, d500_mode=mode, confidence=confidence)
+                if accepted_absolute and pose is not None:
+                    self.fusion.update_d500_absolute(pose, quality)
+                    if self.fusion.estimate(now_s).d500_accepted:
+                        self._last_d500_global_update_s = observation.timestamp_s
+                    self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, d500_mode=mode.value, confidence=confidence)
+                elif observation.local_pose is not None:
+                    self._emit("d500_pose", x_m=observation.local_pose.x_m, y_m=observation.local_pose.y_m, yaw_rad=observation.local_pose.yaw_rad, d500_mode=mode.value, confidence=None)
+                else:
+                    self._emit("d500_rejected", reason="localization_lost", d500_mode=D500LocalizationMode.LOST.value)
 
     def on_d500_update(self, update) -> None:
         """Thread-safe callback passed to the real D500 component."""
@@ -544,7 +557,8 @@ class RobocupRuntime:
         global_pose = None
         if update.global_is_absolute and update.global_pose is not None:
             global_pose = self.radar_adapter.to_map_base_pose(update.global_pose, timestamp_s=timestamp_s)
-        self._d500_events.put(D500PoseObservation(local_pose, global_pose, confidence, timestamp_s))
+        mode = D500LocalizationMode.GLOBAL if global_pose is not None else D500LocalizationMode.LOCAL_ONLY
+        self._d500_events.put(D500PoseObservation(local_pose, global_pose, mode, confidence, timestamp_s))
         icp = update.odometry.icp
         diagnostic_pose = update.global_pose if global_pose is not None else update.odometry.pose
         self._emit(
@@ -572,7 +586,7 @@ class RobocupRuntime:
                 self.fusion.update_t265(pose, event.quality)
                 self._emit("t265_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, replay=True)
             else:
-                self.fusion.update_d500(pose, event.quality)
+                self.fusion.update_d500_absolute(pose, event.quality)
                 self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, replay=True)
             self._replay_index += 1
 

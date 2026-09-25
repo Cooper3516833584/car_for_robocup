@@ -88,7 +88,8 @@ class PoseFusion:
                 self._last_d500_accepted = True
                 self._last_d500_rejection = None
 
-    def update_d500(self, pose: Pose2D, quality: PoseQuality) -> None:
+    def update_d500_absolute(self, pose: Pose2D, quality: PoseQuality) -> None:
+        """Apply a D500 pose expressed in the absolute map frame."""
         self._last_d500_accepted = False
         self._last_d500_rejection = None
         if not _pose_valid(pose, quality):
@@ -154,6 +155,10 @@ class PoseFusion:
             inverse_pose2d(self._t265_pose),
         )
         self._accept_d500(pose, quality)
+
+    def update_d500(self, pose: Pose2D, quality: PoseQuality) -> None:
+        """Deprecated compatibility alias; ``pose`` must be absolute map_T_base."""
+        self.update_d500_absolute(pose, quality)
 
     def estimate(self, now_s: float) -> FusedPoseEstimate:
         now = float(now_s)

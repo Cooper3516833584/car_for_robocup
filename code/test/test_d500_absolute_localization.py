@@ -85,7 +85,7 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         ):
             return robocup_runtime.build_runtime(config, RuntimeMode.HARDWARE_MISSION, clock=lambda: 1.0)
 
-    def test_runtime_adapts_absolute_pose_and_local_only_fallback(self) -> None:
+    def test_runtime_adapts_absolute_pose_and_keeps_local_only_out_of_fusion(self) -> None:
         runtime = self._runtime()
         update = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 200.0, 0.0), icp=None),
@@ -106,9 +106,9 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         update.global_confidence = None
         local_runtime.on_d500_update(update)
         local_runtime._consume_d500(1.0)
-        local_pose = local_runtime.fusion.estimate(1.0).pose
-        self.assertAlmostEqual(local_pose.x_m, 1.0)
-        self.assertAlmostEqual(local_pose.y_m, 2.0)
+        self.assertIsNone(local_runtime.fusion.estimate(1.0).pose)
+        self.assertIsNone(local_runtime.fusion.map_T_t265_odom)
+        self.assertIsNone(local_runtime.fusion.estimate(1.0).d500_accepted)
         local_runtime.close()
         runtime.close()
 
@@ -125,7 +125,7 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         runtime.on_d500_update(sample)
         runtime._consume_d500(1.0)
         self.assertEqual(runtime.d500_abs_reject_low_confidence, 1)
-        self.assertAlmostEqual(runtime.fusion.estimate(1.0).pose.x_m, 1.0)
+        self.assertAlmostEqual(runtime.fusion.estimate(1.0).pose.x_m, 0.0)
 
         sample.global_confidence = 0.9
         sample.global_pose = RadarPose2D(300.0, 100.0, 0.0)
