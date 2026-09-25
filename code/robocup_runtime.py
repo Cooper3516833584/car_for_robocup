@@ -125,7 +125,9 @@ class RobocupMission:
             return
         if estimate.pose is None or estimate.state in {PoseFusionState.LOST, PoseFusionState.UNANCHORED}:
             if self.state in {RobocupMissionState.NAVIGATING, RobocupMissionState.RETURNING}:
-                self.request_safe_stop("localization lost during motion")
+                # Runtime applies the configured loss timeout and immediately
+                # requests zero output while retaining this mission state.
+                pass
             else:
                 self.state = RobocupMissionState.WAIT_FOR_LOCALIZATION
             return
@@ -205,6 +207,7 @@ class RobocupRuntime:
         self._start_time_s: float | None = None
         self._current_step_s: float | None = None
         self._last_safety_state: RobocupMissionState | None = None
+        self._pose_lost_since_s: float | None = None
         self._last_watchdog_stop_count = drive.watchdog_stop_count
         self._d500_events: queue.SimpleQueue[D500PoseObservation] = queue.SimpleQueue()
         self.d500_abs_accept_count = 0
@@ -273,10 +276,10 @@ class RobocupRuntime:
                 d500_innovation_yaw_rad=estimate.last_d500_innovation_yaw_rad,
                 rejection_reason=estimate.rejection_reason,
             )
-            self.mission.on_localization(estimate)
+            localization_loss_pending = self._handle_localization(estimate, now)
 
             command = Twist2D(0.0, 0.0)
-            if self.mode is not RuntimeMode.HARDWARE_PROBE and self.mission.state in {
+            if not localization_loss_pending and self.mode is not RuntimeMode.HARDWARE_PROBE and self.mission.state in {
                 RobocupMissionState.NAVIGATING,
                 RobocupMissionState.RETURNING,
             }:
@@ -309,7 +312,7 @@ class RobocupRuntime:
                 RobocupMissionState.ERROR,
                 RobocupMissionState.FINISHED,
                 RobocupMissionState.TARGET_OPERATION,
-            } or estimate.state is PoseFusionState.LOST:
+            }:
                 command = Twist2D(0.0, 0.0)
                 self._safe_stop_drive()
                 if self._last_safety_state is not self.mission.state:
@@ -321,6 +324,16 @@ class RobocupRuntime:
                         priority=True,
                     )
                     self._last_safety_state = self.mission.state
+            elif localization_loss_pending:
+                command = Twist2D(0.0, 0.0)
+                if self.drive.is_running:
+                    self.drive.stop()
+                self._emit(
+                    "safety",
+                    event_code="POSE_LOSS_PENDING",
+                    state=self.mission.state.value,
+                    elapsed_s=0.0 if self._pose_lost_since_s is None else max(0.0, now - self._pose_lost_since_s),
+                )
             elif self.mode is RuntimeMode.HARDWARE_PROBE:
                 command = Twist2D(0.0, 0.0)
             elif command.linear_x_m_s != 0.0 or command.angular_z_rad_s != 0.0:
@@ -577,6 +590,38 @@ class RobocupRuntime:
             return now_s
         self.drive.start()
         return float(self.clock())
+
+    def _handle_localization(self, estimate: FusedPoseEstimate, now_s: float) -> bool:
+        """Return whether navigation is suspended during a timed pose dropout."""
+
+        if estimate.pose is not None:
+            pose_values = (estimate.pose.x_m, estimate.pose.y_m, estimate.pose.yaw_rad)
+            if not all(math.isfinite(value) for value in pose_values):
+                raise ValueError("localization pose contains a non-finite value")
+        pose_lost = estimate.pose is None or estimate.state in {
+            PoseFusionState.LOST,
+            PoseFusionState.UNANCHORED,
+        }
+        if not pose_lost:
+            self._pose_lost_since_s = None
+            self.mission.on_localization(estimate)
+            return False
+
+        if self._pose_lost_since_s is None:
+            expiry_times = []
+            if estimate.t265_age_s is not None:
+                expiry_times.append(now_s - estimate.t265_age_s + self.config.fusion.t265_max_age_s)
+            if estimate.d500_age_s is not None:
+                expiry_times.append(now_s - estimate.d500_age_s + self.config.fusion.d500_max_age_s)
+            self._pose_lost_since_s = min(now_s, max(expiry_times)) if expiry_times else now_s
+        if self.mission.state in {RobocupMissionState.NAVIGATING, RobocupMissionState.RETURNING}:
+            elapsed = max(0.0, now_s - self._pose_lost_since_s)
+            if elapsed >= self.config.safety.stop_if_pose_lost_s:
+                self.mission.request_safe_stop("localization lost beyond configured timeout")
+                return False
+            return True
+        self.mission.on_localization(estimate)
+        return False
 
     @staticmethod
     def _stop_source(source) -> None:

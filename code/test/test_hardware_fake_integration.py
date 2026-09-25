@@ -129,7 +129,7 @@ class HardwareFakeIntegrationTests(unittest.TestCase):
         self.assertGreater(corrected_x, second_x)
         self.assertLess(corrected_x - second_x, 0.10)
 
-        clock.advance(0.60)
+        clock.advance(0.85)
         lost = runtime.step()
         self.assertEqual(lost.mission_state, robocup_runtime.RobocupMissionState.SAFE_STOP)
         self.assertTrue(runtime.drive.backend.stopped)
