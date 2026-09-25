@@ -307,9 +307,8 @@ class RobocupRuntime:
             elif self.mode is RuntimeMode.HARDWARE_PROBE:
                 command = Twist2D(0.0, 0.0)
             elif command.linear_x_m_s != 0.0 or command.angular_z_rad_s != 0.0:
-                if not self.drive.is_running:
-                    self.drive.start()
-                self.drive.command(command, now_s=now)
+                drive_now = self._ensure_drive_started_and_get_time(now)
+                self.drive.command(command, now_s=drive_now)
             elif self.drive.is_running:
                 self.drive.stop()
 
@@ -511,6 +510,14 @@ class RobocupRuntime:
                 self.drive.stop()
             except Exception:
                 LOG.exception("failed to stop differential drive")
+
+    def _ensure_drive_started_and_get_time(self, now_s: float) -> float:
+        """Start lazily and return a timestamp no earlier than drive startup."""
+
+        if self.drive.is_running:
+            return now_s
+        self.drive.start()
+        return float(self.clock())
 
     @staticmethod
     def _stop_source(source) -> None:
