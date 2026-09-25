@@ -19,7 +19,12 @@ from components.pose_log_replay import PoseLogEvent, read_pose_events
 from components.radar_pose_adapter import RadarPoseAdapter
 from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, T265RawPose
 from components.t265_pose_adapter import T265PoseAdapter
-from config.v2_factory import build_differential_drive, build_differential_navigator, build_pose_fusion
+from config.v2_factory import (
+    build_competition_world,
+    build_differential_drive,
+    build_differential_navigator,
+    build_pose_fusion,
+)
 from config.v2_loader import load_v2_config
 from config.v2_models import DifferentialRobotConfig
 from config.v2_runtime import RuntimeConstraints, RuntimeMode, runtime_constraints, validate_runtime_readiness
@@ -608,8 +613,11 @@ def build_runtime(
     constraints = runtime_constraints(config, mode)
     # Dry-run uses a clearly synthetic open field so the full planner can be
     # exercised without implying that hardware has a surveyed competition map.
-    if world is None and mode is RuntimeMode.DRY_RUN:
-        world = NavigationGrid(120, 120, 0.1, origin_x_m=-6.0, origin_y_m=-6.0)
+    if world is None:
+        if mode is RuntimeMode.DRY_RUN:
+            world = NavigationGrid(120, 120, 0.1, origin_x_m=-6.0, origin_y_m=-6.0)
+        elif mode in {RuntimeMode.HARDWARE_MISSION, RuntimeMode.REPLAY}:
+            world = build_competition_world(config)
     runtime = RobocupRuntime(
         config,
         mode,

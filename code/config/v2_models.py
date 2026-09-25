@@ -175,6 +175,41 @@ class NavigationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CompetitionMapConfig:
+    width_m: float
+    height_m: float
+    resolution_m: float
+    origin_x_m: float
+    origin_y_m: float
+    measured: bool
+    static_obstacles: tuple[tuple[float, float, float, float], ...] = ()
+    allowed_regions: tuple[tuple[float, float, float, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("width_m", "height_m", "resolution_m"):
+            _positive(f"navigation.map.{name}", getattr(self, name))
+        for name in ("origin_x_m", "origin_y_m"):
+            _finite(f"navigation.map.{name}", getattr(self, name))
+        for field_name in ("static_obstacles", "allowed_regions"):
+            rectangles = tuple(tuple(float(value) for value in rect) for rect in getattr(self, field_name))
+            if any(len(rect) != 4 or not all(math.isfinite(value) for value in rect) or rect[2] <= rect[0] or rect[3] <= rect[1] for rect in rectangles):
+                raise ConfigV2Error(f"navigation.map.{field_name} must contain valid x_min,y_min,x_max,y_max rectangles")
+            object.__setattr__(self, field_name, rectangles)
+
+
+@dataclass(frozen=True, slots=True)
+class FootprintConfig:
+    robot_radius_m: float
+    safety_margin_m: float
+    measured: bool
+
+    def __post_init__(self) -> None:
+        _positive("navigation.footprint.robot_radius_m", self.robot_radius_m)
+        if _finite("navigation.footprint.safety_margin_m", self.safety_margin_m) < 0.0:
+            raise ConfigV2Error("navigation.footprint.safety_margin_m must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class SafetyConfig:
     require_measured_geometry_for_hardware_mission: bool
     require_verified_c10b_diff_firmware_for_curved_motion: bool
@@ -182,6 +217,8 @@ class SafetyConfig:
     hardware_probe_max_linear_speed_m_s: float = 0.10
     hardware_probe_max_angular_speed_rad_s: float = 0.35
     require_measured_extrinsics_for_hardware_mission: bool = True
+    require_measured_map_for_hardware_mission: bool = True
+    require_measured_footprint_for_hardware_mission: bool = True
 
     def __post_init__(self) -> None:
         _positive("safety.stop_if_pose_lost_s", self.stop_if_pose_lost_s)
@@ -203,6 +240,8 @@ class DifferentialRobotConfig:
     t265_mount: SensorMount3DConfig
     fusion: FusionConfig
     navigation: NavigationConfig
+    competition_map: CompetitionMapConfig
+    footprint: FootprintConfig
     safety: SafetyConfig
 
     def __post_init__(self) -> None:

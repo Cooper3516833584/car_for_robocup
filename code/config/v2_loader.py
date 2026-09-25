@@ -14,12 +14,14 @@ except ModuleNotFoundError:  # Keep v1 package imports usable on Python 3.10.
 from .v2_models import (
     C10BConfig,
     CalibrationStatusConfig,
+    CompetitionMapConfig,
     ConfigV2Error,
     D500Config,
     DifferentialDriveConfig,
     DifferentialGeometryConfig,
     DifferentialRobotConfig,
     FusionConfig,
+    FootprintConfig,
     NavigationConfig,
     SafetyConfig,
     SensorMount3DConfig,
@@ -88,6 +90,11 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
     if set(d500_sensor) != {"mount"} or set(t265_sensor) != {"mount"}:
         raise ConfigV2Error("each sensor table must contain exactly one [mount] table")
 
+    navigation_table = _table(document, "navigation", "navigation")
+    navigation_map = _table(navigation_table, "map", "navigation.map")
+    footprint = _table(navigation_table, "footprint", "navigation.footprint")
+    navigation_settings = {key: value for key, value in navigation_table.items() if key not in {"map", "footprint"}}
+
     return DifferentialRobotConfig(
         schema_version=version,
         robot_name=document.get("robot_name", ""),
@@ -100,6 +107,8 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         t265=_build(T265Config, _table(devices, "t265", "devices.t265"), "devices.t265"),
         t265_mount=_build(SensorMount3DConfig, _table(t265_sensor, "mount", "sensors.t265.mount"), "sensors.t265.mount"),
         fusion=_build(FusionConfig, _table(document, "fusion", "fusion"), "fusion"),
-        navigation=_build(NavigationConfig, _table(document, "navigation", "navigation"), "navigation"),
+        navigation=_build(NavigationConfig, navigation_settings, "navigation"),
+        competition_map=_build(CompetitionMapConfig, navigation_map, "navigation.map"),
+        footprint=_build(FootprintConfig, footprint, "navigation.footprint"),
         safety=_build(SafetyConfig, _table(document, "safety", "safety"), "safety"),
     )

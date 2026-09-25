@@ -33,6 +33,10 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
         errors.append("hardware mission requires measured drive geometry")
     if config.safety.require_measured_extrinsics_for_hardware_mission and not config.calibration.sensor_extrinsics_measured:
         errors.append("hardware mission requires measured sensor extrinsics")
+    if config.safety.require_measured_map_for_hardware_mission and not config.competition_map.measured:
+        errors.append("hardware mission requires a measured competition map")
+    if config.safety.require_measured_footprint_for_hardware_mission and not config.footprint.measured:
+        errors.append("hardware mission requires a measured robot footprint")
     if (
         config.safety.require_verified_c10b_diff_firmware_for_curved_motion
         and config.drive.protocol_mode == "differential_vx_vz"

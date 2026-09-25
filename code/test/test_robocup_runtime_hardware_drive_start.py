@@ -36,6 +36,8 @@ class HardwareLazyDriveStartTests(unittest.TestCase):
                 geometry_measured=True,
                 sensor_extrinsics_measured=True,
             ),
+            competition_map=replace(source_config.competition_map, measured=True),
+            footprint=replace(source_config.footprint, measured=True),
             d500=replace(source_config.d500, enabled=False),
             t265=replace(source_config.t265, enabled=False),
         )
