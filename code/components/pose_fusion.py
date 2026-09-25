@@ -140,11 +140,18 @@ class PoseFusion:
                 dyaw * self.config.yaw_correction_gain,
             ),
         )
-        self._map_T_t265_odom = Pose2D(
-            self._map_T_t265_odom.x_m + correction_x,
-            self._map_T_t265_odom.y_m + correction_y,
-            normalize_angle_rad(self._map_T_t265_odom.yaw_rad + correction_yaw),
+        corrected_fused_pose = Pose2D(
+            predicted.x_m + correction_x,
+            predicted.y_m + correction_y,
+            normalize_angle_rad(predicted.yaw_rad + correction_yaw),
             pose.timestamp_s,
+        )
+        # Re-solve map_T_odom from the corrected map_T_base and the current
+        # odom_T_base. Directly adding yaw to map_T_odom rotates its translation
+        # around the odom origin and creates a spurious position jump.
+        self._map_T_t265_odom = compose_pose2d(
+            corrected_fused_pose,
+            inverse_pose2d(self._t265_pose),
         )
         self._accept_d500(pose, quality)
 
