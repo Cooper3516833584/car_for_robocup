@@ -1639,12 +1639,16 @@ class D500SerialDriver:
         *,
         on_packet: Callable[[RadarPacket], None],
         port: str = DEFAULT_D500_PORT,
+        baudrate: int = DEFAULT_D500_BAUDRATE,
         reconnect_seconds: float = 1.0,
         on_connected: Callable[[], None] | None = None,
         on_disconnected: Callable[[BaseException | None], None] | None = None,
     ) -> None:
         self.on_packet = on_packet
         self.port = port
+        self.baudrate = int(baudrate)
+        if self.baudrate <= 0:
+            raise ValueError("D500 baudrate must be positive")
         self.reconnect_seconds = reconnect_seconds
         self.on_connected = on_connected
         self.on_disconnected = on_disconnected
@@ -1708,6 +1712,9 @@ class D500SerialDriver:
     def _open(self) -> None:
         if termios is None or fcntl is None:
             raise RadarDriverError("D500 UART driver requires Linux termios")
+        baud_constant = getattr(termios, f"B{self.baudrate}", None)
+        if baud_constant is None:
+            raise RadarDriverError(f"unsupported D500 baudrate: {self.baudrate}")
         fd = os.open(self.port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
         try:
             attrs = termios.tcgetattr(fd)
@@ -1715,8 +1722,8 @@ class D500SerialDriver:
             attrs[1] = 0
             attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
             attrs[3] = 0
-            attrs[4] = termios.B230400
-            attrs[5] = termios.B230400
+            attrs[4] = baud_constant
+            attrs[5] = baud_constant
             attrs[6][termios.VMIN] = 0
             attrs[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
@@ -1751,6 +1758,7 @@ class D500RadarComponent:
         self,
         *,
         port: str = DEFAULT_D500_PORT,
+        baudrate: int = DEFAULT_D500_BAUDRATE,
         mount: RadarMount = RadarMount(),
         alignment: DroneGlobalAlignment | None = None,
         on_update: Callable[[RadarLocalizationUpdate], None] | None = None,
@@ -1766,6 +1774,7 @@ class D500RadarComponent:
         if not isinstance(global_correction_mode, GlobalCorrectionMode):
             raise TypeError("global_correction_mode must be a GlobalCorrectionMode")
         self.mount = mount
+        self.baudrate = int(baudrate)
         self._alignment = alignment
         self.on_update = on_update
         self.assembler = assembler or RadarScanAssembler()
@@ -1789,6 +1798,7 @@ class D500RadarComponent:
         )
         self.serial = D500SerialDriver(
             port=port,
+            baudrate=self.baudrate,
             on_packet=self.process_packet,
             on_connected=on_connected,
             on_disconnected=on_disconnected,

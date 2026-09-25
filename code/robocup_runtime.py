@@ -711,6 +711,7 @@ def build_runtime(
             )
             d500_source = D500RadarComponent(
                 port=config.d500.port,
+                baudrate=config.d500.baudrate,
                 mount=mount,
                 alignment=DroneGlobalAlignment(0.0, 0.0, 0.0) if config.d500_localization.enable_wall_absolute else None,
                 on_update=None,
