@@ -51,7 +51,11 @@ active_low = true        # 低电平触发=报警开
 [devices.radar]   port = "/dev/ttyS6"     # D500 雷达 UART
 [devices.hc14]    port = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
 [devices.screen]  port = "..." ; baudrate = 9600
+[devices.relay]   enabled = true ; port = "/dev/relay_lcus"   # LCUS USB 继电器, 9600 8N1
 ```
+
+继电器必须用 udev 固定端口（CH340 与 HC-14 的 USB ID 相同，`/dev/ttyUSB*` 会漂移），
+且退出时必须显式断开触点：见 [RELAY_LCUS.md](RELAY_LCUS.md)。
 
 ### 摄像头设备
 

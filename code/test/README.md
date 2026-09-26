@@ -11,6 +11,8 @@
 - `hc14_*.py`：HC-14 查询、配置和双向链路测试。
 - `d500_uart_probe.py`：只读打开 `/dev/ttyS6`，统计 D500 `54 2C` 有效包、CRC 和完整
   圆周；不写雷达、不访问驱动板、舵机或电机。
+- `relay_selftest.py`：LCUS USB 继电器自检（识别路数 + 查询状态）；默认只读，
+  只有显式 `--channel N --on/--off` 或 `--all-off` 才会吸合触点。见 `docs/RELAY_LCUS.md`。
 - `gimbal_*`、`c10b_a2_a3_gimbal.patch`：已停止采用的云台临时方案。
 - `test_rear_motor.py`：后驱组件的纯软件协议与运动学单元测试，不访问真实串口。
 - `test_ackermann_drive.py`：转向标定、偏航方向及前后轮联动的纯软件单元测试，不访问真实 PWM 或串口。
@@ -25,6 +27,10 @@
 - `test_main.py`：正式主程序的启动 `(0,0,0°)` 坐标重基准、旋转矩形外禁行、SSH
   `x y [heading]` 解析、角度范围、坐标转交及越界拒绝测试，不启动雷达、串口、PWM
   或电机。
+- `test_relay_lcus.py`：LCUS 继电器指令帧与校验和、回读校验与幂等重发、失败关闭、
+  参数校验及假串口注入，不打开真实串口。
+- `test_relay_runtime.py`：`[devices.relay]` 构造、dry-run 内存继电器、启动失败释放与
+  关停顺序（先停底盘 → `all_off` → 关端口），不接触真实设备。
 
 运行单元测试：
 

@@ -12,7 +12,7 @@ py -3 -m unittest discover -s code/test -p "test_*.py"
 git diff --check
 ```
 
-Acceptance: zero syntax errors, all new tests pass, and only the eight documented legacy skips remain. The current baseline is 556 tests with 8 skips; update this count after changing tests.
+Acceptance: zero syntax errors, all new tests pass, and only the eight documented legacy skips remain. The current baseline is 605 tests with 8 skips; update this count after changing tests.
 
 ## Stage 1 — hardware-free dry-run
 
@@ -49,6 +49,8 @@ Disconnect motor power or otherwise make wheel actuation impossible. Run `hardwa
 
 Acceptance: forward raises canonical x, left raises y, counter-clockwise rotation raises yaw, stationary `base_link` does not trace a sensor-offset circle, and static readings do not show unexplained jumps. Do not proceed if any adapter or freshness result is unclear.
 
+If an LCUS payload relay is fitted, check it in the same session with the payload disconnected: run `python code/test/relay_selftest.py --config configs/<profile>.toml` read-only first, then single-channel `--on`/`--off`, and always finish with `--all-off`. Relay contacts stay latched after the process exits, so a confirmed `all_off` is part of acceptance, not optional cleanup. See [RELAY_LCUS.md](RELAY_LCUS.md).
+
 ## Stage 4 — wheels raised, low-speed sign check
 
 Use a separate, explicitly operator-triggered motor smoke procedure with wheels off the ground and an emergency stop within reach. Check forward, reverse, positive/negative angular commands, stop, Ctrl+C stop, and watchdog timeout.
@@ -75,7 +77,7 @@ Acceptance: paths preserve footprint clearance; blocked/no-path conditions stop 
 
 ## Stage 8 — mission integration
 
-Only after Stages 0–7 pass and the readiness gate accepts measured geometry/extrinsics, connect recognition, payload actions, and return goals. Confirm payload work holds zero base command and pose loss prevents both movement and payload release.
+Only after Stages 0–7 pass and the readiness gate accepts measured geometry/extrinsics, connect recognition, payload actions, and return goals. Confirm payload work holds zero base command and pose loss prevents both movement and payload release. If a relay payload action is added, its channel mapping and its failure behavior (a failed verified switch must not silently continue the mission) must be recorded here; dry-run and replay use the in-memory relay and never open the port.
 
 ## Current status
 
