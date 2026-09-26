@@ -118,6 +118,37 @@ class D500Config:
 
 
 @dataclass(frozen=True, slots=True)
+class RelayConfig:
+    """Optional LCUS USB relay (payload switch); disabled unless configured.
+
+    Channel bounds mirror the LCUS protocol in ``components/relay_lcus.py``: one
+    board drives 1..8 relay channels and always runs at 9600 8N1, so only the
+    port and the installed board's channel count are deployment choices.
+    """
+
+    enabled: bool = False
+    port: str = ""
+    baudrate: int = 9600
+    channel_count: int = 8
+    read_timeout_s: float = 0.2
+    query_timeout_s: float = 1.0
+    verify_writes: bool = True
+    disconnect_on_shutdown: bool = True
+
+    def __post_init__(self) -> None:
+        if self.enabled and not self.port.strip():
+            raise ConfigV2Error("devices.relay.port must not be empty when enabled")
+        if self.baudrate <= 0:
+            raise ConfigV2Error("devices.relay.baudrate must be positive")
+        if isinstance(self.channel_count, bool) or not isinstance(self.channel_count, int):
+            raise ConfigV2Error("devices.relay.channel_count must be an integer")
+        if not 1 <= self.channel_count <= 8:
+            raise ConfigV2Error("devices.relay.channel_count must be in [1, 8]")
+        _positive("devices.relay.read_timeout_s", self.read_timeout_s)
+        _positive("devices.relay.query_timeout_s", self.query_timeout_s)
+
+
+@dataclass(frozen=True, slots=True)
 class D500LocalizationConfig:
     enable_icp: bool
     enable_wall_absolute: bool
@@ -268,6 +299,7 @@ class DifferentialRobotConfig:
     competition_map: CompetitionMapConfig
     footprint: FootprintConfig
     safety: SafetyConfig
+    relay: RelayConfig = RelayConfig()
 
     def __post_init__(self) -> None:
         if self.schema_version != 2:

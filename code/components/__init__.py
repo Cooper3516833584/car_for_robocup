@@ -156,6 +156,15 @@ _EXPORT_MODULES = {
     'LineObservation': 'camera_line_follower',
     'LineVisionConfig': 'camera_line_follower',
     'PerspectiveConfig': 'camera_line_follower',
+    'FakeLCUSRelay': 'relay_lcus',
+    'LCUSRelay': 'relay_lcus',
+    'RELAY_PORT_ENV': 'relay_lcus',
+    'build_channel_command': 'relay_lcus',
+    'format_port_list': 'relay_lcus',
+    'format_states': 'relay_lcus',
+    'list_serial_ports': 'relay_lcus',
+    'parse_status_response': 'relay_lcus',
+    'resolve_relay_settings': 'relay_lcus',
 }
 __all__ = tuple(_EXPORT_MODULES)
 

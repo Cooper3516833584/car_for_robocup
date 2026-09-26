@@ -90,6 +90,56 @@ class ConfigV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigV2Error, "load_car_config"):
             load_v2_config(root / "configs" / "car.example.toml")
 
+    def test_relay_defaults_to_disabled(self) -> None:
+        config = load_v2_config()
+        self.assertFalse(config.relay.enabled)
+        self.assertEqual(config.relay.baudrate, 9600)
+        self.assertEqual(config.relay.channel_count, 8)
+
+    def test_profile_without_a_relay_table_still_loads_disabled(self) -> None:
+        source = DEFAULT_V2_CONFIG.read_text(encoding="utf-8")
+        marker = "# LCUS USB relay"
+        self.assertIn(marker, source)
+        # [devices.relay] is optional, so profiles written before it must still load.
+        trimmed = source[: source.index(marker)] + source[source.index("[sensors.t265.mount]") :]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "profile.toml"
+            path.write_text(trimmed, encoding="utf-8")
+            config = load_v2_config(path)
+        self.assertFalse(config.relay.enabled)
+        self.assertEqual(config.relay.channel_count, 8)
+
+    def test_enabled_relay_is_parsed(self) -> None:
+        config = self._load_modified({
+            'enabled = false\nport = ""': 'enabled = true\nport = "/dev/relay_lcus"',
+            "channel_count = 8": "channel_count = 4",
+        })
+        self.assertTrue(config.relay.enabled)
+        self.assertEqual(config.relay.port, "/dev/relay_lcus")
+        self.assertEqual(config.relay.channel_count, 4)
+
+    def test_enabled_relay_requires_a_port(self) -> None:
+        with self.assertRaisesRegex(ConfigV2Error, "devices.relay.port"):
+            self._load_modified({'enabled = false\nport = ""': 'enabled = true\nport = ""'})
+
+    def test_relay_channel_count_is_bounded(self) -> None:
+        with self.assertRaisesRegex(ConfigV2Error, "channel_count"):
+            self._load_modified({"channel_count = 8": "channel_count = 9"})
+        with self.assertRaisesRegex(ConfigV2Error, "channel_count"):
+            self._load_modified({"channel_count = 8": "channel_count = 0.5"})
+
+    def test_relay_rejects_unknown_keys(self) -> None:
+        with self.assertRaisesRegex(ConfigV2Error, "devices.relay"):
+            self._load_modified({"channel_count = 8": "channel_count = 8\npulse_ms = 50"})
+
+    def test_unknown_device_table_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigV2Error, "unknown device table"):
+            self._load_modified({"[devices.t265]": '[devices.servo]\nport = "x"\n\n[devices.t265]'})
+
+    def test_missing_required_device_table_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigV2Error, r"\[devices.d500\]"):
+            self._load_modified({"[devices.d500]": "[devices.renamed_d500]"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,21 @@ max_yaw_jump_rad = 0.35
 enabled = true
 serial = ""
 
+# LCUS USB relay (CH340, fixed 9600 8N1) used as a payload switch. Disabled by
+# default: enable it only after the port has been pinned with a udev rule, since
+# CH340 has the same USB ID as the HC-14 radio and /dev/ttyUSB* numbering moves.
+# Contacts stay latched after the process exits; the runtime requests all_off on
+# shutdown. See docs/RELAY_LCUS.md.
+[devices.relay]
+enabled = false
+port = ""                    # e.g. "/dev/relay_lcus"
+baudrate = 9600
+channel_count = 8            # 4 or 8 depending on the fitted board
+read_timeout_s = 0.2
+query_timeout_s = 1.0
+verify_writes = true         # read back the state after every switch command
+disconnect_on_shutdown = true
+
 [sensors.t265.mount]
 x_m = 0.0
 y_m = 0.0

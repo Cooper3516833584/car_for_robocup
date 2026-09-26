@@ -80,6 +80,32 @@ def build_t265_source(config: DifferentialRobotConfig, *, fake: bool = False, sa
     return RealSenseT265PoseSource(config.t265.serial)
 
 
+def build_relay(config: DifferentialRobotConfig, *, fake: bool = False):
+    """Build the optional LCUS payload relay; construction never opens the port.
+
+    Returns ``None`` when ``[devices.relay] enabled = false``. The real driver
+    opens its serial port only when the runtime starts, and the dry-run/replay
+    fake never touches a device.
+    """
+
+    relay_config = config.relay
+    if not relay_config.enabled:
+        return None
+    if fake:
+        from components.relay_lcus import FakeLCUSRelay
+
+        return FakeLCUSRelay(channel_count=relay_config.channel_count)
+    from components.relay_lcus import LCUSRelay
+
+    return LCUSRelay(
+        port=relay_config.port,
+        baudrate=relay_config.baudrate,
+        channel_count=relay_config.channel_count,
+        timeout=relay_config.read_timeout_s,
+        query_timeout=relay_config.query_timeout_s,
+    )
+
+
 def build_pose_fusion(config: DifferentialRobotConfig):
     """Build the pure pose-fusion state object from validated v2 settings."""
 
