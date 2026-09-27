@@ -138,6 +138,12 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
 
     def test_runtime_does_not_trust_identity_until_absolute_then_allows_d500_only(self) -> None:
         runtime = self._runtime()
+        # An absolute observation can only be accepted once T265 provides a pose
+        # to align it against; without one fusion rejects with
+        # "t265_time_alignment_unavailable" and the anchor must stay untrusted.
+        runtime.fusion.update_t265(
+            Pose2D(0.0, 0.0, 0.0, 1.0), PoseQuality("t265", True, False)
+        )
         update = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 0.0, 0.0), icp=None),
             global_pose=RadarPose2D(100.0, 0.0, 0.0),
@@ -159,11 +165,48 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         runtime.on_d500_update(update)
         runtime._consume_d500(1.0)
         estimate = runtime.fusion.estimate(1.0)
+        # Only a fusion-accepted absolute observation may set the trusted flag.
+        self.assertTrue(estimate.d500_accepted)
         self.assertTrue(runtime._d500_global_alignment_trusted)
-        self.assertIsNone(runtime.fusion.map_T_t265_odom)
-        self.assertEqual(estimate.source_flags, ("d500_global_fallback",))
+        # Accepting the observation now establishes the map anchor, which is the
+        # D500 map pose composed with the T265 pose it was aligned against.
+        anchor = runtime.fusion.map_T_t265_odom
+        self.assertIsNotNone(anchor)
+        self.assertAlmostEqual(anchor.x_m, 1.0)
+        self.assertAlmostEqual(anchor.y_m, 0.0)
+        # With the anchor established and T265 fresh, the fused state upgrades
+        # from the D500-only fallback to the normal fused channel.
+        self.assertIn("fused", estimate.source_flags)
         self.assertAlmostEqual(estimate.pose.x_m, 1.0)
         self.assertTrue(runtime._hardware_global_localization_ready(1.0))
+        runtime.close()
+
+    def test_candidate_is_not_trusted_without_a_usable_t265_alignment(self) -> None:
+        """A candidate fusion cannot align must not make the map look trusted.
+
+        Regression for the premature-trust defect: the trusted flag used to be
+        set before PoseFusion decided, so an absolute candidate that could not
+        be aligned still advertised a trustworthy global map.
+        """
+
+        runtime = self._runtime()
+        update = types.SimpleNamespace(
+            odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 0.0, 0.0), icp=None),
+            global_pose=RadarPose2D(100.0, 0.0, 0.0),
+            map_alignment_established=True,
+            map_pose_valid=True,
+            absolute_observation_available=True,
+            absolute_observation_accepted=True,
+            global_confidence=0.9,
+            wall_fusion=None,
+        )
+        runtime.on_d500_update(update)
+        runtime._consume_d500(1.0)
+        estimate = runtime.fusion.estimate(1.0)
+        self.assertFalse(estimate.d500_accepted)
+        self.assertFalse(runtime._d500_global_alignment_trusted)
+        self.assertIsNone(runtime._last_d500_absolute_update_s)
+        self.assertFalse(runtime._hardware_global_localization_ready(1.0))
         runtime.close()
 
     def test_low_confidence_and_large_position_jump_are_rejected_as_absolute(self) -> None:
@@ -255,7 +298,7 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertEqual(runtime._last_d500_map_pose_update_s, 1.0)
         self.assertTrue(runtime._hardware_global_localization_ready(now[0]))
 
-        now[0] = 1.0 + config.fusion.d500_max_age_s + 0.1
+        now[0] = 1.0 + robocup_runtime.D500_ANCHOR_STALE_AFTER_S + 0.1
         stamp = 1.1
         while stamp <= now[0] + 1e-9:
             runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, stamp), PoseQuality("t265", True, False))
@@ -264,16 +307,22 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         runtime._consume_d500(now[0])
         self.assertEqual(runtime._last_d500_absolute_update_s, 1.0)
         self.assertEqual(runtime._last_d500_map_pose_update_s, now[0])
+        # The anchor is a different concept from the raw measurement timeout:
+        # it survives a D500 gap and only stops counting once it is older than
+        # the anchor window.
         self.assertFalse(runtime._hardware_global_localization_ready(now[0]))
 
-        now[0] = 3.0
-        stamp = 1.7
+        # A fresh accepted absolute observation after a long gap re-establishes
+        # the anchor.  The T265 samples must keep advancing monotonically, or
+        # fusion correctly treats the stream as discontinuous.
+        now[0] = 20.0
+        stamp = 6.2
         while stamp <= now[0] + 1e-9:
             runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, stamp), PoseQuality("t265", True, False))
             stamp += 0.1
         runtime.on_d500_update(update(absolute=True, x_cm=100.0))
         runtime._consume_d500(now[0])
-        self.assertEqual(runtime._last_d500_absolute_update_s, 3.0)
+        self.assertEqual(runtime._last_d500_absolute_update_s, now[0])
         self.assertTrue(runtime._hardware_global_localization_ready(now[0]))
         runtime.close()
 

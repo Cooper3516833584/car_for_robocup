@@ -34,6 +34,22 @@ from core.types import Pose2D, PoseQuality, Twist2D
 
 LOG = logging.getLogger("robocup-runtime")
 
+# Two distinct freshness concepts, deliberately not one number:
+#
+#   * ``fusion.d500_max_age_s`` bounds how old a raw D500 measurement may be to
+#     count as a fresh measurement / local fallback.  It is short (0.50 s) and
+#     a D500 revolution period is ~0.14 s, so it is a sensor-level property.
+#   * the map anchor established by an *accepted* absolute observation is a
+#     different thing: it stays meaningful while T265 keeps propagating the
+#     pose, even if D500 sees nothing for a while.  Judging the anchor with the
+#     0.50 s sensor timeout would drop an established anchor roughly every
+#     revolution gap and make global-ready flap.
+#
+# The anchor window is a code constant rather than a new TOML knob, and it is
+# intentionally conservative: longer than any plausible single missed scan,
+# short enough to stop trusting the map if absolute corrections stop entirely.
+D500_ANCHOR_STALE_AFTER_S = 5.0
+
 
 class RuntimeReadinessError(RuntimeError):
     """The configured robot is not ready for the requested runtime mode."""
@@ -283,6 +299,9 @@ class RobocupRuntime:
             self._last_watchdog_stop_count = watchdog_stops
         try:
             self._consume_t265(now)
+            # Give the D500 a map-frame prediction before consuming its scans,
+            # so wall association never depends on the D500's own ICP.
+            self._publish_d500_pose_hint(now)
             self._consume_d500(now)
             if self.mode is RuntimeMode.REPLAY:
                 self._consume_replay(now)
@@ -518,6 +537,32 @@ class RobocupRuntime:
                 mapper_confidence=raw.mapper_confidence,
             )
 
+    def _publish_d500_pose_hint(self, now_s: float) -> None:
+        """Push the fused/T265 map pose to the D500 for wall association.
+
+        The D500 needs a map-frame prediction to associate the safety-net edges.
+        Before this existed it fell back on its own scan-to-scan ICP pose, which
+        is exactly what degrades during in-place rotation, so the absolute
+        boundary observer lost its prior whenever it was most needed.
+
+        The hint is a prediction only: it narrows the wall search, and every
+        candidate still has to pass the residual/innovation gates.
+        """
+
+        source = self.d500_source
+        if self.d500_fake or source is None:
+            return
+        setter = getattr(source, "set_global_pose_hint", None)
+        if setter is None:
+            return
+        try:
+            estimate = self.fusion.estimate(now_s)
+        except Exception:  # noqa: BLE001 - a hint must never break the loop
+            LOG.exception("could not compute a D500 pose hint")
+            return
+        pose = estimate.pose if estimate.anchor_initialized else None
+        setter(None if pose is None else self.radar_adapter.from_map_base_pose(pose))
+
     def _consume_d500(self, now_s: float) -> None:
         if self.d500_fake:
             if self.d500_source is None:
@@ -553,11 +598,11 @@ class RobocupRuntime:
                     else:
                         # Fusion gates innovations against T265 at the D500
                         # measurement timestamp, not against the latest pose.
+                        # Producing a candidate is NOT an acceptance: the
+                        # trusted flag and the last-absolute time are only
+                        # refreshed below, after PoseFusion accepts.
                         pose = observation.map_pose
                         accepted_absolute = True
-                        if observation.map_pose_valid:
-                            self._d500_global_alignment_trusted = True
-                            self._last_d500_absolute_update_s = observation.timestamp_s
                 quality = PoseQuality(
                     "d500_wall_absolute" if observation.absolute_observation_accepted else "d500_local_or_propagated",
                     True,
@@ -571,6 +616,9 @@ class RobocupRuntime:
                     fusion_estimate = self.fusion.estimate(now_s)
                     absolute_correction_accepted = fusion_estimate.d500_accepted is True
                     if absolute_correction_accepted:
+                        # Only a fusion-accepted absolute observation may
+                        # establish or refresh the map anchor.
+                        self._d500_global_alignment_trusted = True
                         self._last_d500_absolute_update_s = observation.timestamp_s
                         self.d500_abs_accept_count += 1
                     else:
@@ -607,6 +655,15 @@ class RobocupRuntime:
                 else:
                     self._emit("d500_rejected", reason="localization_lost", d500_mode=D500LocalizationMode.LOST.value)
                 now = float(now_s)
+                # The propagated global fallback is a *validated* map pose: it
+                # requires a valid map pose (map anchor established) but is
+                # deliberately not restricted to fusion-accepted absolute
+                # observations, because its job is to keep a usable global pose
+                # available when T265 continuity is lost.  A candidate must
+                # still never promote itself to a trusted anchor -- that is
+                # governed by _d500_global_alignment_trusted and
+                # _last_d500_absolute_update_s, which only the fusion-accepted
+                # branch sets.
                 if observation.map_pose_valid and observation.map_pose is not None:
                     fallback_quality = PoseQuality(
                         "d500_global_fallback",
@@ -846,9 +903,14 @@ class RobocupRuntime:
             or not self.config.d500_localization.require_global_for_hardware
         ):
             return True
+        # Readiness needs a *trusted anchor*, which is only ever set after
+        # PoseFusion accepted an absolute observation, and that anchor must not
+        # be so old that the map can no longer be trusted.  This deliberately
+        # does not use the short d500_max_age_s measurement timeout.
         return (
-            self._last_d500_absolute_update_s is not None
-            and now_s - self._last_d500_absolute_update_s <= self.config.fusion.d500_max_age_s
+            self._d500_global_alignment_trusted
+            and self._last_d500_absolute_update_s is not None
+            and now_s - self._last_d500_absolute_update_s <= D500_ANCHOR_STALE_AFTER_S
         )
 
     @staticmethod
