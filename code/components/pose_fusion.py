@@ -14,7 +14,6 @@ from core.types import Pose2D, PoseQuality
 
 T265_HISTORY_S = 3.0
 MAX_INTERP_GAP_S = 0.080
-T265_MIN_CONFIDENCE = 2.0 / 3.0
 D500_MAX_INNOVATION_M = 0.30
 D500_MAX_INNOVATION_YAW_RAD = math.radians(12.0)
 ANCHOR_BLEND = 0.35
@@ -78,6 +77,7 @@ class PoseFusion:
 
     def __init__(self, config: FusionConfig) -> None:
         self.config = config
+        self._min_t265_confidence = config.t265_min_tracker_confidence / 3.0
         self.reset()
 
     def reset(self) -> None:
@@ -117,7 +117,7 @@ class PoseFusion:
             self._break_t265_continuity()
             return
         confidence = _confidence(quality)
-        if confidence < T265_MIN_CONFIDENCE:
+        if confidence < self._min_t265_confidence:
             self._t265_quality = quality
             self._seen_t265 = True
             self._break_t265_continuity()
@@ -247,7 +247,7 @@ class PoseFusion:
             self._last_d500_rejection = "t265_time_alignment_unavailable"
             return
         self._last_t265_alignment_ms = aligned.alignment_error_s * 1000.0
-        if aligned.confidence < T265_MIN_CONFIDENCE:
+        if aligned.confidence < self._min_t265_confidence:
             self._last_d500_rejection = "t265_low_confidence_at_d500_time"
             return
 
@@ -298,7 +298,7 @@ class PoseFusion:
         t265_fresh = (
             t265_age is not None and t265_age <= self.config.t265_max_age_s
             and self._t265_quality is not None and self._t265_quality.valid
-            and _confidence(self._t265_quality) >= T265_MIN_CONFIDENCE
+            and _confidence(self._t265_quality) >= self._min_t265_confidence
             and not self._t265_continuity_broken
         )
         if self._t265_pose is not None and not t265_fresh:

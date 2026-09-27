@@ -140,19 +140,14 @@ class T265PoseAdapter:
         *,
         min_tracker_confidence: int = 2,
         max_age_s: float = 0.15,
-        max_translation_jump_m: float = 1.0,
-        max_yaw_jump_rad: float = 1.0,
     ) -> None:
         self.mount = mount_transform(mount)
         self.mount_inverse = inverse_transform3d(self.mount)
         self.min_tracker_confidence = int(min_tracker_confidence)
         self.max_age_s = self._positive("max_age_s", max_age_s)
-        self.max_translation_jump_m = self._positive("max_translation_jump_m", max_translation_jump_m)
-        self.max_yaw_jump_rad = self._positive("max_yaw_jump_rad", max_yaw_jump_rad)
         if not 0 <= self.min_tracker_confidence <= 3:
             raise ValueError("min_tracker_confidence must be in [0, 3]")
         self._origin_inverse: Transform3D | None = None
-        self._last_pose: Pose2D | None = None
 
     @staticmethod
     def _positive(name: str, value: float) -> float:
@@ -163,7 +158,6 @@ class T265PoseAdapter:
 
     def reset(self) -> None:
         self._origin_inverse = None
-        self._last_pose = None
 
     def adapt(self, raw: T265RawPose, *, now_s: float) -> T265PoseUpdate:
         now = float(now_s)
@@ -195,7 +189,6 @@ class T265PoseAdapter:
             float(raw.measurement_monotonic_s),
         )
 
-        self._last_pose = pose
         confidence = min(1.0, max(0.0, raw.tracker_confidence / 3.0))
         return T265PoseUpdate(
             pose,

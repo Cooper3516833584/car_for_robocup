@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import math
 from pathlib import Path
 import sys
@@ -20,7 +19,7 @@ def quality(source: str = "d500") -> PoseQuality:
 
 class PoseFusionSE2Tests(unittest.TestCase):
     def test_far_from_origin_correction_blends_anchor_transform(self) -> None:
-        config = replace(load_v2_config().fusion, position_correction_gain=0.1, yaw_correction_gain=0.1)
+        config = load_v2_config().fusion
         fusion = PoseFusion(config)
         fusion.update_t265(Pose2D(5.0, 0.0, 0.0, 1.0), quality("t265"))
         fusion.update_d500(Pose2D(5.0, 0.0, 0.0, 1.0), quality())
@@ -37,12 +36,7 @@ class PoseFusionSE2Tests(unittest.TestCase):
         self.assertAlmostEqual(anchor.yaw_rad, 0.07, delta=1e-9)
 
     def test_corrected_map_pose_is_recomputed_from_blended_anchor(self) -> None:
-        config = replace(
-            load_v2_config().fusion,
-            position_correction_gain=0.25,
-            yaw_correction_gain=0.5,
-            max_single_position_correction_m=1.0,
-        )
+        config = load_v2_config().fusion
         fusion = PoseFusion(config)
         odom_pose = Pose2D(5.0, 2.0, 0.3, 1.0)
         fusion.update_t265(odom_pose, quality("t265"))
@@ -62,13 +56,7 @@ class PoseFusionSE2Tests(unittest.TestCase):
         self.assertEqual(fusion.estimate(1.11).pose, recomposed)
 
     def test_repeated_absolute_corrections_converge_without_nan_or_wrap_jumps(self) -> None:
-        config = replace(
-            load_v2_config().fusion,
-            position_correction_gain=0.2,
-            yaw_correction_gain=0.2,
-            max_single_position_correction_m=1.0,
-            max_single_yaw_correction_rad=0.5,
-        )
+        config = load_v2_config().fusion
         fusion = PoseFusion(config)
         target = Pose2D(5.2, 0.1, -math.pi + 0.02, 1.0)
         initial = Pose2D(5.0, 0.0, math.pi - 0.02, 1.0)

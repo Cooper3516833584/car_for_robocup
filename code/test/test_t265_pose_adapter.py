@@ -78,7 +78,7 @@ class T265PoseAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(update.pose.yaw_rad, 0.0)
 
     def test_ninety_degree_mount_yaw_is_compensated(self) -> None:
-        adapter = T265PoseAdapter(mount(yaw=math.pi / 2.0), max_yaw_jump_rad=2.0)
+        adapter = T265PoseAdapter(mount(yaw=math.pi / 2.0))
         first = adapter.adapt(robot_pose_raw(0.0, 0.0, math.pi / 2.0, 1.0), now_s=1.0)
         second = adapter.adapt(robot_pose_raw(0.0, 0.0, math.pi, 1.1), now_s=1.1)
 
@@ -94,7 +94,7 @@ class T265PoseAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(update.pose.y_m, 0.0, places=12)
 
     def test_mount_offset_removes_false_translation_during_in_place_rotation(self) -> None:
-        adapter = T265PoseAdapter(mount(x=0.2), max_yaw_jump_rad=2.0)
+        adapter = T265PoseAdapter(mount(x=0.2))
         first = adapter.adapt(robot_pose_raw(0.2, 0.0, 0.0, 1.0), now_s=1.0)
         second = adapter.adapt(robot_pose_raw(0.0, 0.2, math.pi / 2.0, 1.1), now_s=1.1)
 
@@ -107,6 +107,14 @@ class T265PoseAdapterTests(unittest.TestCase):
     def test_low_tracker_confidence_is_invalid(self) -> None:
         update = T265PoseAdapter(mount()).adapt(
             robot_pose_raw(0.0, 0.0, 0.0, 1.0, confidence=1), now_s=1.0
+        )
+        self.assertFalse(update.quality.valid)
+        self.assertEqual(update.reason, "tracker_confidence_too_low")
+
+    def test_adapter_uses_configured_raw_tracker_confidence_threshold(self) -> None:
+        adapter = T265PoseAdapter(mount(), min_tracker_confidence=3)
+        update = adapter.adapt(
+            robot_pose_raw(0.0, 0.0, 0.0, 1.0, confidence=2), now_s=1.0
         )
         self.assertFalse(update.quality.valid)
         self.assertEqual(update.reason, "tracker_confidence_too_low")
@@ -128,7 +136,7 @@ class T265PoseAdapterTests(unittest.TestCase):
         self.assertEqual(update.reason, "non_finite_pose")
 
     def test_large_tracker_jump_is_passed_to_fusion_for_continuous_rebase(self) -> None:
-        adapter = T265PoseAdapter(mount(), max_translation_jump_m=0.5)
+        adapter = T265PoseAdapter(mount())
         adapter.adapt(robot_pose_raw(0.0, 0.0, 0.0, 1.0), now_s=1.0)
         jumped = adapter.adapt(robot_pose_raw(2.0, 0.0, 0.0, 1.1), now_s=1.1)
         stable_after_reset = adapter.adapt(robot_pose_raw(2.1, 0.0, 0.0, 1.2), now_s=1.2)

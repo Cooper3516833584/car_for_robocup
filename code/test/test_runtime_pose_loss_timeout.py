@@ -51,6 +51,11 @@ class PoseLossTimeoutTests(unittest.TestCase):
         runtime = self.make_runtime()
         runtime.step(now_s=10.0)
         runtime.step(now_s=10.3)  # 0.2 s beyond the last sensor freshness window.
+        runtime.fusion.update_d500_global_fallback(
+            Pose2D(0.05, 0.0, 0.0, 10.35),
+            PoseQuality("d500", True, False),
+            map_alignment_valid=runtime.fusion.global_anchor_established,
+        )
         runtime.fusion.update_t265(Pose2D(0.05, 0.0, 0.0, 10.35), PoseQuality("t265", True, False))
         runtime.fusion.update_d500(Pose2D(0.05, 0.0, 0.0, 10.35), PoseQuality("d500", True, False))
         recovered = runtime.step(now_s=10.35)

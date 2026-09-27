@@ -189,26 +189,12 @@ class FusionConfig:
     t265_max_age_s: float
     d500_max_age_s: float
     t265_min_tracker_confidence: int
-    position_correction_gain: float
-    yaw_correction_gain: float
-    max_position_innovation_m: float
-    max_yaw_innovation_rad: float
-    max_single_position_correction_m: float
-    max_single_yaw_correction_rad: float
 
     def __post_init__(self) -> None:
-        for name in (
-            "t265_max_age_s", "d500_max_age_s", "max_position_innovation_m",
-            "max_yaw_innovation_rad", "max_single_position_correction_m",
-            "max_single_yaw_correction_rad",
-        ):
+        for name in ("t265_max_age_s", "d500_max_age_s"):
             _positive(name, getattr(self, name))
         if not 0 <= self.t265_min_tracker_confidence <= 3:
             raise ConfigV2Error("fusion.t265_min_tracker_confidence must be in [0, 3]")
-        for name in ("position_correction_gain", "yaw_correction_gain"):
-            value = _finite(name, getattr(self, name))
-            if not 0.0 <= value <= 1.0:
-                raise ConfigV2Error(f"fusion.{name} must be in [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import math
 import sys
@@ -267,6 +268,21 @@ class PoseFusionTests(unittest.TestCase):
         self.assertAlmostEqual(estimate.pose.x_m, 0.3)
         self.assertAlmostEqual(estimate.pose.y_m, 0.0)
         self.assertAlmostEqual(estimate.pose.yaw_rad, 0.0)
+
+    def test_fusion_confidence_threshold_comes_from_fusion_config(self) -> None:
+        config = replace(self.config, t265_min_tracker_confidence=3)
+        fusion = PoseFusion(config)
+        confidence_two = PoseQuality("t265", True, False, 2.0 / 3.0, 2.0 / 3.0)
+        fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), confidence_two)
+        fusion.update_d500_absolute(Pose2D(1.0, 0.0, 0.0, 1.0), quality("d500"))
+        self.assertFalse(fusion.global_anchor_established)
+        self.assertEqual(fusion.estimate(1.0).rejection_reason, "t265_time_alignment_unavailable")
+
+        confidence_three = PoseQuality("t265", True, False, 1.0, 1.0)
+        recovered = PoseFusion(config)
+        recovered.update_t265(Pose2D(0.0, 0.0, 0.0, 1.1), confidence_three)
+        recovered.update_d500_absolute(Pose2D(1.0, 0.0, 0.0, 1.1), quality("d500"))
+        self.assertTrue(recovered.global_anchor_established)
 
     def test_disabled_t265_can_localize_from_aligned_d500_global_stream(self) -> None:
         self.fusion.update_d500_global_fallback(
