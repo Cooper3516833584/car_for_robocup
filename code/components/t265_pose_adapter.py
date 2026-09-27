@@ -167,7 +167,7 @@ class T265PoseAdapter:
 
     def adapt(self, raw: T265RawPose, *, now_s: float) -> T265PoseUpdate:
         now = float(now_s)
-        age = now - float(raw.host_monotonic_s)
+        age = now - float(raw.received_monotonic_s)
         if not math.isfinite(now) or not math.isfinite(age) or age < 0.0 or age > self.max_age_s:
             return self._invalid(raw, max(0.0, age) if math.isfinite(age) else None, "stale_or_future_sample")
         if raw.tracker_confidence < self.min_tracker_confidence:
@@ -192,7 +192,7 @@ class T265PoseAdapter:
             local_T_base.translation_xyz_m[0],
             local_T_base.translation_xyz_m[1],
             _wrap_yaw(yaw),
-            float(raw.host_monotonic_s),
+            float(raw.measurement_monotonic_s),
         )
 
         self._last_pose = pose

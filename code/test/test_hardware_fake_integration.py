@@ -61,7 +61,8 @@ def t265_sample(now_s: float, forward_m: float = 0.0) -> T265RawPose:
         tracker_confidence=3,
         mapper_confidence=3,
         device_timestamp_ms=now_s * 1000.0,
-        host_monotonic_s=now_s,
+        received_monotonic_s=now_s,
+        measurement_monotonic_s=now_s,
     )
 
 

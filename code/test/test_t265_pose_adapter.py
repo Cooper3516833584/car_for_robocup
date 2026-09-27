@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import math
 import sys
@@ -45,7 +46,8 @@ def robot_pose_raw(
         tracker_confidence=confidence,
         mapper_confidence=None,
         device_timestamp_ms=timestamp * 1000.0,
-        host_monotonic_s=timestamp,
+        received_monotonic_s=timestamp,
+        measurement_monotonic_s=timestamp,
     )
 
 
@@ -61,6 +63,17 @@ class T265PoseAdapterTests(unittest.TestCase):
         self.assertTrue(update.quality.valid)
         self.assertIsNotNone(update.pose)
         self.assertAlmostEqual(update.pose.x_m, 0.0)
+
+    def test_adapter_uses_measurement_time_and_receive_time_for_freshness(self) -> None:
+        raw = replace(
+            robot_pose_raw(0.0, 0.0, 0.0, 1.0),
+            received_monotonic_s=1.09,
+            measurement_monotonic_s=1.0,
+        )
+        update = T265PoseAdapter(mount()).adapt(raw, now_s=1.1)
+        self.assertTrue(update.quality.valid)
+        self.assertAlmostEqual(update.pose.timestamp_s, 1.0)
+        self.assertAlmostEqual(update.quality.age_s, 0.01)
         self.assertAlmostEqual(update.pose.y_m, 0.0)
         self.assertAlmostEqual(update.pose.yaw_rad, 0.0)
 

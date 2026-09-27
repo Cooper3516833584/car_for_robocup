@@ -17,6 +17,7 @@ from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
 from components.pose_log_replay import PoseLogEvent, read_pose_events
 from components.radar_pose_adapter import RadarPoseAdapter
+from components.sensor_clock import DeviceClockMapper
 from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, T265RawPose
 from components.t265_pose_adapter import T265PoseAdapter
 from config.v2_factory import (
@@ -232,9 +233,7 @@ class RobocupRuntime:
         self.d500_abs_reject_yaw_gate = 0
         self._last_d500_absolute_update_s: float | None = None
         self._last_d500_map_pose_update_s: float | None = None
-        self._d500_clock_last_raw_ms: int | None = None
-        self._d500_clock_unwrapped_ms: int | None = None
-        self._d500_clock_offset_s: float | None = None
+        self._d500_clock = DeviceClockMapper(modulus_ms=0x10000)
         self._d500_global_pending = False
         self._started = False
         self._closed = False
@@ -487,6 +486,9 @@ class RobocupRuntime:
                 yaw_rad=update.pose.yaw_rad,
                 confidence=update.quality.position_confidence,
                 age_s=update.quality.age_s,
+                t265_measurement_time=update.pose.timestamp_s,
+                t265_received_time=raw.received_monotonic_s,
+                t265_device_timestamp_ms=raw.device_timestamp_ms,
                 raw_translation_xyz=raw.translation_xyz,
                 raw_quaternion_xyzw=raw.quaternion_xyzw,
                 tracker_confidence=raw.tracker_confidence,
@@ -499,6 +501,9 @@ class RobocupRuntime:
                 reason=update.reason or "invalid",
                 event_code="LOW_T265_CONFIDENCE" if update.reason == "tracker_confidence_too_low" else "T265_REJECT",
                 confidence=raw.tracker_confidence,
+                t265_measurement_time=raw.measurement_monotonic_s,
+                t265_received_time=raw.received_monotonic_s,
+                t265_device_timestamp_ms=raw.device_timestamp_ms,
                 raw_translation_xyz=raw.translation_xyz,
                 raw_quaternion_xyzw=raw.quaternion_xyzw,
                 mapper_confidence=raw.mapper_confidence,
@@ -634,35 +639,8 @@ class RobocupRuntime:
         )
 
     def _map_d500_timestamp(self, timestamp_ms, received_s: float) -> float:
-        """Map the D500's wrapping uint16 millisecond clock into monotonic time.
-
-        The first completed scan establishes a host/device clock offset. Later
-        scans use the device measurement counter, so callback queue delays do
-        not change the fusion timestamp.
-        """
-        try:
-            raw_ms = int(timestamp_ms)
-        except (TypeError, ValueError, OverflowError):
-            return received_s
-        if not 0 <= raw_ms <= 0xFFFF:
-            return received_s
-        if self._d500_clock_last_raw_ms is None:
-            self._d500_clock_last_raw_ms = raw_ms
-            self._d500_clock_unwrapped_ms = raw_ms
-            self._d500_clock_offset_s = received_s - raw_ms / 1000.0
-            return received_s
-
-        delta_ms = (raw_ms - self._d500_clock_last_raw_ms) & 0xFFFF
-        if delta_ms > 0x7FFF:
-            delta_ms -= 0x10000
-        assert self._d500_clock_unwrapped_ms is not None
-        assert self._d500_clock_offset_s is not None
-        unwrapped_ms = self._d500_clock_unwrapped_ms + delta_ms
-        mapped_s = self._d500_clock_offset_s + unwrapped_ms / 1000.0
-        if delta_ms >= 0:
-            self._d500_clock_last_raw_ms = raw_ms
-            self._d500_clock_unwrapped_ms = unwrapped_ms
-        return mapped_s
+        """Map the D500's wrapping uint16 millisecond clock to monotonic time."""
+        return self._d500_clock.map_milliseconds(timestamp_ms, received_s)
 
     def _consume_replay(self, now_s: float) -> None:
         if self._start_time_s is None:
@@ -857,7 +835,8 @@ def build_runtime(
                 tracker_confidence=3,
                 mapper_confidence=0,
                 device_timestamp_ms=(now + index * period_s) * 1000.0,
-                host_monotonic_s=now + index * period_s,
+                received_monotonic_s=now + index * period_s,
+                measurement_monotonic_s=now + index * period_s,
             )
             for index in range(max(1, fake_sample_count))
         ]

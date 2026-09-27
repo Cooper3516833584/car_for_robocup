@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import time
 from typing import Protocol
 
+from .sensor_clock import DeviceClockMapper
+
 
 class T265UnavailableError(RuntimeError):
     """The RealSense SDK or requested T265 device is unavailable."""
@@ -22,7 +24,17 @@ class T265RawPose:
     tracker_confidence: int
     mapper_confidence: int | None
     device_timestamp_ms: float | None
-    host_monotonic_s: float
+    received_monotonic_s: float
+    measurement_monotonic_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.measurement_monotonic_s is None:
+            object.__setattr__(self, "measurement_monotonic_s", self.received_monotonic_s)
+
+    @property
+    def host_monotonic_s(self) -> float:
+        """Compatibility alias for the receive time; new code uses explicit names."""
+        return self.received_monotonic_s
 
 
 class T265PoseSource(Protocol):
@@ -54,6 +66,7 @@ class RealSenseT265PoseSource:
         self.timeout_ms = int(timeout_ms)
         self._rs = None
         self._pipeline = None
+        self._clock_mapper = DeviceClockMapper()
 
     def start(self) -> None:
         if self._pipeline is not None:
@@ -77,6 +90,7 @@ class RealSenseT265PoseSource:
             pass
         self._rs = rs
         self._pipeline = pipeline
+        self._clock_mapper.reset()
 
     def read(self) -> T265RawPose | None:
         if self._pipeline is None:
@@ -91,6 +105,11 @@ class RealSenseT265PoseSource:
         data = pose_frame.get_pose_data()
         velocity = getattr(data, "velocity", None)
         angular_velocity = getattr(data, "angular_velocity", None)
+        received_monotonic_s = time.monotonic()
+        device_timestamp_ms = float(pose_frame.get_timestamp())
+        measurement_monotonic_s = self._clock_mapper.map_milliseconds(
+            device_timestamp_ms, received_monotonic_s
+        )
         return T265RawPose(
             translation_xyz=(float(data.translation.x), float(data.translation.y), float(data.translation.z)),
             quaternion_xyzw=(float(data.rotation.x), float(data.rotation.y), float(data.rotation.z), float(data.rotation.w)),
@@ -100,8 +119,9 @@ class RealSenseT265PoseSource:
             ),
             tracker_confidence=int(data.tracker_confidence),
             mapper_confidence=getattr(data, "mapper_confidence", None),
-            device_timestamp_ms=float(pose_frame.get_timestamp()),
-            host_monotonic_s=time.monotonic(),
+            device_timestamp_ms=device_timestamp_ms,
+            received_monotonic_s=received_monotonic_s,
+            measurement_monotonic_s=measurement_monotonic_s,
         )
 
     def stop(self) -> None:
