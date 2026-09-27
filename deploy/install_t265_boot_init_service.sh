@@ -20,6 +20,12 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# A checkout may lack the executable bit (git does not track file modes on
+# Windows); `sh <script>` always works.
+if [ ! -x "$0" ]; then
+    echo "note: $0 is not executable here, run it as: sh $0" >&2
+fi
+
 for required in "$PROGRAM" "$SERVICE_TEMPLATE" "$TIMER_TEMPLATE" "$UDEV_TEMPLATE"; do
     if [ ! -f "$required" ]; then
         echo "missing deployment input: $required" >&2
