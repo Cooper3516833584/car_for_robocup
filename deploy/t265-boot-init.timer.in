@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic RealSense T265 health check
+
+[Timer]
+OnBootSec=25s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=t265-boot-init.service
+
+[Install]
+WantedBy=timers.target

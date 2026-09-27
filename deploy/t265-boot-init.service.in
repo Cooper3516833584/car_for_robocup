@@ -1,0 +1,18 @@
+[Unit]
+Description=RealSense T265 boot-time bring-up and health check
+# The timer re-runs this unit; the unit itself must never be considered failed
+# in a way that disables further runs.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -u @DEPLOY_DIR@/t265_boot_init.py
+RuntimeDirectory=t265-boot-init
+RuntimeDirectoryMode=0755
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
