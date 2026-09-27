@@ -219,6 +219,10 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertTrue(runtime._hardware_global_localization_ready(now[0]))
 
         now[0] = 1.0 + config.fusion.d500_max_age_s + 0.1
+        stamp = 1.1
+        while stamp <= now[0] + 1e-9:
+            runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, stamp), PoseQuality("t265", True, False))
+            stamp += 0.1
         runtime.on_d500_update(update(absolute=False, x_cm=110.0))
         runtime._consume_d500(now[0])
         self.assertEqual(runtime._last_d500_absolute_update_s, 1.0)
@@ -226,7 +230,10 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertFalse(runtime._hardware_global_localization_ready(now[0]))
 
         now[0] = 3.0
-        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 3.0), PoseQuality("t265", True, False))
+        stamp = 1.7
+        while stamp <= now[0] + 1e-9:
+            runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, stamp), PoseQuality("t265", True, False))
+            stamp += 0.1
         runtime.on_d500_update(update(absolute=True, x_cm=100.0))
         runtime._consume_d500(now[0])
         self.assertEqual(runtime._last_d500_absolute_update_s, 3.0)

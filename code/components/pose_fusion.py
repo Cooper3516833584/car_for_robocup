@@ -47,6 +47,7 @@ class FusedPoseEstimate:
     anchor_initialized: bool = False
     t265_confidence: float | None = None
     t265_time_alignment_ms: float | None = None
+    t265_continuity_broken: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ class PoseFusion:
         self._t265_rebase = Pose2D(0.0, 0.0, 0.0, 0.0)
         self._t265_quality: PoseQuality | None = None
         self._t265_history: deque[_TimedPose] = deque()
+        self._t265_continuity_broken = False
         self._d500_pose: Pose2D | None = None
         self._d500_quality: PoseQuality | None = None
         self._map_T_t265_odom: Pose2D | None = None
@@ -109,24 +111,35 @@ class PoseFusion:
         if pose is None or not _pose_valid(pose, quality):
             self._t265_quality = quality
             self._seen_t265 = True
+            self._break_t265_continuity()
             return
         confidence = _confidence(quality)
         if confidence < T265_MIN_CONFIDENCE:
             self._t265_quality = quality
             self._seen_t265 = True
+            self._break_t265_continuity()
             return
         if self._t265_history and pose.timestamp_s <= self._t265_history[-1].pose.timestamp_s:
             return
 
         if self._t265_raw_pose is not None and self._t265_pose is not None:
             dt = pose.timestamp_s - self._t265_raw_pose.timestamp_s
-            if 0.0 < dt < T265_JUMP_DT_S:
+            if dt >= T265_JUMP_DT_S:
+                self._break_t265_continuity()
+            elif 0.0 < dt < T265_JUMP_DT_S:
                 delta = compose_pose2d(inverse_pose2d(self._t265_raw_pose), pose)
                 if (math.hypot(delta.x_m, delta.y_m) > T265_JUMP_M
                         or abs(delta.yaw_rad) > T265_JUMP_YAW_RAD):
                     self._t265_rebase = compose_pose2d(
                         self._t265_pose, inverse_pose2d(pose)
                     )
+                    self._t265_history.clear()
+
+        if self._t265_continuity_broken:
+            self._t265_raw_pose = pose
+            self._t265_quality = quality
+            self._seen_t265 = True
+            return
 
         continuous = compose_pose2d(self._t265_rebase, pose)
         continuous = Pose2D(
@@ -140,6 +153,10 @@ class PoseFusion:
         cutoff = pose.timestamp_s - T265_HISTORY_S
         while len(self._t265_history) > 2 and self._t265_history[1].pose.timestamp_s < cutoff:
             self._t265_history.popleft()
+
+    def _break_t265_continuity(self) -> None:
+        self._t265_continuity_broken = True
+        self._t265_history.clear()
 
     def _sample_t265(self, timestamp_s: float) -> _TimedPose | None:
         if not self._t265_history:
@@ -245,7 +262,10 @@ class PoseFusion:
             t265_age is not None and t265_age <= self.config.t265_max_age_s
             and self._t265_quality is not None and self._t265_quality.valid
             and _confidence(self._t265_quality) >= T265_MIN_CONFIDENCE
+            and not self._t265_continuity_broken
         )
+        if self._t265_pose is not None and not t265_fresh:
+            self._break_t265_continuity()
         d500_fresh = (
             d500_age is not None and d500_age <= self.config.d500_max_age_s
             and self._d500_quality is not None and self._d500_quality.valid
@@ -278,6 +298,7 @@ class PoseFusion:
             self.global_anchor_established,
             None if self._t265_quality is None else _confidence(self._t265_quality),
             self._last_t265_alignment_ms,
+            self._t265_continuity_broken,
         )
 
     def _accept_d500(self, pose: Pose2D, quality: PoseQuality) -> None:

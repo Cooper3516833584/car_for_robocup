@@ -301,6 +301,7 @@ class RobocupRuntime:
                 anchor_initialized=estimate.anchor_initialized,
                 t265_confidence=estimate.t265_confidence,
                 t265_time_alignment_ms=estimate.t265_time_alignment_ms,
+                t265_continuity_broken=estimate.t265_continuity_broken,
             )
             localization_loss_pending = self._handle_localization(estimate, now)
             d500_global_pending = not self._hardware_global_localization_ready(now)

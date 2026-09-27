@@ -94,7 +94,9 @@ class PoseFusionTests(unittest.TestCase):
     def test_d500_stale_uses_t265_dead_reckoning_after_anchor(self) -> None:
         self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
         self.fusion.update_d500(Pose2D(0.0, 0.0, 0.0, 1.0), quality("d500"))
-        self.fusion.update_t265(Pose2D(0.2, 0.0, 0.0, 1.5), quality("t265"))
+        for index in range(1, 6):
+            stamp = 1.0 + index * 0.1
+            self.fusion.update_t265(Pose2D(0.2, 0.0, 0.0, stamp), quality("t265"))
 
         estimate = self.fusion.estimate(1.51)
         self.assertIs(estimate.state, PoseFusionState.D500_DEGRADED)
@@ -173,6 +175,33 @@ class PoseFusionTests(unittest.TestCase):
         self.assertAlmostEqual(after.x_m, before.x_m)
         self.assertAlmostEqual(after.y_m, before.y_m)
         self.assertAlmostEqual(after.yaw_rad, before.yaw_rad)
+
+    def test_tracking_gap_and_relocalization_without_fallback_stays_lost(self) -> None:
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        self.fusion.update_d500_absolute(Pose2D(3.0, 2.0, 0.0, 1.0), quality("d500"))
+        self.fusion.update_t265(Pose2D(0.05, 0.0, 0.0, 1.05), quality("t265"))
+        low = PoseQuality("t265", False, True, 1.0 / 3.0, 1.0 / 3.0)
+        self.fusion.update_t265(None, low)
+        self.fusion.update_t265(None, PoseQuality("t265", False, True))
+        self.fusion.update_t265(None, PoseQuality("t265", False, True))
+        self.fusion.update_t265(
+            Pose2D(2.0, -1.0, math.radians(70), 1.6), quality("t265")
+        )
+        estimate = self.fusion.estimate(1.6)
+        self.assertIsNone(estimate.pose)
+        self.assertTrue(estimate.t265_continuity_broken)
+        self.assertEqual(len(self.fusion._t265_history), 0)
+
+    def test_normal_twenty_hz_motion_does_not_break_continuity(self) -> None:
+        for step in range(21):
+            stamp = 1.0 + step * 0.05
+            self.fusion.update_t265(
+                Pose2D(step * 0.03, 0.0, math.radians(step * 3), stamp),
+                quality("t265"),
+            )
+        estimate = self.fusion.estimate(2.0)
+        self.assertFalse(estimate.t265_continuity_broken)
+        self.assertIs(estimate.state, PoseFusionState.UNANCHORED)
 
     def test_local_only_d500_cannot_change_anchor(self) -> None:
         self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
