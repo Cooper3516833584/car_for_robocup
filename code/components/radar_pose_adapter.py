@@ -9,6 +9,8 @@ from typing import Literal
 from core.frames import compose_pose2d
 from core.types import Pose2D
 
+from .radar_driver import Pose2D as RadarPose2D
+
 
 @dataclass(frozen=True, slots=True)
 class LegacyRadarPoseSpec:
@@ -85,3 +87,52 @@ class RadarPoseAdapter:
             map_T_base.yaw_rad,
             stamp,
         )
+
+    def from_map_base_pose(self, pose: Pose2D) -> RadarPose2D:
+        """Convert a canonical map ``base_link`` pose into the radar frame.
+
+        The D500 wall localizer expects ``radar_driver.Pose2D``: centimetres and
+        clockwise-positive degrees.  Keeping this conversion in one place stops
+        the two same-named types being mixed up, which otherwise fails with:
+        ``AttributeError: 'Pose2D' object has no attribute 'x_cm'``.
+        """
+
+        values = (pose.x_m, pose.y_m, pose.yaw_rad, pose.timestamp_s)
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError("pose must be finite")
+        return RadarPose2D(
+            x_cm=pose.x_m * 100.0,
+            y_cm=pose.y_m * 100.0,
+            yaw_cw_deg=-math.degrees(pose.yaw_rad),
+        )
+
+
+def compose_pose_with_delta_prior(
+    prior: RadarPose2D,
+    delta_x_m: float,
+    delta_y_m: float,
+    delta_yaw_rad: float,
+) -> RadarPose2D:
+    """Compose a car-frame delta onto a measured wall-frame start pose.
+
+    The T265 adapter's local origin is wherever its pose stream started, which
+    is not automatically the field origin or centre, so a wall predictor needs
+    an explicit start prior.  ``prior`` is in the radar convention (cm,
+    CW-positive degrees); the delta is in the car's own frame (metres,
+    CCW-positive radians).
+    """
+
+    values = (prior.x_cm, prior.y_cm, prior.yaw_cw_deg,
+              delta_x_m, delta_y_m, delta_yaw_rad)
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("prior and delta must be finite")
+
+    prior_yaw_ccw_deg = -prior.yaw_cw_deg
+    total_yaw_ccw_deg = prior_yaw_ccw_deg + math.degrees(delta_yaw_rad)
+    cos_a = math.cos(math.radians(prior_yaw_ccw_deg))
+    sin_a = math.sin(math.radians(prior_yaw_ccw_deg))
+    return RadarPose2D(
+        prior.x_cm + (delta_x_m * cos_a - delta_y_m * sin_a) * 100.0,
+        prior.y_cm + (delta_x_m * sin_a + delta_y_m * cos_a) * 100.0,
+        -total_yaw_ccw_deg,
+    )
