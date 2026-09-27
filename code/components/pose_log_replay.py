@@ -18,6 +18,7 @@ class PoseLogEvent:
     source: str
     pose: Pose2D
     quality: PoseQuality
+    map_alignment_valid: bool = False
 
 
 def read_pose_events(path: str | Path) -> list[PoseLogEvent]:
@@ -32,7 +33,16 @@ def read_pose_events(path: str | Path) -> list[PoseLogEvent]:
                 raise ValueError(f"invalid JSONL at line {line_number}: {exc}") from exc
             if not isinstance(row, dict):
                 raise ValueError(f"event at line {line_number} must be a JSON object")
-            source = {"t265_pose": "t265", "d500_pose": "d500"}.get(row.get("type"))
+            event_type = row.get("type")
+            d500_mode = str(row.get("d500_mode", "")).upper()
+            if event_type == "t265_pose":
+                source = "t265"
+            elif event_type in {"d500_pose", "d500_global_fallback"}:
+                source = "d500_global_fallback" if (
+                    event_type == "d500_global_fallback" or d500_mode == "GLOBAL_PREDICTED"
+                ) else "d500_absolute"
+            else:
+                source = None
             if source is None:
                 continue
             try:
@@ -49,19 +59,32 @@ def read_pose_events(path: str | Path) -> list[PoseLogEvent]:
             if not valid:
                 continue
             pose = Pose2D(x_m, y_m, yaw_rad, timestamp)
-            quality = PoseQuality(source, True, False, confidence, confidence, 0.0)
-            events.append(PoseLogEvent(timestamp, source, pose, quality))
-    events.sort(key=lambda event: (event.t_s, 0 if event.source == "t265" else 1))
+            quality = PoseQuality("d500" if source.startswith("d500") else source, True, False, confidence, confidence, 0.0)
+            map_alignment_valid = bool(
+                row.get("d500_absolute_observation_accepted", row.get("map_alignment_valid", False))
+                if source == "d500_absolute"
+                else row.get("d500_map_alignment_established", row.get("map_alignment_valid", False))
+            )
+            events.append(PoseLogEvent(timestamp, source, pose, quality, map_alignment_valid))
+    priority = {"t265": 0, "d500_absolute": 1, "d500_global_fallback": 2}
+    events.sort(key=lambda event: (event.t_s, priority[event.source]))
     return events
 
 
 def replay_fusion(events: Iterable[PoseLogEvent], fusion: PoseFusion) -> list[tuple[float, FusedPoseEstimate]]:
     """Feed time-sorted events without sleeping and return estimates per event."""
     output = []
+    alignment_trusted = False
     for event in events:
         if event.source == "t265":
             fusion.update_t265(event.pose, event.quality)
+        elif event.source == "d500_absolute":
+            fusion.update_d500_absolute(event.pose, event.quality)
+            alignment_trusted = alignment_trusted or event.map_alignment_valid
         else:
-            fusion.update_d500(event.pose, event.quality)
+            fusion.update_d500_global_fallback(
+                event.pose, event.quality,
+                map_alignment_valid=alignment_trusted and event.map_alignment_valid,
+            )
         output.append((event.t_s, fusion.estimate(event.t_s)))
     return output

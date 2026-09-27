@@ -89,6 +89,9 @@ class PoseFusion:
         self._t265_continuity_broken = False
         self._d500_pose: Pose2D | None = None
         self._d500_quality: PoseQuality | None = None
+        self._d500_global_fallback_pose: Pose2D | None = None
+        self._d500_global_fallback_quality: PoseQuality | None = None
+        self._d500_map_alignment_valid = False
         self._map_T_t265_odom: Pose2D | None = None
         self._last_d500_innovation_m: float | None = None
         self._last_d500_innovation_yaw_rad: float | None = None
@@ -124,9 +127,9 @@ class PoseFusion:
 
         if self._t265_raw_pose is not None and self._t265_pose is not None:
             dt = pose.timestamp_s - self._t265_raw_pose.timestamp_s
-            if dt >= T265_JUMP_DT_S:
+            if not self._t265_continuity_broken and dt >= T265_JUMP_DT_S:
                 self._break_t265_continuity()
-            elif 0.0 < dt < T265_JUMP_DT_S:
+            elif not self._t265_continuity_broken and 0.0 < dt < T265_JUMP_DT_S:
                 delta = compose_pose2d(inverse_pose2d(self._t265_raw_pose), pose)
                 if (math.hypot(delta.x_m, delta.y_m) > T265_JUMP_M
                         or abs(delta.yaw_rad) > T265_JUMP_YAW_RAD):
@@ -136,15 +139,26 @@ class PoseFusion:
                     self._t265_history.clear()
 
         if self._t265_continuity_broken:
-            self._t265_raw_pose = pose
-            self._t265_quality = quality
-            self._seen_t265 = True
-            return
+            if self._fresh_d500_global_fallback(pose.timestamp_s):
+                assert self._d500_global_fallback_pose is not None
+                self._map_T_t265_odom = compose_pose2d(
+                    self._d500_global_fallback_pose, inverse_pose2d(pose)
+                )
+                self._t265_rebase = Pose2D(0.0, 0.0, 0.0, pose.timestamp_s)
+                self._t265_continuity_broken = False
+                self._t265_history.clear()
+                continuous = pose
+            else:
+                self._t265_raw_pose = pose
+                self._t265_quality = quality
+                self._seen_t265 = True
+                return
+        else:
+            continuous = compose_pose2d(self._t265_rebase, pose)
+            continuous = Pose2D(
+                continuous.x_m, continuous.y_m, continuous.yaw_rad, pose.timestamp_s
+            )
 
-        continuous = compose_pose2d(self._t265_rebase, pose)
-        continuous = Pose2D(
-            continuous.x_m, continuous.y_m, continuous.yaw_rad, pose.timestamp_s
-        )
         self._t265_raw_pose = pose
         self._t265_pose = continuous
         self._t265_quality = quality
@@ -153,6 +167,29 @@ class PoseFusion:
         cutoff = pose.timestamp_s - T265_HISTORY_S
         while len(self._t265_history) > 2 and self._t265_history[1].pose.timestamp_s < cutoff:
             self._t265_history.popleft()
+
+    def update_d500_global_fallback(
+        self,
+        pose: Pose2D,
+        quality: PoseQuality,
+        *,
+        map_alignment_valid: bool,
+    ) -> None:
+        """Cache propagated D500 map pose; this channel never changes the anchor."""
+        if not map_alignment_valid or not _pose_valid(pose, quality) or quality.degraded:
+            return
+        self._d500_map_alignment_valid = True
+        self._d500_global_fallback_pose = pose
+        self._d500_global_fallback_quality = quality
+        self._seen_d500 = True
+
+    def _fresh_d500_global_fallback(self, now_s: float) -> bool:
+        pose = self._d500_global_fallback_pose
+        quality = self._d500_global_fallback_quality
+        if not self._d500_map_alignment_valid or pose is None or quality is None or not quality.valid:
+            return False
+        age = float(now_s) - pose.timestamp_s
+        return 0.0 <= age <= self.config.d500_max_age_s
 
     def _break_t265_continuity(self) -> None:
         self._t265_continuity_broken = True
@@ -270,15 +307,17 @@ class PoseFusion:
             d500_age is not None and d500_age <= self.config.d500_max_age_s
             and self._d500_quality is not None and self._d500_quality.valid
         )
+        fallback_fresh = self._fresh_d500_global_fallback(now)
         if t265_fresh and d500_fresh and self._map_T_t265_odom is not None:
             pose = compose_pose2d(self._map_T_t265_odom, self._t265_pose)
             state, flags, age = PoseFusionState.OK, ("t265", "d500", "fused"), t265_age
         elif t265_fresh and self._map_T_t265_odom is not None:
             pose = compose_pose2d(self._map_T_t265_odom, self._t265_pose)
             state, flags, age = PoseFusionState.D500_DEGRADED, ("t265", "dead_reckoning"), t265_age
-        elif self._map_T_t265_odom is not None and d500_fresh:
-            pose = self._d500_pose
-            state, flags, age = PoseFusionState.T265_DEGRADED, ("d500",), d500_age
+        elif fallback_fresh:
+            pose = self._d500_global_fallback_pose
+            fallback_age = now - pose.timestamp_s
+            state, flags, age = PoseFusionState.T265_DEGRADED, ("d500_global_fallback",), fallback_age
         elif t265_fresh:
             pose = None
             state, flags, age = PoseFusionState.UNANCHORED, ("t265", "unanchored"), t265_age

@@ -113,6 +113,13 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(estimate.pose.x_m, 1.5)
         self.assertAlmostEqual(estimate.pose.y_m, 2.5)
         self.assertAlmostEqual(estimate.pose.yaw_rad, -0.1745329252)
+        anchor = runtime.fusion.map_T_t265_odom
+        update.global_pose = RadarPose2D(160.0, 250.0, 10.0)
+        update.absolute_observation_accepted = False
+        runtime.on_d500_update(update)
+        runtime._consume_d500(1.0)
+        self.assertEqual(runtime.fusion.map_T_t265_odom, anchor)
+        self.assertEqual(runtime.fusion._d500_global_fallback_pose.x_m, 1.6)
 
         local_runtime = self._runtime()
         update.map_alignment_established = False
@@ -127,6 +134,36 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertIsNone(local_runtime.fusion.map_T_t265_odom)
         self.assertIsNone(local_runtime.fusion.estimate(1.0).d500_accepted)
         local_runtime.close()
+        runtime.close()
+
+    def test_runtime_does_not_trust_identity_until_absolute_then_allows_d500_only(self) -> None:
+        runtime = self._runtime()
+        update = types.SimpleNamespace(
+            odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 0.0, 0.0), icp=None),
+            global_pose=RadarPose2D(100.0, 0.0, 0.0),
+            map_alignment_established=True,
+            map_pose_valid=True,
+            absolute_observation_available=False,
+            absolute_observation_accepted=False,
+            global_confidence=None,
+            wall_fusion=None,
+        )
+        runtime.on_d500_update(update)
+        runtime._consume_d500(1.0)
+        self.assertFalse(runtime._d500_global_alignment_trusted)
+        self.assertIsNone(runtime.fusion.estimate(1.0).pose)
+
+        update.absolute_observation_available = True
+        update.absolute_observation_accepted = True
+        update.global_confidence = 0.9
+        runtime.on_d500_update(update)
+        runtime._consume_d500(1.0)
+        estimate = runtime.fusion.estimate(1.0)
+        self.assertTrue(runtime._d500_global_alignment_trusted)
+        self.assertIsNone(runtime.fusion.map_T_t265_odom)
+        self.assertEqual(estimate.source_flags, ("d500_global_fallback",))
+        self.assertAlmostEqual(estimate.pose.x_m, 1.0)
+        self.assertTrue(runtime._hardware_global_localization_ready(1.0))
         runtime.close()
 
     def test_low_confidence_and_large_position_jump_are_rejected_as_absolute(self) -> None:

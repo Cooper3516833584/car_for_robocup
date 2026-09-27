@@ -39,7 +39,13 @@ def synthetic_trajectory(path: Path) -> None:
             d500_x = x + (5.0 if abs(t - 6.0) < 1e-8 else 0.0)
             stream.write(json.dumps({
                 "t": t, "type": "d500_pose", "x_m": d500_x,
-                "y_m": y, "yaw_rad": yaw,
+                "y_m": y, "yaw_rad": yaw, "d500_mode": "GLOBAL",
+                "d500_absolute_observation_accepted": True,
+            }) + "\n")
+            stream.write(json.dumps({
+                "t": t, "type": "d500_pose", "x_m": x,
+                "y_m": y, "yaw_rad": yaw, "d500_mode": "GLOBAL_PREDICTED",
+                "d500_map_alignment_established": True,
             }) + "\n")
             index += 1
 
@@ -51,7 +57,7 @@ class PoseLogReplayTests(unittest.TestCase):
             synthetic_trajectory(path)
             events = read_pose_events(path)
             estimates = replay_fusion(events, PoseFusion(load_v2_config().fusion))
-        self.assertEqual(len(events), 101)
+        self.assertEqual(len(events), 152)
         outlier_result = next(estimate for t, estimate in estimates if abs(t - 6.0) < 1e-8 and estimate.d500_accepted is False)
         self.assertEqual(outlier_result.rejection_reason, "position_innovation_gate")
         t265_dropout = next(
@@ -63,6 +69,25 @@ class PoseLogReplayTests(unittest.TestCase):
         self.assertEqual(final.state.value, "ok")
         self.assertAlmostEqual(final.pose.x_m, 1.0, delta=0.10)
         self.assertAlmostEqual(final.pose.y_m, 1.0, delta=0.10)
+
+    def test_replay_uses_predicted_global_fallback_after_t265_dropout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fallback.jsonl"
+            path.write_text(
+                '{"t":0.0,"type":"t265_pose","x_m":0,"y_m":0,"yaw_rad":0}\n'
+                '{"t":0.0,"type":"d500_pose","x_m":1,"y_m":0,"yaw_rad":0,'
+                '"d500_mode":"GLOBAL","d500_absolute_observation_accepted":true}\n'
+                '{"t":0.2,"type":"d500_pose","x_m":1.2,"y_m":0,"yaw_rad":0,'
+                '"d500_mode":"GLOBAL_PREDICTED","d500_map_alignment_established":true}\n'
+                '{"t":0.4,"type":"d500_pose","x_m":1.4,"y_m":0,"yaw_rad":0,'
+                '"d500_mode":"GLOBAL_PREDICTED","d500_map_alignment_established":true}\n',
+                encoding="utf-8",
+            )
+            events = read_pose_events(path)
+            estimates = replay_fusion(events, PoseFusion(load_v2_config().fusion))
+        final = estimates[-1][1]
+        self.assertEqual(final.source_flags, ("d500_global_fallback",))
+        self.assertAlmostEqual(final.pose.x_m, 1.4)
 
     def test_runtime_replay_consumes_events_without_sensor_devices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

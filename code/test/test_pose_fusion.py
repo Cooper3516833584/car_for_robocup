@@ -83,13 +83,13 @@ class PoseFusionTests(unittest.TestCase):
         self.assertEqual(estimate.rejection_reason, "position_innovation_gate")
         self.assertEqual(estimate.pose.x_m, before.x_m)
 
-    def test_t265_stale_falls_back_to_recent_d500(self) -> None:
+    def test_t265_stale_does_not_reuse_old_absolute_as_propagated_fallback(self) -> None:
         self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
         self.fusion.update_d500(Pose2D(1.0, 2.0, 0.3, 1.0), quality("d500"))
 
         estimate = self.fusion.estimate(1.2)
-        self.assertIs(estimate.state, PoseFusionState.T265_DEGRADED)
-        self.assertEqual(estimate.pose, Pose2D(1.0, 2.0, 0.3, 1.0))
+        self.assertIs(estimate.state, PoseFusionState.LOST)
+        self.assertIsNone(estimate.pose)
 
     def test_d500_stale_uses_t265_dead_reckoning_after_anchor(self) -> None:
         self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
@@ -227,6 +227,63 @@ class PoseFusionTests(unittest.TestCase):
         self.assertTrue(after_recovery.d500_accepted)
         self.assertLess(abs(after_recovery.pose.x_m - before_dropout_end.x_m), 0.05)
         self.assertIs(after_recovery.state, PoseFusionState.OK)
+
+    def test_fresh_global_fallback_is_used_when_absolute_and_t265_are_stale(self) -> None:
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        self.fusion.update_d500_absolute(Pose2D(1.0, 2.0, 0.0, 1.0), quality("d500"))
+        self.fusion.update_d500_global_fallback(
+            Pose2D(1.3, 2.1, 0.05, 4.0), quality("d500"), map_alignment_valid=True
+        )
+        estimate = self.fusion.estimate(4.1)
+        self.assertIs(estimate.state, PoseFusionState.T265_DEGRADED)
+        self.assertEqual(estimate.source_flags, ("d500_global_fallback",))
+        self.assertEqual(estimate.pose, Pose2D(1.3, 2.1, 0.05, 4.0))
+
+    def test_global_fallback_never_changes_anchor_and_never_preempts_healthy_t265(self) -> None:
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        self.fusion.update_d500_absolute(Pose2D(1.0, 0.0, 0.0, 1.0), quality("d500"))
+        anchor = self.fusion.map_T_t265_odom
+        self.fusion.update_d500_global_fallback(
+            Pose2D(9.0, 8.0, 1.0, 1.1), quality("d500"), map_alignment_valid=True
+        )
+        self.assertEqual(self.fusion.map_T_t265_odom, anchor)
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.1), quality("t265"))
+        estimate = self.fusion.estimate(1.1)
+        self.assertEqual(estimate.pose.x_m, 1.0)
+        self.assertNotIn("d500_global_fallback", estimate.source_flags)
+
+    def test_t265_recovery_uses_fresh_fallback_to_rebuild_map_anchor(self) -> None:
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        self.fusion.update_d500_absolute(Pose2D(0.0, 0.0, 0.0, 1.0), quality("d500"))
+        self.fusion.update_d500_global_fallback(
+            Pose2D(0.3, 0.0, 0.0, 1.6), quality("d500"), map_alignment_valid=True
+        )
+        self.fusion.update_t265(None, PoseQuality("t265", False, True, 1.0 / 3.0, 1.0 / 3.0))
+        self.fusion.update_t265(
+            Pose2D(2.0, -1.0, math.radians(70), 1.6), quality("t265")
+        )
+        estimate = self.fusion.estimate(1.6)
+        self.assertFalse(estimate.t265_continuity_broken)
+        self.assertAlmostEqual(estimate.pose.x_m, 0.3)
+        self.assertAlmostEqual(estimate.pose.y_m, 0.0)
+        self.assertAlmostEqual(estimate.pose.yaw_rad, 0.0)
+
+    def test_disabled_t265_can_localize_from_aligned_d500_global_stream(self) -> None:
+        self.fusion.update_d500_global_fallback(
+            Pose2D(4.0, 1.0, 0.2, 2.0), quality("d500"), map_alignment_valid=True
+        )
+        estimate = self.fusion.estimate(2.1)
+        self.assertIs(estimate.state, PoseFusionState.T265_DEGRADED)
+        self.assertIsNotNone(estimate.pose)
+        self.assertEqual(estimate.pose.x_m, 4.0)
+
+    def test_identity_or_untrusted_map_alignment_cannot_enable_fallback(self) -> None:
+        self.fusion.update_d500_global_fallback(
+            Pose2D(0.0, 0.0, 0.0, 1.0), quality("d500"), map_alignment_valid=False
+        )
+        estimate = self.fusion.estimate(1.1)
+        self.assertIsNone(estimate.pose)
+        self.assertIs(estimate.state, PoseFusionState.INITIALIZING)
 
     def test_v2_factory_builds_fusion_from_fusion_config(self) -> None:
         from config.v2_factory import build_pose_fusion

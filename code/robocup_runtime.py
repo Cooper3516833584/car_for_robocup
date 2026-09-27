@@ -233,6 +233,7 @@ class RobocupRuntime:
         self.d500_abs_reject_yaw_gate = 0
         self._last_d500_absolute_update_s: float | None = None
         self._last_d500_map_pose_update_s: float | None = None
+        self._d500_global_alignment_trusted = False
         self._d500_clock = DeviceClockMapper(modulus_ms=0x10000)
         self._d500_global_pending = False
         self._started = False
@@ -294,6 +295,13 @@ class RobocupRuntime:
                 state=estimate.state.value,
                 age_s=estimate.age_s,
                 source_flags=estimate.source_flags,
+                fusion_source=(
+                    "T265_FUSED" if "fused" in estimate.source_flags
+                    else "D500_FALLBACK" if "d500_global_fallback" in estimate.source_flags
+                    else "LOST" if estimate.pose is None
+                    else estimate.state.value.upper()
+                ),
+                anchor_valid=estimate.anchor_initialized,
                 d500_accepted=estimate.d500_accepted,
                 d500_innovation_m=estimate.last_d500_innovation_m,
                 d500_innovation_yaw_rad=estimate.last_d500_innovation_yaw_rad,
@@ -517,7 +525,12 @@ class RobocupRuntime:
             sample = self.d500_source.read()
             if sample is not None:
                 pose = self.radar_adapter.to_map_base_pose(sample, timestamp_s=sample.timestamp_s)
-                self.fusion.update_d500_absolute(pose, PoseQuality("d500", True, False, age_s=max(0.0, now_s - sample.timestamp_s)))
+                quality = PoseQuality("d500", True, False, age_s=max(0.0, now_s - sample.timestamp_s))
+                self.fusion.update_d500_absolute(pose, quality)
+                self._d500_global_alignment_trusted = True
+                self.fusion.update_d500_global_fallback(
+                    pose, quality, map_alignment_valid=True
+                )
                 self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad)
         else:
             while True:
@@ -542,6 +555,9 @@ class RobocupRuntime:
                         # measurement timestamp, not against the latest pose.
                         pose = observation.map_pose
                         accepted_absolute = True
+                        if observation.map_pose_valid:
+                            self._d500_global_alignment_trusted = True
+                            self._last_d500_absolute_update_s = observation.timestamp_s
                 quality = PoseQuality(
                     "d500_wall_absolute" if observation.absolute_observation_accepted else "d500_local_or_propagated",
                     True,
@@ -573,14 +589,41 @@ class RobocupRuntime:
                         confidence=confidence,
                         d500_update_accepted=absolute_correction_accepted,
                         d500_reject_reason=fusion_estimate.rejection_reason,
+                        d500_absolute_observation_accepted=observation.absolute_observation_accepted,
                     )
                 elif observation.map_pose_valid and observation.map_pose is not None:
-                    self._emit("d500_pose", x_m=observation.map_pose.x_m, y_m=observation.map_pose.y_m, yaw_rad=observation.map_pose.yaw_rad, d500_mode="GLOBAL_PREDICTED", confidence=None)
+                    self._emit(
+                        "d500_pose",
+                        x_m=observation.map_pose.x_m,
+                        y_m=observation.map_pose.y_m,
+                        yaw_rad=observation.map_pose.yaw_rad,
+                        d500_mode="GLOBAL_PREDICTED",
+                        confidence=None,
+                        d500_map_alignment_established=observation.map_alignment_established,
+                        d500_global_alignment_trusted=self._d500_global_alignment_trusted,
+                    )
                 elif observation.local_pose is not None:
                     self._emit("d500_pose", x_m=observation.local_pose.x_m, y_m=observation.local_pose.y_m, yaw_rad=observation.local_pose.yaw_rad, d500_mode=D500LocalizationMode.LOCAL_ONLY.value, confidence=None)
                 else:
                     self._emit("d500_rejected", reason="localization_lost", d500_mode=D500LocalizationMode.LOST.value)
                 now = float(now_s)
+                if observation.map_pose_valid and observation.map_pose is not None:
+                    fallback_quality = PoseQuality(
+                        "d500_global_fallback",
+                        True,
+                        False,
+                        position_confidence=confidence,
+                        heading_confidence=confidence,
+                        age_s=max(0.0, now - observation.timestamp_s),
+                    )
+                    self.fusion.update_d500_global_fallback(
+                        observation.map_pose,
+                        fallback_quality,
+                        map_alignment_valid=(
+                            observation.map_alignment_established
+                            and self._d500_global_alignment_trusted
+                        ),
+                    )
                 self._emit(
                     "d500_localization_status",
                     d500_map_alignment_established=observation.map_alignment_established,
@@ -655,9 +698,23 @@ class RobocupRuntime:
             if event.source == "t265":
                 self.fusion.update_t265(pose, event.quality)
                 self._emit("t265_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, replay=True)
-            else:
+            elif event.source == "d500_absolute":
                 self.fusion.update_d500_absolute(pose, event.quality)
-                self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, replay=True)
+                self._d500_global_alignment_trusted = (
+                    self._d500_global_alignment_trusted or event.map_alignment_valid
+                )
+            else:
+                self.fusion.update_d500_global_fallback(
+                    pose,
+                    event.quality,
+                    map_alignment_valid=(
+                        self._d500_global_alignment_trusted and event.map_alignment_valid
+                    ),
+                )
+                self._emit(
+                    "d500_pose", x_m=pose.x_m, y_m=pose.y_m,
+                    yaw_rad=pose.yaw_rad, d500_mode="GLOBAL_PREDICTED", replay=True,
+                )
             self._replay_index += 1
 
     def _emit(self, event_type: str, *, priority: bool = False, **fields) -> None:
