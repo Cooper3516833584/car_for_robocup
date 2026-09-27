@@ -1611,6 +1611,7 @@ class RadarLocalizationUpdate:
     absolute_observation_available: bool = False
     absolute_observation_accepted: bool = False
     global_confidence: float | None = None
+    local_pose_valid: bool = False
 
 
 def _wall_pose_confidence(result: WallFusionResult) -> float:
@@ -1789,6 +1790,14 @@ class D500RadarComponent:
         self.wall_fusion_config = wall_fusion_config
         self.global_correction_mode = global_correction_mode
         self._state_lock = threading.RLock()
+        # Map-frame pose prediction used to guide wall association.  It comes
+        # from the fused/T265 chain, so a rejected scan-to-scan ICP no longer
+        # decides whether the absolute boundary observer can run at all.
+        self._global_pose_hint: Pose2D | None = None
+        # Last globally valid pose from an accepted ICP update, used as the
+        # wall predictor while ICP is rejecting (never integrate a rejected
+        # delta into it).
+        self._last_accepted_global_pose: Pose2D | None = None
         self._wall_scan_count = 0
         self._wall_attempt_index = 0
         self._wall_x_residual_history: deque[_WallResidualSample] = deque(
@@ -1829,6 +1838,46 @@ class D500RadarComponent:
     def get_alignment(self) -> DroneGlobalAlignment | None:
         with self._state_lock:
             return self._alignment
+
+    def set_global_pose_hint(self, pose: Pose2D | None) -> None:
+        """Publish the fused/T265 map pose used to guide wall association.
+
+        The hint is a *prediction*, not a measurement: it only narrows the wall
+        search, and residuals are still gated before anything is accepted.  It
+        is deliberately in the radar convention (cm, clockwise-positive
+        degrees) to avoid mixing the two ``Pose2D`` types in this module.
+        """
+
+        if pose is not None and not isinstance(pose, Pose2D):
+            raise TypeError("global pose hint must be a radar Pose2D or None")
+        with self._state_lock:
+            self._global_pose_hint = pose
+
+    def get_global_pose_hint(self) -> Pose2D | None:
+        with self._state_lock:
+            return self._global_pose_hint
+
+    def _wall_predictor(
+        self, alignment: DroneGlobalAlignment, odometry_pose: Pose2D, accepted: bool
+    ) -> Pose2D:
+        """Choose the wall-association prediction.
+
+        Priority:
+          1. the latest fused/T265 map pose hint;
+          2. otherwise the last globally valid pose from an accepted update,
+             propagated without integrating the rejected delta;
+          3. otherwise the current ICP pose, which is all that is available
+             before any global pose exists (bootstrap).
+        """
+
+        with self._state_lock:
+            hint = self._global_pose_hint
+            last_accepted = self._last_accepted_global_pose
+        if hint is not None:
+            return hint
+        if not accepted and last_accepted is not None:
+            return last_accepted
+        return alignment.pose_to_global(odometry_pose)
 
     def set_motion_hint(self, moving: bool) -> None:
         """Freeze incremental ICP when commanded hardware output is stopped."""
@@ -2061,8 +2110,16 @@ class D500RadarComponent:
                 wall_localizer = self.wall_localizer
                 wall_fusion_config = self.wall_fusion_config
             if alignment is not None:
-                global_pose = alignment.pose_to_global(odometry_update.pose)
-                if odometry_update.accepted and wall_localizer is not None:
+                # The wall predictor is chosen independently of ICP acceptance:
+                # a rejected scan-to-scan ICP must not switch the absolute
+                # boundary observer off.  The predictor is only a search prior.
+                global_pose = self._wall_predictor(
+                    alignment, odometry_update.pose, odometry_update.accepted
+                )
+                if odometry_update.accepted:
+                    with self._state_lock:
+                        self._last_accepted_global_pose = global_pose
+                if wall_localizer is not None:
                     with self._state_lock:
                         self._wall_scan_count += 1
                         try_wall_fusion = (
@@ -2115,9 +2172,13 @@ class D500RadarComponent:
                             if self.global_correction_mode is GlobalCorrectionMode.LEGACY_REWRITE_ODOMETRY:
                                 corrected_local_pose = alignment.pose_to_local(global_pose)
                                 self.odometry.pose = corrected_local_pose
+                                # Keep the ICP verdict: a wall correction is not
+                                # an ICP acceptance, and overwriting it here used
+                                # to hide rejections from diagnostics and from
+                                # the runtime's local/absolute split.
                                 odometry_update = RadarOdometryUpdate(
                                     corrected_local_pose,
-                                    True,
+                                    odometry_update.accepted,
                                     odometry_update.initialized,
                                     odometry_update.icp,
                                     odometry_update.rejection_reason,
@@ -2140,7 +2201,13 @@ class D500RadarComponent:
                     self.global_map.add_points(global_points)
             with self._state_lock:
                 map_alignment_established = self._alignment is not None
-            map_pose_valid = bool(odometry_update.accepted and map_alignment_established and global_pose is not None)
+            # Local ICP validity and absolute-observation validity are separate
+            # concepts: a rejected ICP only means the local scan-to-scan delta
+            # is untrustworthy, not that the boundary observation is unusable.
+            local_pose_valid = bool(odometry_update.accepted)
+            map_pose_valid = bool(
+                local_pose_valid and map_alignment_established and global_pose is not None
+            )
             absolute_observation_available = bool(
                 wall_fusion is not None and wall_fusion.observation is not None
             )
@@ -2158,6 +2225,7 @@ class D500RadarComponent:
                 absolute_observation_available,
                 absolute_observation_accepted,
                 _wall_pose_confidence(wall_fusion) if absolute_observation_accepted else None,
+                local_pose_valid,
             )
             updates.append(update)
             _safe_callback(self.on_update, update)

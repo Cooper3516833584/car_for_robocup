@@ -637,8 +637,23 @@ class RobocupRuntime:
     def on_d500_update(self, update) -> None:
         """Thread-safe callback passed to the real D500 component."""
 
-        if not update.odometry.accepted:
-            self._emit("d500_rejected", reason=update.odometry.rejection_reason or "odometry_rejected", d500_mode="LOST", priority=True)
+        # A rejected scan-to-scan ICP only invalidates the local delta; it must
+        # not discard the scan.  A complete scan can still carry a usable
+        # absolute boundary observation, which is exactly the case that matters
+        # when the car rotates in place and ICP rejects.
+        local_valid = bool(
+            getattr(update, "local_pose_valid", update.odometry.accepted)
+        )
+        absolute_available = bool(
+            getattr(update, "absolute_observation_available", False)
+        )
+        if not local_valid and not absolute_available:
+            self._emit(
+                "d500_rejected",
+                reason=update.odometry.rejection_reason or "odometry_rejected",
+                d500_mode="LOST",
+                priority=True,
+            )
             return
         received_s = float(self.clock())
         scan = getattr(update, "scan", None)
