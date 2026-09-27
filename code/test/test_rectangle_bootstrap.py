@@ -106,11 +106,22 @@ class NonSquareRectangleTests(unittest.TestCase):
         self.assertTrue(result.geometry_valid, result.reason)
         self.assertFalse(result.orientation_resolved)
         self.assertEqual(result.ambiguity_order, OrientationAmbiguity.MIRRORED)
-        self.assertEqual(result.candidate_count, 4)
-        # The 90/270 rotations are reported but are not consistent with a
-        # non-square extent; the caller must apply the 180 deg ambiguity order.
+        # Measured non-equal extents rule out the 90/270 hypotheses, which would
+        # swap width and height; only the 180 deg ambiguity remains.
+        self.assertEqual(result.candidate_count, 2)
         yaws = sorted(c.pose_in_world.yaw_cw_deg % 360.0 for c in result.candidates)
-        self.assertEqual(len(yaws), 4)
+        self.assertAlmostEqual(yaws[0], 0.0, places=6)
+        self.assertAlmostEqual(yaws[1], 180.0, places=6)
+
+    def test_square_candidates_include_the_axis_swap_hypotheses(self) -> None:
+        """A square field keeps 90/270 because they are indistinguishable."""
+
+        points = rectangle_points(500.0, 500.0, robot=(250.0, 250.0, 0.0))
+        result = bootstrap_rectangle(
+            points, field_width_cm=500.0, field_height_cm=500.0
+        )
+        self.assertEqual(result.candidate_count, 4)
+        self.assertEqual(result.ambiguity_order, OrientationAmbiguity.SQUARE)
 
     def test_wrong_configured_extent_is_rejected(self) -> None:
         """Interior clutter must not be accepted as a field-sized rectangle."""

@@ -315,9 +315,11 @@ def _enumerate_candidates(
 ):
     """Build every global pose consistent with a rectangle observation.
 
-    The rectangle's four corners are all equally valid world origins for a
-    square field; each corresponds to rotating the local frame by a multiple of
-    90 deg.  All of them are returned.
+    A square field admits all four corners as equally valid world origins.
+    For a non-square field the 90 deg and 270 deg hypotheses additionally swap
+    the width and height axes, which contradicts the measured extents, so only
+    the 0 deg and 180 deg hypotheses survive: the 180 deg ambiguity is intrinsic
+    to observing edges and cannot be removed by dimensions alone.
     """
 
     corners = [
@@ -326,6 +328,9 @@ def _enumerate_candidates(
         (field_width_cm, field_height_cm, 180.0),
         (0.0, field_height_cm, 270.0),
     ]
+    if not square:
+        corners = [corners[0], corners[2]]
+
     candidates = []
     for index, (corner_x, corner_y, yaw_cw_deg) in enumerate(corners):
         rotated = _rotate_pose(robot_corner, yaw_cw_deg)
