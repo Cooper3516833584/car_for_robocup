@@ -232,6 +232,9 @@ class RobocupRuntime:
         self.d500_abs_reject_yaw_gate = 0
         self._last_d500_absolute_update_s: float | None = None
         self._last_d500_map_pose_update_s: float | None = None
+        self._d500_clock_last_raw_ms: int | None = None
+        self._d500_clock_unwrapped_ms: int | None = None
+        self._d500_clock_offset_s: float | None = None
         self._d500_global_pending = False
         self._started = False
         self._closed = False
@@ -296,6 +299,9 @@ class RobocupRuntime:
                 d500_innovation_m=estimate.last_d500_innovation_m,
                 d500_innovation_yaw_rad=estimate.last_d500_innovation_yaw_rad,
                 rejection_reason=estimate.rejection_reason,
+                anchor_initialized=estimate.anchor_initialized,
+                t265_confidence=estimate.t265_confidence,
+                t265_time_alignment_ms=estimate.t265_time_alignment_ms,
             )
             localization_loss_pending = self._handle_localization(estimate, now)
             d500_global_pending = not self._hardware_global_localization_ready(now)
@@ -487,6 +493,7 @@ class RobocupRuntime:
                 mapper_confidence=raw.mapper_confidence,
             )
         else:
+            self.fusion.update_t265(None, update.quality)
             self._emit(
                 "t265_rejected",
                 reason=update.reason or "invalid",
@@ -525,22 +532,10 @@ class RobocupRuntime:
                         self.d500_abs_reject_low_confidence += 1
                         self._emit("d500_abs_rejected", reason="low_confidence", confidence=confidence)
                     else:
-                        prior = self.fusion.estimate(now_s).pose
-                        if self.fusion.global_anchor_established and prior is not None:
-                            position_jump = math.hypot(observation.map_pose.x_m - prior.x_m, observation.map_pose.y_m - prior.y_m)
-                            yaw_jump = abs((observation.map_pose.yaw_rad - prior.yaw_rad + math.pi) % (2.0 * math.pi) - math.pi)
-                            if position_jump > self.config.d500_localization.max_position_jump_m:
-                                self.d500_abs_reject_position_gate += 1
-                                self._emit("d500_abs_rejected", reason="position_gate", innovation_m=position_jump)
-                            elif yaw_jump > self.config.d500_localization.max_yaw_jump_rad:
-                                self.d500_abs_reject_yaw_gate += 1
-                                self._emit("d500_abs_rejected", reason="yaw_gate", innovation_yaw_rad=yaw_jump)
-                            else:
-                                pose = observation.map_pose
-                                accepted_absolute = True
-                        else:
-                            pose = observation.map_pose
-                            accepted_absolute = True
+                        # Fusion gates innovations against T265 at the D500
+                        # measurement timestamp, not against the latest pose.
+                        pose = observation.map_pose
+                        accepted_absolute = True
                 quality = PoseQuality(
                     "d500_wall_absolute" if observation.absolute_observation_accepted else "d500_local_or_propagated",
                     True,
@@ -551,11 +546,28 @@ class RobocupRuntime:
                 )
                 if accepted_absolute and pose is not None:
                     self.fusion.update_d500_absolute(pose, quality)
-                    absolute_correction_accepted = self.fusion.estimate(now_s).d500_accepted is True
+                    fusion_estimate = self.fusion.estimate(now_s)
+                    absolute_correction_accepted = fusion_estimate.d500_accepted is True
                     if absolute_correction_accepted:
                         self._last_d500_absolute_update_s = observation.timestamp_s
                         self.d500_abs_accept_count += 1
-                    self._emit("d500_pose", x_m=pose.x_m, y_m=pose.y_m, yaw_rad=pose.yaw_rad, d500_mode=mode.value, confidence=confidence)
+                    else:
+                        reason = fusion_estimate.rejection_reason or "fusion_rejected"
+                        if reason == "position_innovation_gate":
+                            self.d500_abs_reject_position_gate += 1
+                        elif reason == "yaw_innovation_gate":
+                            self.d500_abs_reject_yaw_gate += 1
+                        self._emit("d500_abs_rejected", reason=reason, confidence=confidence)
+                    self._emit(
+                        "d500_pose",
+                        x_m=pose.x_m,
+                        y_m=pose.y_m,
+                        yaw_rad=pose.yaw_rad,
+                        d500_mode=mode.value,
+                        confidence=confidence,
+                        d500_update_accepted=absolute_correction_accepted,
+                        d500_reject_reason=fusion_estimate.rejection_reason,
+                    )
                 elif observation.map_pose_valid and observation.map_pose is not None:
                     self._emit("d500_pose", x_m=observation.map_pose.x_m, y_m=observation.map_pose.y_m, yaw_rad=observation.map_pose.yaw_rad, d500_mode="GLOBAL_PREDICTED", confidence=None)
                 elif observation.local_pose is not None:
@@ -579,7 +591,11 @@ class RobocupRuntime:
         if not update.odometry.accepted:
             self._emit("d500_rejected", reason=update.odometry.rejection_reason or "odometry_rejected", d500_mode="LOST", priority=True)
             return
-        timestamp_s = float(self.clock())
+        received_s = float(self.clock())
+        scan = getattr(update, "scan", None)
+        timestamp_s = self._map_d500_timestamp(
+            getattr(scan, "timestamp_ms", None), received_s
+        )
         local_pose = self.radar_adapter.to_map_base_pose(update.odometry.pose, timestamp_s=timestamp_s)
         confidence = update.global_confidence
         map_pose = None
@@ -616,6 +632,37 @@ class RobocupRuntime:
             d500_absolute_observation_accepted=update.absolute_observation_accepted,
             global_confidence=confidence,
         )
+
+    def _map_d500_timestamp(self, timestamp_ms, received_s: float) -> float:
+        """Map the D500's wrapping uint16 millisecond clock into monotonic time.
+
+        The first completed scan establishes a host/device clock offset. Later
+        scans use the device measurement counter, so callback queue delays do
+        not change the fusion timestamp.
+        """
+        try:
+            raw_ms = int(timestamp_ms)
+        except (TypeError, ValueError, OverflowError):
+            return received_s
+        if not 0 <= raw_ms <= 0xFFFF:
+            return received_s
+        if self._d500_clock_last_raw_ms is None:
+            self._d500_clock_last_raw_ms = raw_ms
+            self._d500_clock_unwrapped_ms = raw_ms
+            self._d500_clock_offset_s = received_s - raw_ms / 1000.0
+            return received_s
+
+        delta_ms = (raw_ms - self._d500_clock_last_raw_ms) & 0xFFFF
+        if delta_ms > 0x7FFF:
+            delta_ms -= 0x10000
+        assert self._d500_clock_unwrapped_ms is not None
+        assert self._d500_clock_offset_s is not None
+        unwrapped_ms = self._d500_clock_unwrapped_ms + delta_ms
+        mapped_s = self._d500_clock_offset_s + unwrapped_ms / 1000.0
+        if delta_ms >= 0:
+            self._d500_clock_last_raw_ms = raw_ms
+            self._d500_clock_unwrapped_ms = unwrapped_ms
+        return mapped_s
 
     def _consume_replay(self, now_s: float) -> None:
         if self._start_time_s is None:

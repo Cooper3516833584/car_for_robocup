@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.pose_fusion import PoseFusion
 from config.v2_loader import load_v2_config
-from core.frames import compose_pose2d
+from core.frames import compose_pose2d, inverse_pose2d
 from core.types import Pose2D, PoseQuality
 
 
@@ -19,19 +19,24 @@ def quality(source: str = "d500") -> PoseQuality:
 
 
 class PoseFusionSE2Tests(unittest.TestCase):
-    def test_far_from_origin_pure_yaw_correction_does_not_shift_position(self) -> None:
+    def test_far_from_origin_correction_blends_anchor_transform(self) -> None:
         config = replace(load_v2_config().fusion, position_correction_gain=0.1, yaw_correction_gain=0.1)
         fusion = PoseFusion(config)
         fusion.update_t265(Pose2D(5.0, 0.0, 0.0, 1.0), quality("t265"))
         fusion.update_d500(Pose2D(5.0, 0.0, 0.0, 1.0), quality())
+        fusion.update_t265(Pose2D(5.0, 0.0, 0.0, 1.1), quality("t265"))
         fusion.update_d500(Pose2D(5.0, 0.0, 0.2, 1.1), quality())
 
-        result = fusion.estimate(1.11).pose
-        self.assertAlmostEqual(result.x_m, 5.0, delta=1e-6)
-        self.assertLess(abs(result.y_m), 1e-6)
-        self.assertAlmostEqual(result.yaw_rad, 0.02, delta=1e-6)
+        observed_anchor = compose_pose2d(
+            Pose2D(5.0, 0.0, 0.2, 1.1),
+            inverse_pose2d(Pose2D(5.0, 0.0, 0.0, 1.1)),
+        )
+        anchor = fusion.map_T_t265_odom
+        self.assertAlmostEqual(anchor.x_m, 0.35 * observed_anchor.x_m, delta=1e-9)
+        self.assertAlmostEqual(anchor.y_m, 0.35 * observed_anchor.y_m, delta=1e-9)
+        self.assertAlmostEqual(anchor.yaw_rad, 0.07, delta=1e-9)
 
-    def test_corrected_map_pose_matches_recomputed_map_to_odom(self) -> None:
+    def test_corrected_map_pose_is_recomputed_from_blended_anchor(self) -> None:
         config = replace(
             load_v2_config().fusion,
             position_correction_gain=0.25,
@@ -42,13 +47,19 @@ class PoseFusionSE2Tests(unittest.TestCase):
         odom_pose = Pose2D(5.0, 2.0, 0.3, 1.0)
         fusion.update_t265(odom_pose, quality("t265"))
         fusion.update_d500(Pose2D(5.0, 2.0, 0.3, 1.0), quality())
-        fusion.update_d500(Pose2D(5.4, 1.8, 0.5, 1.1), quality())
+        fusion.update_t265(Pose2D(5.0, 2.0, 0.3, 1.1), quality("t265"))
+        fusion.update_d500(Pose2D(5.2, 1.9, 0.4, 1.1), quality())
 
-        desired = Pose2D(5.1, 1.95, 0.4, 1.1)
-        recomposed = compose_pose2d(fusion.map_T_t265_odom, odom_pose)
-        self.assertAlmostEqual(recomposed.x_m, desired.x_m, places=9)
-        self.assertAlmostEqual(recomposed.y_m, desired.y_m, places=9)
-        self.assertAlmostEqual(recomposed.yaw_rad, desired.yaw_rad, places=9)
+        observation = compose_pose2d(
+            Pose2D(5.2, 1.9, 0.4, 1.1),
+            inverse_pose2d(Pose2D(5.0, 2.0, 0.3, 1.1)),
+        )
+        anchor = fusion.map_T_t265_odom
+        self.assertAlmostEqual(anchor.x_m, 0.35 * observation.x_m, places=9)
+        self.assertAlmostEqual(anchor.y_m, 0.35 * observation.y_m, places=9)
+        self.assertAlmostEqual(anchor.yaw_rad, 0.35 * observation.yaw_rad, places=9)
+        recomposed = compose_pose2d(anchor, Pose2D(5.0, 2.0, 0.3, 1.1))
+        self.assertEqual(fusion.estimate(1.11).pose, recomposed)
 
     def test_repeated_absolute_corrections_converge_without_nan_or_wrap_jumps(self) -> None:
         config = replace(

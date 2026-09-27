@@ -55,8 +55,9 @@ class HardwareLazyDriveStartTests(unittest.TestCase):
             )
 
         self.assertFalse(runtime.drive.is_running)
-        runtime.fusion.update_d500(Pose2D(0.0, 0.0, 0.0, clock()), PoseQuality("d500", True, False))
-        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, clock()), PoseQuality("t265", True, False))
+        t265_stamp = clock()
+        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, t265_stamp), PoseQuality("t265", True, False))
+        runtime.fusion.update_d500(Pose2D(0.0, 0.0, 0.0, t265_stamp), PoseQuality("d500", True, False))
         runtime.mission.set_navigation_goal(NavigationGoal(2.0, 0.0))
         runtime.start()
 

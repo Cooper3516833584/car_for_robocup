@@ -128,7 +128,11 @@ def _wrap_yaw(angle: float) -> float:
 
 
 class T265PoseAdapter:
-    """Apply T265 axis conversion, mount compensation, rebasing and quality gates."""
+    """Apply T265 axis conversion, mount compensation and quality gates.
+
+    Tracker frame jumps are passed through to PoseFusion, which has the temporal
+    context needed to rebase odometry without introducing a pose discontinuity.
+    """
 
     def __init__(
         self,
@@ -191,11 +195,6 @@ class T265PoseAdapter:
             float(raw.host_monotonic_s),
         )
 
-        if self._last_pose is not None:
-            distance = math.hypot(pose.x_m - self._last_pose.x_m, pose.y_m - self._last_pose.y_m)
-            yaw_delta = abs(_wrap_yaw(pose.yaw_rad - self._last_pose.yaw_rad))
-            if distance > self.max_translation_jump_m or yaw_delta > self.max_yaw_jump_rad:
-                return self._invalid(raw, age, "pose_jump")
         self._last_pose = pose
         confidence = min(1.0, max(0.0, raw.tracker_confidence / 3.0))
         return T265PoseUpdate(
@@ -205,8 +204,9 @@ class T265PoseAdapter:
 
     @staticmethod
     def _invalid(raw: T265RawPose, age_s: float | None, reason: str) -> T265PoseUpdate:
+        confidence = min(1.0, max(0.0, raw.tracker_confidence / 3.0))
         return T265PoseUpdate(
             None,
-            PoseQuality("t265", False, True, age_s=age_s),
+            PoseQuality("t265", False, True, confidence, confidence, age_s),
             reason,
         )

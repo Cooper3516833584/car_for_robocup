@@ -49,6 +49,14 @@ def fake_drive(config, *, clock):
 
 
 class D500AbsoluteLocalizationTests(unittest.TestCase):
+    def test_device_scan_timestamp_is_unwrapped_and_independent_of_callback_delay(self) -> None:
+        runtime = self._runtime()
+        self.assertAlmostEqual(runtime._map_d500_timestamp(65530, 10.0), 10.0)
+        # uint16 wraps between scans; the 200 ms callback delay is not applied
+        # to the measurement timestamp.
+        self.assertAlmostEqual(runtime._map_d500_timestamp(10, 10.2), 10.016)
+        runtime.close()
+
     def test_reference_builder_does_not_assume_unconfigured_far_walls(self) -> None:
         config = replace(
             ready_config().d500_localization,
@@ -88,6 +96,7 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
 
     def test_runtime_adapts_absolute_pose_and_keeps_local_only_out_of_fusion(self) -> None:
         runtime = self._runtime()
+        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), PoseQuality("t265", True, False))
         update = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 200.0, 0.0), icp=None),
             global_pose=RadarPose2D(150.0, 250.0, 10.0),
@@ -122,7 +131,8 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
 
     def test_low_confidence_and_large_position_jump_are_rejected_as_absolute(self) -> None:
         runtime = self._runtime()
-        runtime.fusion.update_d500(Pose2D(0.0, 0.0, 0.0, 1.0), PoseQuality("d500", True, False))
+        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), PoseQuality("t265", True, False))
+        runtime.fusion.update_d500_absolute(Pose2D(0.0, 0.0, 0.0, 1.0), PoseQuality("d500", True, False))
         sample = types.SimpleNamespace(
             odometry=types.SimpleNamespace(accepted=True, pose=RadarPose2D(100.0, 100.0, 0.0), icp=None),
             global_pose=RadarPose2D(120.0, 100.0, 0.0),
@@ -142,7 +152,8 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         sample.global_pose = RadarPose2D(300.0, 100.0, 0.0)
         runtime.on_d500_update(sample)
         runtime._consume_d500(1.0)
-        self.assertEqual(runtime.d500_abs_reject_position_gate, 1)
+        self.assertFalse(runtime.fusion.estimate(1.0).d500_accepted)
+        self.assertEqual(runtime.fusion.estimate(1.0).rejection_reason, "position_innovation_gate")
         runtime.close()
 
     def test_first_reliable_global_pose_anchors_across_local_odom_origin(self) -> None:
@@ -201,6 +212,7 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
             )
 
         runtime.on_d500_update(update(absolute=True, x_cm=100.0))
+        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), PoseQuality("t265", True, False))
         runtime._consume_d500(now[0])
         self.assertEqual(runtime._last_d500_absolute_update_s, 1.0)
         self.assertEqual(runtime._last_d500_map_pose_update_s, 1.0)
@@ -214,6 +226,7 @@ class D500AbsoluteLocalizationTests(unittest.TestCase):
         self.assertFalse(runtime._hardware_global_localization_ready(now[0]))
 
         now[0] = 3.0
+        runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 3.0), PoseQuality("t265", True, False))
         runtime.on_d500_update(update(absolute=True, x_cm=100.0))
         runtime._consume_d500(now[0])
         self.assertEqual(runtime._last_d500_absolute_update_s, 3.0)

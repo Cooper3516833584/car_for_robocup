@@ -114,15 +114,16 @@ class T265PoseAdapterTests(unittest.TestCase):
         self.assertFalse(update.quality.valid)
         self.assertEqual(update.reason, "non_finite_pose")
 
-    def test_large_jump_is_rejected_without_rebasing(self) -> None:
+    def test_large_tracker_jump_is_passed_to_fusion_for_continuous_rebase(self) -> None:
         adapter = T265PoseAdapter(mount(), max_translation_jump_m=0.5)
         adapter.adapt(robot_pose_raw(0.0, 0.0, 0.0, 1.0), now_s=1.0)
-        rejected = adapter.adapt(robot_pose_raw(2.0, 0.0, 0.0, 1.1), now_s=1.1)
-        accepted = adapter.adapt(robot_pose_raw(0.1, 0.0, 0.0, 1.2), now_s=1.2)
+        jumped = adapter.adapt(robot_pose_raw(2.0, 0.0, 0.0, 1.1), now_s=1.1)
+        stable_after_reset = adapter.adapt(robot_pose_raw(2.1, 0.0, 0.0, 1.2), now_s=1.2)
 
-        self.assertEqual(rejected.reason, "pose_jump")
-        self.assertTrue(accepted.quality.valid)
-        self.assertAlmostEqual(accepted.pose.x_m, 0.1, places=12)
+        self.assertTrue(jumped.quality.valid)
+        self.assertTrue(stable_after_reset.quality.valid)
+        self.assertAlmostEqual(jumped.pose.x_m, 2.0, places=12)
+        self.assertAlmostEqual(stable_after_reset.pose.x_m, 2.1, places=12)
 
     def test_fake_source_replays_samples_without_hardware(self) -> None:
         first = robot_pose_raw(0.0, 0.0, 0.0, 1.0)
