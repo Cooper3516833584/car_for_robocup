@@ -16,6 +16,7 @@ from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
 from components.pose_log_replay import PoseLogEvent, read_pose_events
+from components.radar_driver import D500_TIMESTAMP_MODULUS_MS
 from components.radar_pose_adapter import RadarPoseAdapter
 from components.sensor_clock import DeviceClockMapper
 from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, T265RawPose
@@ -250,7 +251,10 @@ class RobocupRuntime:
         self._last_d500_absolute_update_s: float | None = None
         self._last_d500_map_pose_update_s: float | None = None
         self._d500_global_alignment_trusted = False
-        self._d500_clock = DeviceClockMapper(modulus_ms=0x10000)
+        # Measured on the car, not assumed: see D500_TIMESTAMP_MODULUS_MS.
+        self._d500_clock = DeviceClockMapper(
+            modulus_ms=D500_TIMESTAMP_MODULUS_MS
+        )
         self._d500_global_pending = False
         self._started = False
         self._closed = False

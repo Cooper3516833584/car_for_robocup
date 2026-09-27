@@ -9,8 +9,15 @@ class DeviceClockMapper:
     """Map device milliseconds into the host monotonic clock domain.
 
     The offset is captured once and held steady, avoiding callback jitter being
-    copied into every measurement timestamp. An optional modulus handles
-    wrapping device counters such as the D500's uint16 millisecond clock.
+    copied into every measurement timestamp.  An optional modulus handles
+    wrapping device counters.
+
+    The modulus matters and must be measured, not assumed.  The D500's packet
+    timestamp is a millisecond counter that wraps at 30000
+    (``D500_TIMESTAMP_MODULUS_MS``); treating it as a uint16 does not merely lose
+    resolution, it makes every real wrap look like a large forward step that
+    fails the wrap test, so the mapper resets the clock and the mapped timestamp
+    jumps by the full 30 s period.
     """
 
     def __init__(self, *, modulus_ms: int | None = None) -> None:

@@ -12,7 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from components.c10b_diff_backend import FakeDriveBackend
 from components.differential_drive import DifferentialDrive
 from components.differential_kinematics import DifferentialGeometry
-from components.radar_driver import GlobalCorrectionMode, Pose2D as RadarPose2D
+from components.radar_driver import (
+    D500_TIMESTAMP_MODULUS_MS,
+    GlobalCorrectionMode,
+    Pose2D as RadarPose2D,
+)
+from components.sensor_clock import DeviceClockMapper
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D, PoseQuality
@@ -51,11 +56,69 @@ def fake_drive(config, *, clock):
 class D500AbsoluteLocalizationTests(unittest.TestCase):
     def test_device_scan_timestamp_is_unwrapped_and_independent_of_callback_delay(self) -> None:
         runtime = self._runtime()
-        self.assertAlmostEqual(runtime._map_d500_timestamp(65530, 10.0), 10.0)
-        # uint16 wraps between scans; the 200 ms callback delay is not applied
-        # to the measurement timestamp.
-        self.assertAlmostEqual(runtime._map_d500_timestamp(10, 10.2), 10.016)
+        # The D500 counter wraps at 30000 ms, measured on the car over 240 s:
+        # raw values span 0..29999 and all eight observed wraps started at
+        # 29997..29999 and landed on 0..2.
+        self.assertEqual(D500_TIMESTAMP_MODULUS_MS, 30000)
+        self.assertAlmostEqual(runtime._map_d500_timestamp(29990, 10.0), 10.0)
+        # The wrap between scans is absorbed; the 200 ms callback delay is not
+        # applied to the measurement timestamp.
+        self.assertAlmostEqual(runtime._map_d500_timestamp(10, 10.2), 10.02)
         runtime.close()
+
+    def test_measured_modulus_survives_repeated_wraps_monotonically(self) -> None:
+        """Every real wrap must be absorbed, not mistaken for a clock reset."""
+
+        runtime = self._runtime()
+        values = [29990, 29995, 5, 10, 29999, 3, 8, 29997, 1]
+        stamps = []
+        for index, raw in enumerate(values):
+            stamps.append(
+                runtime._map_d500_timestamp(raw, 100.0 + 0.15 * index)
+            )
+        for earlier, later in zip(stamps, stamps[1:]):
+            self.assertGreater(
+                later, earlier,
+                "mapped D500 timestamps must stay strictly increasing across a wrap",
+            )
+        # Three wraps of a 30000 ms counter advance device time by well under a
+        # second in total; a wrong modulus would instead let the output drift
+        # along the callback timeline.
+        self.assertLess(stamps[-1] - stamps[0], 1.2)
+        runtime.close()
+
+    def test_wrong_modulus_pins_the_wrapped_sample_to_callback_time(self) -> None:
+        """Pin why the modulus must be the measured value.
+
+        With 0x10000 the real wrap delta (-29998) is not below -modulus/2
+        (-32768), so it never registers as a wrap and the accumulator keeps the
+        raw negative delta.  The mapping then collapses onto the callback
+        timeline rather than the device timeline: with a 1.5 s callback delay the
+        wrapped sample lands at 11.5 s instead of 10.002 s.
+        """
+
+        wrong = DeviceClockMapper(modulus_ms=0x10000)
+        right = DeviceClockMapper(modulus_ms=D500_TIMESTAMP_MODULUS_MS)
+        for mapper in (wrong, right):
+            mapper.map_milliseconds(29998, 10.0)
+        wrong_s = wrong.map_milliseconds(0, 11.5)
+        right_s = right.map_milliseconds(0, 11.5)
+        self.assertAlmostEqual(right_s, 10.002, places=6)
+        self.assertGreater(
+            abs(wrong_s - right_s), 1.0,
+            "the wrong modulus should visibly misplace the wrapped timestamp",
+        )
+
+    def test_callback_delay_is_used_only_on_a_genuine_clock_reset(self) -> None:
+        """A genuine reset legitimately restarts from the received time."""
+
+        mapper = DeviceClockMapper(modulus_ms=D500_TIMESTAMP_MODULUS_MS)
+        mapper.map_milliseconds(1000, 5.0)
+        # Jumping backwards by far more than half the modulus is a real reset;
+        # only then does the received time take over.
+        self.assertAlmostEqual(mapper.map_milliseconds(900, 42.0), 42.0)
+        # ...and the following sample continues from the device clock again.
+        self.assertAlmostEqual(mapper.map_milliseconds(910, 42.1), 42.01)
 
     def test_reference_builder_does_not_assume_unconfigured_far_walls(self) -> None:
         config = replace(

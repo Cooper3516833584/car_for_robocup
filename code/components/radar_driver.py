@@ -41,6 +41,16 @@ D500_HEADER: Final[bytes] = b"\x54\x2C"
 D500_FRAME_SIZE: Final[int] = 47
 D500_POINT_COUNT: Final[int] = 12
 
+# The packet timestamp is a millisecond counter that wraps at 30000, not a
+# uint16.  Measured on the car over 240 s (100058 packets, 416.65 Hz): raw values
+# span 0..29999 with 30000 distinct values, every one of the 8 observed wraps
+# starting at 29997..29999 and landing on 0..2, and a least-squares fit of the
+# unwrapped counter against host monotonic time gives 1000.0059 ticks/s with a
+# residual rms of 0.37 ticks.  Assuming 0x10000 instead makes every real wrap
+# look like a forward 30 s step *and* miss the wrap test, so the mapper treats it
+# as a clock reset and the mapped timestamp jumps by ~30 s.
+D500_TIMESTAMP_MODULUS_MS: Final[int] = 30000
+
 
 class RadarDriverError(RuntimeError):
     """The UART, parser, or optional localization dependency failed."""
