@@ -53,8 +53,16 @@ git diff --check
 
 Rerun relevant kinematics, backend, frame adapter, fusion, navigation, config, and watchdog tests after changing those layers. Keep real hardware tests out of default unit discovery. One migration step per commit; do not run destructive reset/clean commands, rewrite remotes, or push without direct instruction.
 
-## Temporary scripts and workspace layout
+## Scripts and workspace layout
 
 Paths in this file are relative to the repository root.
 
-Put temporary, throwaway, and one-off scripts (SSH helpers, hardware probes, scratch automation) in the untracked `tools/` directory next to the repository checkout. Do not put them in the repository working tree, including its committed `tools/`, and remove them once they are no longer needed. The test command above still runs from the repository root.
+Scripts of all kinds -- including SSH helpers, hardware probes, diagnostics and
+scratch automation -- belong in this repository's `tools/` directory. Keeping
+them here is deliberate: hardware work on this project depends on a shared,
+reviewable set of probes (for example `tools/d500_diag.py`,
+`tools/d500_boundary_diag.py` and `tools/yaw_wall_crosscheck.py`), and a probe
+that only exists on one workstation cannot be re-run or reviewed by anyone else.
+
+Remove a script once it is genuinely obsolete. The test command above still runs
+from the repository root.
