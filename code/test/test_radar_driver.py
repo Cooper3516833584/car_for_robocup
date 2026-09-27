@@ -163,7 +163,7 @@ class ICPTests(unittest.TestCase):
 
     def test_odometry_ignores_stationary_jitter_without_advancing_keyframe(self) -> None:
         class FixedMatcher:
-            def match(self, reference, current):
+            def match(self, reference, current, initial_guess=None):
                 return ICPResult(Pose2D(0.8, 0.3, 0.2), 80, 1.0, 2)
 
         odometry = RadarOdometry(matcher=FixedMatcher())
@@ -177,10 +177,21 @@ class ICPTests(unittest.TestCase):
         self.assertEqual(update.pose, Pose2D())
         self.assertIs(odometry._reference, keyframe)
 
-    def test_odometry_rejects_non_ackermann_lateral_jump(self) -> None:
+    def test_odometry_accepts_lateral_motion_with_rotation(self) -> None:
+        """A differential base may move sideways in its own frame while turning.
+
+        The removed "Ackermann lateral gate" constrained the lateral component to
+        ``-dx * tan(dyaw / 2)``, the reachable set of a minimum-turn-radius
+        vehicle.  That rejects legitimate differential motion, including the
+        in-place rotation this car needs, so the bound must not come back.
+        """
+
         class FixedMatcher:
-            def match(self, reference, current):
-                return ICPResult(Pose2D(5.0, 12.0, 0.0), 80, 1.0, 2)
+            def match(self, reference, current, initial_guess=None):
+                # 12 cm of lateral motion combined with a 14 deg turn: far outside
+                # the Ackermann bound (which would allow only ~-1.5 cm), and
+                # inside the real yaw/step/error gates.
+                return ICPResult(Pose2D(5.0, 12.0, 14.0), 80, 1.0, 2)
 
         odometry = RadarOdometry(matcher=FixedMatcher())
         scan = RadarScan((RadarPoint(0, 1000, 100),), 0, 3600)
@@ -188,12 +199,123 @@ class ICPTests(unittest.TestCase):
 
         update = odometry.update(scan)
 
-        self.assertFalse(update.accepted)
-        self.assertEqual(update.rejection_reason, "Ackermann lateral gate")
+        self.assertTrue(update.accepted, update.rejection_reason)
+        self.assertNotEqual(update.rejection_reason, "Ackermann lateral gate")
+        self.assertAlmostEqual(update.pose.yaw_cw_deg, 14.0)
+
+    def test_odometry_uses_the_motion_prior_as_the_icp_seed(self) -> None:
+        """The prior must reach the matcher, and stay only a starting point."""
+
+        seen = []
+
+        class RecordingMatcher:
+            def match(self, reference, current, initial_guess=None):
+                seen.append(initial_guess)
+                return ICPResult(Pose2D(3.0, 0.0, 0.0), 80, 1.0, 2)
+
+        odometry = RadarOdometry(matcher=RecordingMatcher())
+        scan = RadarScan((RadarPoint(0, 1000, 100),), 0, 3600)
+        # The first scan only establishes the keyframe; no match is requested.
+        odometry.update(scan)
+        self.assertEqual(seen, [])
+
+        # Without a prior the matcher must be seeded with None.
+        odometry.update(scan)
+        self.assertIsNone(seen[-1])
+
+        prior = Pose2D(2.5, 0.0, 0.0)
+        odometry.update(scan, motion_prior=prior)
+        self.assertIs(seen[-1], prior)
+        # The matcher returns a 3 cm *delta* per accepted update, so two accepted
+        # updates accumulate to 6 cm: the accepted result comes from the matcher,
+        # not from the 2.5 cm prior.
+        self.assertAlmostEqual(odometry.pose.x_cm, 6.0)
+
+    def _component_with_hint(self, previous, current):
+        """Build a component whose consecutive pose hints are known."""
+
+        component = D500RadarComponent(
+            alignment=DroneGlobalAlignment(0, 0, 0),
+            assembler=type("NoScans", (), {"feed": lambda self, packet: []})(),
+            odometry=RadarOdometry(),
+        )
+        component._last_scan_hint = previous
+        component.set_global_pose_hint(current)
+        return component
+
+    def test_motion_prior_is_zero_for_a_stationary_hint_pair(self) -> None:
+        component = self._component_with_hint(Pose2D(100.0, 200.0, 30.0),
+                                              Pose2D(100.0, 200.0, 30.0))
+        prior = component._icp_motion_prior()
+        self.assertIsNotNone(prior)
+        self.assertAlmostEqual(prior.x_cm, 0.0)
+        self.assertAlmostEqual(prior.y_cm, 0.0)
+        self.assertAlmostEqual(prior.yaw_cw_deg, 0.0)
+
+    def test_motion_prior_translation_is_derotated_into_the_body_frame(self) -> None:
+        """The prior must be expressed in the body frame of the earlier pose.
+
+        In this module's clockwise-positive convention the body-to-world mapping
+        is ``x' = cos(y) x + sin(y) y``, ``y' = -sin(y) x + cos(y) y``
+        (``rotate_cw``), so at yaw = +90 the body +X axis maps onto world -Y.
+        A world displacement of -20 cm along X is therefore 20 cm *forward* in the
+        body frame.  Deriving this from the code and checking it numerically is
+        the point: the opposite sign would silently seed ICP with mirrored motion.
+        """
+
+        component = self._component_with_hint(Pose2D(100.0, 0.0, 90.0),
+                                              Pose2D(80.0, 0.0, 90.0))
+        prior = component._icp_motion_prior()
+        self.assertIsNotNone(prior)
+        # rotate_cw(-20, 0, -90) == (0, 20): the delta is perpendicular in world
+        # terms but forward in the body frame of the earlier pose.
+        expected_x, expected_y = rotate_cw(-20.0, 0.0, -90.0)
+        self.assertAlmostEqual(prior.x_cm, expected_x, places=6)
+        self.assertAlmostEqual(prior.y_cm, expected_y, places=6)
+        self.assertAlmostEqual(prior.yaw_cw_deg, 0.0, places=6)
+
+    def test_motion_prior_matches_rotate_cw_for_a_known_pair(self) -> None:
+        """Cross-check the derotation against ``rotate_cw`` itself."""
+
+        previous = Pose2D(0.0, 0.0, 35.0)
+        current = Pose2D(12.0, -7.0, 42.0)
+        component = self._component_with_hint(previous, current)
+        prior = component._icp_motion_prior()
+
+        world_dx = current.x_cm - previous.x_cm
+        world_dy = current.y_cm - previous.y_cm
+        expected_x, expected_y = rotate_cw(world_dx, world_dy,
+                                           -previous.yaw_cw_deg)
+        self.assertAlmostEqual(prior.x_cm, expected_x, places=9)
+        self.assertAlmostEqual(prior.y_cm, expected_y, places=9)
+        self.assertAlmostEqual(prior.yaw_cw_deg, 7.0, places=9)
+
+    def test_motion_prior_yaw_is_clockwise_positive(self) -> None:
+        """The prior must use this module's convention, not core's CCW radians."""
+
+        component = self._component_with_hint(Pose2D(0.0, 0.0, 0.0),
+                                              Pose2D(0.0, 0.0, 25.0))
+        prior = component._icp_motion_prior()
+        self.assertAlmostEqual(prior.yaw_cw_deg, 25.0, places=6)
+
+    def test_motion_prior_is_absent_without_two_hints(self) -> None:
+        component = self._component_with_hint(None, Pose2D(10.0, 0.0, 0.0))
+        self.assertIsNone(component._icp_motion_prior())
+
+    def test_motion_prior_is_clamped_when_the_hint_jumps(self) -> None:
+        """A re-anchor or T265 jump must not seed ICP implausibly."""
+
+        component = self._component_with_hint(Pose2D(0.0, 0.0, 0.0),
+                                              Pose2D(500.0, 0.0, 0.0))
+        self.assertIsNone(component._icp_motion_prior())
+
+        component = self._component_with_hint(Pose2D(0.0, 0.0, 0.0),
+                                              Pose2D(0.0, 0.0, 170.0))
+        self.assertIsNone(component._icp_motion_prior())
 
     def test_stationary_motion_hint_freezes_large_icp_step(self) -> None:
         class FixedMatcher:
-            def match(self, reference, current):
+            def match(self, reference, current, initial_guess=None):
                 return ICPResult(Pose2D(2.5, 0.0, 0.0), 80, 1.0, 2)
 
         odometry = RadarOdometry(
@@ -214,7 +336,7 @@ class ICPTests(unittest.TestCase):
 
     def test_repeated_stationary_hint_does_not_prevent_reference_refresh(self) -> None:
         class SmallMatcher:
-            def match(self, reference, current):
+            def match(self, reference, current, initial_guess=None):
                 return ICPResult(Pose2D(0.1, 0.0, 0.0), 80, 1.0, 2)
 
         odometry = RadarOdometry(matcher=SmallMatcher(), stationary_grace_s=0.0)
@@ -233,7 +355,7 @@ class ICPTests(unittest.TestCase):
 
     def test_stop_grace_integrates_braking_coast(self) -> None:
         class FixedMatcher:
-            def match(self, reference, current):
+            def match(self, reference, current, initial_guess=None):
                 return ICPResult(Pose2D(2.5, 0.0, 0.0), 80, 1.0, 2)
 
         odometry = RadarOdometry(
@@ -261,7 +383,7 @@ class ICPTests(unittest.TestCase):
                     )
                 )
 
-            def match(self, reference, current):
+            def match(self, reference, current, initial_guess=None):
                 return next(self.results)
 
         odometry = RadarOdometry(
@@ -555,7 +677,7 @@ class WallLineFusionTests(unittest.TestCase):
             def __init__(self):
                 self.pose = predicted_wall_pose
 
-            def update(self, incoming_scan):
+            def update(self, incoming_scan, motion_prior=None):
                 return RadarOdometryUpdate(self.pose, True, True)
 
         odometry = FixedOdometry()
@@ -597,7 +719,7 @@ class WallLineFusionTests(unittest.TestCase):
             def __init__(self):
                 self.pose = predicted_wall_pose
 
-            def update(self, incoming_scan):
+            def update(self, incoming_scan, motion_prior=None):
                 return RadarOdometryUpdate(self.pose, True, True)
 
         component = D500RadarComponent(
@@ -642,7 +764,7 @@ class WallLineFusionTests(unittest.TestCase):
                 self.pose = Pose2D()
                 self._poses = iter((Pose2D(0, 0, 0), Pose2D(3, 0, 0), Pose2D(6, 0, 0)))
 
-            def update(self, incoming_scan):
+            def update(self, incoming_scan, motion_prior=None):
                 self.pose = next(self._poses)
                 return RadarOdometryUpdate(self.pose, True, True)
 

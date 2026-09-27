@@ -69,7 +69,7 @@ class RejectingOdometry:
         self.reason = reason
         self.calls = 0
 
-    def update(self, scan):
+    def update(self, scan, motion_prior=None):
         self.calls += 1
         return RadarOdometryUpdate(
             self.pose, False, True, None, self.reason

@@ -1316,7 +1316,19 @@ class ICPScanMatcher:
         self,
         reference_points_cm: Sequence[tuple[float, float]],
         current_points_cm: Sequence[tuple[float, float]],
+        initial_guess: Pose2D | None = None,
     ) -> ICPResult:
+        """Align ``current`` onto ``reference``, optionally from a motion prior.
+
+        ``initial_guess`` is a current-to-reference transform, normally the
+        T265/fused delta for the same interval.  Seeding the accumulator with it
+        is exact and leaves the correspondence radius untouched: with a poor
+        prior the first iteration can already land inside the gate, whereas
+        starting from identity needs the points to be within the gate *before*
+        any alignment.  A guess that disagrees with the data still has to
+        survive every iteration and the caller's gates.
+        """
+
         try:
             import numpy as np
         except ModuleNotFoundError as exc:
@@ -1329,6 +1341,24 @@ class ICPScanMatcher:
 
         rotation = np.eye(2)
         translation = np.zeros(2)
+        if initial_guess is not None:
+            if not all(
+                math.isfinite(float(value))
+                for value in (
+                    initial_guess.x_cm,
+                    initial_guess.y_cm,
+                    initial_guess.yaw_cw_deg,
+                )
+            ):
+                raise ValueError("ICP initial guess must be finite")
+            angle = math.radians(initial_guess.yaw_cw_deg)
+            cosine = math.cos(angle)
+            sine = math.sin(angle)
+            # Clockwise-positive yaw, matching rotate_cw().
+            rotation = np.array([[cosine, sine], [-sine, cosine]], dtype=float)
+            translation = np.array(
+                [float(initial_guess.x_cm), float(initial_guess.y_cm)], dtype=float
+            )
         previous_error = math.inf
         matched = 0
         mean_error = math.inf
@@ -1409,6 +1439,7 @@ class RadarOdometry:
         max_lateral_innovation_cm: float = 5.0,
         stationary_grace_s: float = 1.0,
         stationary_rebase_rejections: int = 3,
+        max_consecutive_rejections: int = 3,
     ) -> None:
         if min(
             max_step_cm,
@@ -1423,6 +1454,8 @@ class RadarOdometry:
             raise ValueError("radar odometry minimum gates must be below maximum gates")
         if stationary_grace_s < 0 or stationary_rebase_rejections <= 0:
             raise ValueError("invalid stationary odometry recovery configuration")
+        if max_consecutive_rejections <= 0:
+            raise ValueError("max_consecutive_rejections must be positive")
         self.mount = mount
         self.matcher = matcher or ICPScanMatcher()
         self.max_step_cm = max_step_cm
@@ -1433,16 +1466,19 @@ class RadarOdometry:
         self.max_lateral_innovation_cm = max_lateral_innovation_cm
         self.stationary_grace_s = stationary_grace_s
         self.stationary_rebase_rejections = stationary_rebase_rejections
+        self.max_consecutive_rejections = max_consecutive_rejections
         self.pose = Pose2D()
         self._reference: list[tuple[float, float]] | None = None
         self._vehicle_moving = True
         self._stationary_since: float | None = None
         self._stationary_rejection_count = 0
+        self._consecutive_rejection_count = 0
 
     def reset(self, pose: Pose2D = Pose2D()) -> None:
         self.pose = pose
         self._reference = None
         self._stationary_rejection_count = 0
+        self._consecutive_rejection_count = 0
 
     def set_motion_state(self, moving: bool) -> None:
         """Update the drive hint without discarding physical braking coast."""
@@ -1468,6 +1504,8 @@ class RadarOdometry:
         *,
         stationary_freeze: bool,
     ) -> RadarOdometryUpdate:
+        self._consecutive_rejection_count += 1
+        rebase_note = None
         if stationary_freeze:
             self._stationary_rejection_count += 1
             if (
@@ -1478,16 +1516,44 @@ class RadarOdometry:
                 # keyframe must not reject every later scan forever.
                 self._reference = current
                 self._stationary_rejection_count = 0
-                reason = f"{reason}; stationary ICP reference rebased"
+                self._consecutive_rejection_count = 0
+                rebase_note = "stationary ICP reference rebased"
+        elif self._consecutive_rejection_count >= self.max_consecutive_rejections:
+            # While moving, a bad keyframe is self-reinforcing: the reference is
+            # never updated, the offset keeps growing, and every later scan fails
+            # the step gate.  Re-keying to the current scan breaks the cascade.
+            # The pose is deliberately left unchanged: a rejected delta is not
+            # integrated, so this can only re-anchor the keyframe, never move the
+            # vehicle estimate.
+            self._reference = current
+            self._consecutive_rejection_count = 0
+            rebase_note = "ICP reference rebased after repeated rejections"
+        if rebase_note is not None:
+            reason = f"{reason}; {rebase_note}"
         return RadarOdometryUpdate(self.pose, False, True, result, reason)
 
-    def update(self, scan: RadarScan) -> RadarOdometryUpdate:
+    def update(
+        self,
+        scan: RadarScan,
+        motion_prior: Pose2D | None = None,
+    ) -> RadarOdometryUpdate:
+        """Integrate one scan, optionally seeded by a T265/fused motion prior.
+
+        ``motion_prior`` is the current-to-reference transform predicted from
+        T265 for this interval.  It is only a starting point for ICP; the result
+        must still pass every gate below, and the pose is never advanced on a
+        rejected update.
+        """
+
         current = scan_points_in_body(scan, self.mount)
         if self._reference is None:
             self._reference = current
+            self._consecutive_rejection_count = 0
             return RadarOdometryUpdate(self.pose, True, True)
         try:
-            result = self.matcher.match(self._reference, current)
+            result = self.matcher.match(
+                self._reference, current, initial_guess=motion_prior
+            )
         except (RadarDriverError, ValueError) as exc:
             return self._rejected_update(
                 current,
@@ -1525,6 +1591,7 @@ class RadarOdometry:
             # accumulating against one old frame until a hard gate trips.
             self._reference = current
             self._stationary_rejection_count = 0
+            self._consecutive_rejection_count = 0
             return RadarOdometryUpdate(self.pose, True, True, result)
         if (
             math.hypot(delta.x_cm, delta.y_cm) < self.min_step_cm
@@ -1532,17 +1599,14 @@ class RadarOdometry:
         ):
             # Preserve the keyframe so real low-speed motion accumulates while
             # stationary sub-centimetre ICP jitter cannot walk the pose.
+            self._consecutive_rejection_count = 0
             return RadarOdometryUpdate(self.pose, True, True, result)
-        expected_lateral_cm = -delta.x_cm * math.tan(
-            math.radians(delta.yaw_cw_deg) / 2.0
-        )
-        if abs(delta.y_cm - expected_lateral_cm) > self.max_lateral_innovation_cm:
-            return self._rejected_update(
-                current,
-                result,
-                "Ackermann lateral gate",
-                stationary_freeze=False,
-            )
+
+        # The former "Ackermann lateral gate" lived here.  It constrained the
+        # lateral component to what a minimum-turn-radius vehicle can produce
+        # (expected_lateral = -dx * tan(dyaw/2)) and is invalid for a
+        # differential base, which can translate sideways in its own frame while
+        # rotating; it rejected legitimate in-place rotation.
 
         delta_x, delta_y = rotate_cw(delta.x_cm, delta.y_cm, self.pose.yaw_cw_deg)
         self.pose = Pose2D(
@@ -1551,6 +1615,7 @@ class RadarOdometry:
             normalize_yaw_cw_deg(self.pose.yaw_cw_deg + delta.yaw_cw_deg),
         )
         self._stationary_rejection_count = 0
+        self._consecutive_rejection_count = 0
         self._reference = current
         return RadarOdometryUpdate(self.pose, True, True, result)
 
@@ -1808,6 +1873,9 @@ class D500RadarComponent:
         # wall predictor while ICP is rejecting (never integrate a rejected
         # delta into it).
         self._last_accepted_global_pose: Pose2D | None = None
+        # Pose hint captured at the previous scan, used to predict this scan's
+        # ICP delta from consecutive T265/fused poses.
+        self._last_scan_hint: Pose2D | None = None
         self._wall_scan_count = 0
         self._wall_attempt_index = 0
         self._wall_x_residual_history: deque[_WallResidualSample] = deque(
@@ -1888,6 +1956,50 @@ class D500RadarComponent:
         if not accepted and last_accepted is not None:
             return last_accepted
         return alignment.pose_to_global(odometry_pose)
+
+    def _icp_motion_prior(self) -> Pose2D | None:
+        """Predict this scan's ICP delta from consecutive fused/T265 hints.
+
+        Scan-to-scan ICP has no motion prior of its own, which is why in-place
+        rotation drifts into a local minimum.  Two consecutive hints bracket the
+        interval of one D500 revolution, so their relative transform is a much
+        better starting point than identity, and it supplies the rotation that
+        ICP alone cannot observe along a wall.
+
+        Returned in the radar convention (cm, clockwise-positive degrees) because
+        that is what ``ICPScanMatcher`` expects.  Clamped so a hint jump or a
+        re-anchor cannot seed ICP with an implausible transform.
+        """
+
+        with self._state_lock:
+            previous = self._last_scan_hint
+            current = self._global_pose_hint
+        if previous is None or current is None:
+            return None
+
+        # Relative transform between two poses in this module's own convention
+        # (cm, clockwise-positive degrees).  Written out here rather than via
+        # core.frames, whose Pose2D is metres/CCW: mixing the two same-named
+        # types is exactly the mistake this module avoids elsewhere.
+        dyaw_cw_deg = normalize_yaw_cw_deg(
+            current.yaw_cw_deg - previous.yaw_cw_deg
+        )
+        dx_world = current.x_cm - previous.x_cm
+        dy_world = current.y_cm - previous.y_cm
+        # Subtract the previous pose's rotation, i.e. apply rotate_cw by -yaw.
+        cos_a = math.cos(math.radians(-previous.yaw_cw_deg))
+        sin_a = math.sin(math.radians(-previous.yaw_cw_deg))
+        dx_cm = cos_a * dx_world + sin_a * dy_world
+        dy_cm = -sin_a * dx_world + cos_a * dy_world
+
+        limit_cm = 2.0 * self.odometry.max_step_cm
+        if math.hypot(dx_cm, dy_cm) > limit_cm:
+            return None
+        if abs(dyaw_cw_deg) > 2.0 * self.odometry.max_step_yaw_deg:
+            return None
+        if not all(math.isfinite(v) for v in (dx_cm, dy_cm, dyaw_cw_deg)):
+            return None
+        return Pose2D(dx_cm, dy_cm, dyaw_cw_deg)
 
     def set_motion_hint(self, moving: bool) -> None:
         """Freeze incremental ICP when commanded hardware output is stopped."""
@@ -2111,7 +2223,14 @@ class D500RadarComponent:
 
         updates: list[RadarLocalizationUpdate] = []
         for scan in self.assembler.feed(packet):
-            odometry_update = self.odometry.update(scan)
+            # Seed scan-to-scan ICP with the T265/fused motion over the same
+            # interval.  This is only a starting point: the result still has to
+            # pass every ICP and odometry gate before the pose advances.
+            odometry_update = self.odometry.update(
+                scan, motion_prior=self._icp_motion_prior()
+            )
+            with self._state_lock:
+                self._last_scan_hint = self._global_pose_hint
             global_pose: Pose2D | None = None
             global_points: tuple[tuple[float, float], ...] = ()
             wall_fusion: WallFusionResult | None = None

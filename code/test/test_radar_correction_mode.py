@@ -35,7 +35,7 @@ class _FixedOdometry:
     def __init__(self, pose: Pose2D) -> None:
         self.pose = pose
 
-    def update(self, _scan: RadarScan) -> RadarOdometryUpdate:
+    def update(self, _scan: RadarScan, motion_prior=None) -> RadarOdometryUpdate:
         return RadarOdometryUpdate(self.pose, True, True)
 
 
