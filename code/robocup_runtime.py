@@ -219,11 +219,16 @@ class RobocupRuntime:
         event_logger: JsonlEventLogger | None = None,
         replay_events: tuple[PoseLogEvent, ...] = (),
         relay=None,
+        slam_bridge=None,
     ) -> None:
         self.config = config
         self.mode = mode
         self.drive = drive
         self.relay = relay
+        self.slam_bridge = slam_bridge
+        self._last_slam_anchor_timestamp_s: float | None = None
+        self._last_slam_metrics_s: float | None = None
+        self._last_slam_metrics: dict | None = None
         self.d500_source = d500_source
         self.t265_source = t265_source
         self.d500_fake = d500_fake
@@ -275,6 +280,9 @@ class RobocupRuntime:
             if self.t265_source is not None:
                 self.t265_source.start()
                 started_sources.append(self.t265_source)
+            if self.slam_bridge is not None:
+                self.slam_bridge.start()
+                started_sources.append(self.slam_bridge)
             self._open_relay()
             if self.mode in {RuntimeMode.DRY_RUN, RuntimeMode.REPLAY}:
                 self.drive.start()
@@ -312,6 +320,7 @@ class RobocupRuntime:
             # so wall association never depends on the D500's own ICP.
             self._publish_d500_pose_hint(now)
             self._consume_d500(now)
+            self._consume_slam(now)
             if live_time:
                 now = float(self.clock())
                 self._current_step_s = now
@@ -327,12 +336,15 @@ class RobocupRuntime:
                 age_s=estimate.age_s,
                 source_flags=estimate.source_flags,
                 fusion_source=(
-                    "T265_FUSED" if "fused" in estimate.source_flags
+                    "T265_SLAM" if "slam" in estimate.source_flags and "fused" in estimate.source_flags
+                    else "T265_FUSED" if "fused" in estimate.source_flags
                     else "D500_FALLBACK" if "d500_global_fallback" in estimate.source_flags
                     else "LOST" if estimate.pose is None
                     else estimate.state.value.upper()
                 ),
                 anchor_valid=estimate.anchor_initialized,
+                slam_anchor_valid=(self.slam_bridge is not None and self.slam_bridge.healthy(now)),
+                field_anchor_valid=(self.fusion.field_T_slam_map is not None),
                 d500_accepted=estimate.d500_accepted,
                 d500_innovation_m=estimate.last_d500_innovation_m,
                 d500_innovation_yaw_rad=estimate.last_d500_innovation_yaw_rad,
@@ -498,6 +510,8 @@ class RobocupRuntime:
         for source in (self.t265_source, self.d500_source):
             if source is not None:
                 self._stop_source(source)
+        if self.slam_bridge is not None:
+            self._stop_source(self.slam_bridge)
         self._release_relay()
         try:
             self.drive.close()
@@ -522,6 +536,13 @@ class RobocupRuntime:
         update = self.t265_adapter.adapt(raw, now_s=sample_now)
         if update.pose is not None and update.quality.valid:
             self.fusion.update_t265(update.pose, update.quality)
+            if self.slam_bridge is not None:
+                continuous = self.fusion.continuous_t265_pose
+                if continuous is not None:
+                    try:
+                        self.slam_bridge.push_t265(continuous, update.quality)
+                    except Exception:
+                        LOG.exception("could not queue T265 pose for SLAM")
             self._emit(
                 "t265_pose",
                 x_m=update.pose.x_m,
@@ -598,6 +619,20 @@ class RobocupRuntime:
                     observation = self._d500_events.get_nowait()
                 except queue.Empty:
                     break
+                if self.config.localization.backend == "slam_toolbox":
+                    if (observation.absolute_observation_accepted
+                            and observation.map_pose is not None
+                            and observation.confidence is not None
+                            and observation.confidence >= self.config.d500_localization.min_confidence):
+                        quality = PoseQuality("fixed_wall", True, False,
+                                              position_confidence=observation.confidence)
+                        if self.fusion.update_field_wall(observation.map_pose, quality):
+                            self._d500_global_alignment_trusted = True
+                            self._last_d500_absolute_update_s = observation.timestamp_s
+                            self.d500_abs_accept_count += 1
+                        else:
+                            self._emit("d500_abs_rejected", reason="field_alignment_gate")
+                    continue
                 mode = observation.mode
                 confidence = None
                 pose = None
@@ -709,6 +744,17 @@ class RobocupRuntime:
     def on_d500_update(self, update) -> None:
         """Thread-safe callback passed to the real D500 component."""
 
+        received_s = float(self.clock())
+        scan = getattr(update, "scan", None)
+        timestamp_s = self._map_d500_timestamp(
+            getattr(scan, "timestamp_ms", None), received_s
+        )
+        if scan is not None and self.slam_bridge is not None:
+            try:
+                self.slam_bridge.push_d500_scan(scan, timestamp_s)
+            except Exception:
+                LOG.exception("could not queue D500 scan for SLAM")
+
         # A rejected scan-to-scan ICP only invalidates the local delta; it must
         # not discard the scan.  A complete scan can still carry a usable
         # absolute boundary observation, which is exactly the case that matters
@@ -727,11 +773,6 @@ class RobocupRuntime:
                 priority=True,
             )
             return
-        received_s = float(self.clock())
-        scan = getattr(update, "scan", None)
-        timestamp_s = self._map_d500_timestamp(
-            getattr(scan, "timestamp_ms", None), received_s
-        )
         local_pose = self.radar_adapter.to_map_base_pose(update.odometry.pose, timestamp_s=timestamp_s)
         confidence = update.global_confidence
         map_pose = None
@@ -772,6 +813,34 @@ class RobocupRuntime:
     def _map_d500_timestamp(self, timestamp_ms, received_s: float) -> float:
         """Map the D500's wrapping uint16 millisecond clock to monotonic time."""
         return self._d500_clock.map_milliseconds(timestamp_ms, received_s)
+
+    def _consume_slam(self, now_s: float) -> None:
+        bridge = self.slam_bridge
+        if bridge is None:
+            return
+        anchor = bridge.latest_slam_anchor()
+        if (anchor is not None and anchor.is_finite()
+                and anchor.timestamp_s != self._last_slam_anchor_timestamp_s):
+            self._last_slam_anchor_timestamp_s = anchor.timestamp_s
+            if self.config.localization.backend == "slam_toolbox" and anchor.age_s(now_s) <= 0.5:
+                self.fusion.update_slam_anchor(
+                    anchor.pose, valid=True, timestamp_s=anchor.timestamp_s,
+                    loop_closure=anchor.loop_closure,
+                )
+        if self._last_slam_metrics_s is None or now_s - self._last_slam_metrics_s >= 1.0:
+            metrics = bridge.metrics()
+            previous = self._last_slam_metrics or metrics
+            elapsed = max(1.0, now_s - self._last_slam_metrics_s) if self._last_slam_metrics_s is not None else 1.0
+            self._emit(
+                "slam_status", state=bridge.state(now_s),
+                anchor_age_ms=None if anchor is None else anchor.age_s(now_s) * 1000.0,
+                scan_input_hz=(metrics["slam.scan_input_count"] - previous["slam.scan_input_count"]) / elapsed,
+                scan_publish_hz=(metrics["slam.scan_publish_count"] - previous["slam.scan_publish_count"]) / elapsed,
+                anchor_hz=(metrics["slam.pose_received_count"] - previous["slam.pose_received_count"]) / elapsed,
+                **metrics,
+            )
+            self._last_slam_metrics_s = now_s
+            self._last_slam_metrics = metrics
 
     def _consume_replay(self, now_s: float) -> None:
         if self._start_time_s is None:
@@ -912,6 +981,20 @@ class RobocupRuntime:
         return False
 
     def _hardware_global_localization_ready(self, now_s: float) -> bool:
+        if self.config.localization.backend == "slam_toolbox":
+            if self.mode is not RuntimeMode.HARDWARE_MISSION:
+                return True
+            accepted_age = self.fusion.slam_anchor_age_s(now_s)
+            if (self.slam_bridge is None or self.slam_bridge.state(now_s) != "SLAM_OK"
+                    or accepted_age is None or accepted_age > 0.5):
+                return False
+            if self.config.localization.slam.require_field_anchor:
+                return (
+                    self.fusion.field_T_slam_map is not None
+                    and self._last_d500_absolute_update_s is not None
+                    and now_s - self._last_d500_absolute_update_s <= D500_ANCHOR_STALE_AFTER_S
+                )
+            return True
         if (
             self.mode is not RuntimeMode.HARDWARE_MISSION
             or not self.config.d500.enabled
@@ -964,6 +1047,11 @@ def build_runtime(
     fusion = build_pose_fusion(config)
     navigator = build_differential_navigator(config)
     relay = build_relay(config, fake=fake_mode)
+    slam_bridge = None
+    if config.localization.slam.enabled and not fake_mode:
+        from components.slam_bridge import SlamBridge
+
+        slam_bridge = SlamBridge(config.d500_mount)
     t265_adapter = T265PoseAdapter(
         config.t265_mount,
         min_tracker_confidence=config.fusion.t265_min_tracker_confidence,
@@ -1060,6 +1148,7 @@ def build_runtime(
         event_logger=event_logger,
         replay_events=tuple(replay_events),
         relay=relay,
+        slam_bridge=slam_bridge,
     )
     if not d500_fake and d500_source is not None:
         d500_source.on_update = runtime.on_d500_update

@@ -97,6 +97,16 @@ t265_max_age_s = 0.15
 d500_max_age_s = 0.50
 t265_min_tracker_confidence = 2
 
+[localization]
+# Keep the existing backend until shadow runs and hardware acceptance complete.
+backend = "legacy"
+
+[localization.slam]
+enabled = false
+require_field_anchor = true
+# Set true only after recorded localization, CPU and communication acceptance.
+hardware_mission_validated = false
+
 [navigation]
 position_tolerance_m = 0.03
 yaw_tolerance_rad = 0.0523598776

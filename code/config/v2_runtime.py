@@ -29,6 +29,18 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
     errors: list[str] = []
     if mode is not RuntimeMode.HARDWARE_MISSION:
         return errors
+    if config.localization.backend == "slam_toolbox" and not config.localization.slam.require_field_anchor:
+        errors.append("hardware mission with field goals requires a fixed-wall field anchor")
+    if config.localization.backend == "slam_toolbox" and not config.localization.slam.hardware_mission_validated:
+        errors.append("SLAM hardware mission requires recorded localization, CPU and communication validation")
+    if (config.localization.backend == "slam_toolbox"
+            and config.localization.slam.require_field_anchor
+            and not config.d500_localization.enable_wall_absolute):
+        errors.append("SLAM hardware mission requires the fixed-wall observer")
+    if (config.localization.backend == "slam_toolbox"
+            and config.safety.require_measured_d500_reference_for_hardware_mission
+            and not config.d500_localization.reference_measured):
+        errors.append("SLAM hardware mission requires a measured fixed-wall reference")
     if config.safety.require_measured_geometry_for_hardware_mission and not config.calibration.geometry_measured:
         errors.append("hardware mission requires measured drive geometry")
     if config.safety.require_measured_extrinsics_for_hardware_mission and not config.calibration.sensor_extrinsics_measured:

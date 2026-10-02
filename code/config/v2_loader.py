@@ -22,6 +22,8 @@ from .v2_models import (
     DifferentialRobotConfig,
     D500LocalizationConfig,
     FusionConfig,
+    LocalizationConfig,
+    SlamLocalizationConfig,
     FootprintConfig,
     NavigationConfig,
     RelayConfig,
@@ -72,7 +74,7 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         )
     root_allowed = {
         "schema_version", "robot_name", "calibration", "vehicle", "devices",
-        "sensors", "fusion", "navigation", "safety",
+        "sensors", "fusion", "navigation", "safety", "localization",
     }
     unknown = set(document) - root_allowed
     if unknown:
@@ -102,6 +104,20 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
     footprint = _table(navigation_table, "footprint", "navigation.footprint")
     navigation_settings = {key: value for key, value in navigation_table.items() if key not in {"map", "footprint"}}
 
+    localization_table = document.get("localization", {})
+    if not isinstance(localization_table, dict):
+        raise ConfigV2Error("localization must be a TOML table")
+    unknown_localization = set(localization_table) - {"backend", "slam"}
+    if unknown_localization:
+        raise ConfigV2Error(f"unknown key(s) in localization: {', '.join(sorted(unknown_localization))}")
+    slam_table = localization_table.get("slam", {})
+    if not isinstance(slam_table, dict):
+        raise ConfigV2Error("localization.slam must be a TOML table")
+    localization = LocalizationConfig(
+        backend=localization_table.get("backend", "legacy"),
+        slam=_build(SlamLocalizationConfig, slam_table, "localization.slam"),
+    )
+
     # [devices.relay] is optional: an absent table means "no LCUS relay fitted",
     # which keeps every profile written before the relay port loading unchanged.
     relay = (
@@ -127,6 +143,7 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         t265=_build(T265Config, _table(devices, "t265", "devices.t265"), "devices.t265"),
         t265_mount=_build(SensorMount3DConfig, _table(t265_sensor, "mount", "sensors.t265.mount"), "sensors.t265.mount"),
         fusion=_build(FusionConfig, _table(document, "fusion", "fusion"), "fusion"),
+        localization=localization,
         navigation=_build(NavigationConfig, navigation_settings, "navigation"),
         competition_map=_build(CompetitionMapConfig, navigation_map, "navigation.map"),
         footprint=_build(FootprintConfig, footprint, "navigation.footprint"),

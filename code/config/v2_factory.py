@@ -111,7 +111,11 @@ def build_pose_fusion(config: DifferentialRobotConfig):
 
     from components.pose_fusion import PoseFusion
 
-    return PoseFusion(config.fusion)
+    return PoseFusion(
+        config.fusion,
+        backend=config.localization.backend,
+        require_field_anchor=config.localization.slam.require_field_anchor,
+    )
 
 
 def build_differential_navigator(config: DifferentialRobotConfig):

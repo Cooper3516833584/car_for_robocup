@@ -198,6 +198,25 @@ class FusionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SlamLocalizationConfig:
+    enabled: bool = False
+    require_field_anchor: bool = True
+    hardware_mission_validated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LocalizationConfig:
+    backend: str = "legacy"
+    slam: SlamLocalizationConfig = SlamLocalizationConfig()
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"legacy", "slam_toolbox"}:
+            raise ConfigV2Error("localization.backend must be legacy or slam_toolbox")
+        if self.backend == "slam_toolbox" and not self.slam.enabled:
+            raise ConfigV2Error("slam_toolbox backend requires localization.slam.enabled=true")
+
+
+@dataclass(frozen=True, slots=True)
 class NavigationConfig:
     position_tolerance_m: float
     yaw_tolerance_rad: float
@@ -286,6 +305,7 @@ class DifferentialRobotConfig:
     footprint: FootprintConfig
     safety: SafetyConfig
     relay: RelayConfig = RelayConfig()
+    localization: LocalizationConfig = LocalizationConfig()
 
     def __post_init__(self) -> None:
         if self.schema_version != 2:
@@ -295,3 +315,5 @@ class DifferentialRobotConfig:
             )
         if not self.robot_name.strip():
             raise ConfigV2Error("robot_name must not be empty")
+        if self.localization.slam.enabled and (not self.t265.enabled or not self.d500.enabled):
+            raise ConfigV2Error("SLAM bridge requires enabled T265 and D500 sensors")

@@ -17,6 +17,11 @@ MAX_INTERP_GAP_S = 0.080
 D500_MAX_INNOVATION_M = 0.30
 D500_MAX_INNOVATION_YAW_RAD = math.radians(12.0)
 ANCHOR_BLEND = 0.35
+SLAM_LOOP_MAX_M = 1.0
+SLAM_LOOP_MAX_YAW_RAD = math.radians(35.0)
+SLAM_LOOP_CONSISTENCY_M = 0.10
+SLAM_LOOP_CONSISTENCY_YAW_RAD = math.radians(5.0)
+SLAM_LOOP_MIGRATION_S = 0.5
 T265_JUMP_DT_S = 0.20
 T265_JUMP_M = 0.50
 T265_JUMP_YAW_RAD = math.radians(20.0)
@@ -75,8 +80,12 @@ def _age(now_s: float, pose: Pose2D | None) -> float | None:
 class PoseFusion:
     """Maintain ``map_T_t265_odom`` and project continuous T265 odometry."""
 
-    def __init__(self, config: FusionConfig) -> None:
+    def __init__(self, config: FusionConfig, *, backend: str = "legacy", require_field_anchor: bool = False) -> None:
+        if backend not in {"legacy", "slam_toolbox"}:
+            raise ValueError("unknown localization backend")
         self.config = config
+        self.backend = backend
+        self.require_field_anchor = require_field_anchor
         self._min_t265_confidence = config.t265_min_tracker_confidence / 3.0
         self.reset()
 
@@ -93,6 +102,12 @@ class PoseFusion:
         self._d500_global_fallback_quality: PoseQuality | None = None
         self._d500_map_alignment_valid = False
         self._map_T_t265_odom: Pose2D | None = None
+        self._field_T_slam_map: Pose2D | None = None
+        self._slam_received_s: float | None = None
+        self._slam_candidates: deque[Pose2D] = deque(maxlen=3)
+        self._slam_migration_start: Pose2D | None = None
+        self._slam_migration_target: Pose2D | None = None
+        self._slam_migration_started_s: float | None = None
         self._last_d500_innovation_m: float | None = None
         self._last_d500_innovation_yaw_rad: float | None = None
         self._last_d500_accepted: bool | None = None
@@ -106,8 +121,147 @@ class PoseFusion:
         return self._map_T_t265_odom
 
     @property
+    def continuous_t265_pose(self) -> Pose2D | None:
+        return None if self._t265_continuity_broken else self._t265_pose
+
+    @property
+    def field_T_slam_map(self) -> Pose2D | None:
+        return self._field_T_slam_map
+
+    def slam_anchor_age_s(self, now_s: float) -> float | None:
+        if self._slam_received_s is None:
+            return None
+        return max(0.0, now_s - self._slam_received_s)
+
+    @property
     def global_anchor_established(self) -> bool:
-        return self._map_T_t265_odom is not None
+        return self._map_T_t265_odom is not None and (
+            self.backend != "slam_toolbox" or not self.require_field_anchor
+            or self._field_T_slam_map is not None
+        )
+
+    def update_slam_anchor(self, anchor: Pose2D, *, valid: bool, timestamp_s: float,
+                           loop_closure: bool = False) -> None:
+        """Accept a measured slam_map_T_t265_odom without changing T265 odometry."""
+        self._last_d500_accepted = False
+        self._last_d500_rejection = None
+        if self.backend != "slam_toolbox":
+            self._last_d500_rejection = "wrong_backend"
+            return
+        if (not valid or not all(math.isfinite(value) for value in
+                                 (anchor.x_m, anchor.y_m, anchor.yaw_rad, timestamp_s))):
+            self._last_d500_rejection = "invalid_slam_anchor"
+            return
+        if self._slam_received_s is not None and timestamp_s <= self._slam_received_s:
+            self._last_d500_rejection = "out_of_order_slam_anchor"
+            return
+        if (self.continuous_t265_pose is None or self._t265_quality is None
+                or not self._t265_quality.valid
+                or abs(timestamp_s - self._t265_pose.timestamp_s) > self.config.t265_max_age_s):
+            self._last_d500_rejection = "t265_unavailable_for_slam"
+            return
+        self._seen_d500 = True
+        current = self._map_T_t265_odom
+        if current is None:
+            self._map_T_t265_odom = Pose2D(anchor.x_m, anchor.y_m, anchor.yaw_rad, timestamp_s)
+            self._slam_received_s = timestamp_s
+            self._last_d500_innovation_m = 0.0
+            self._last_d500_innovation_yaw_rad = 0.0
+            self._last_d500_accepted = True
+            return
+
+        delta_m = math.hypot(anchor.x_m - current.x_m, anchor.y_m - current.y_m)
+        delta_yaw = normalize_angle_rad(anchor.yaw_rad - current.yaw_rad)
+        self._last_d500_innovation_m = delta_m
+        self._last_d500_innovation_yaw_rad = delta_yaw
+        if self._slam_migration_target is not None:
+            target = self._slam_migration_target
+            if (math.hypot(anchor.x_m - target.x_m, anchor.y_m - target.y_m)
+                    <= SLAM_LOOP_CONSISTENCY_M
+                    and abs(normalize_angle_rad(anchor.yaw_rad - target.yaw_rad))
+                    <= SLAM_LOOP_CONSISTENCY_YAW_RAD):
+                self._slam_received_s = timestamp_s
+                self._last_d500_accepted = True
+            else:
+                self._last_d500_rejection = "loop_migration_target_changed"
+            return
+        if delta_m <= D500_MAX_INNOVATION_M and abs(delta_yaw) <= D500_MAX_INNOVATION_YAW_RAD:
+            self._slam_candidates.clear()
+            self._map_T_t265_odom = Pose2D(
+                current.x_m + ANCHOR_BLEND * (anchor.x_m - current.x_m),
+                current.y_m + ANCHOR_BLEND * (anchor.y_m - current.y_m),
+                normalize_angle_rad(current.yaw_rad + ANCHOR_BLEND * delta_yaw),
+                timestamp_s,
+            )
+            self._slam_received_s = timestamp_s
+            self._last_d500_accepted = True
+            return
+        if not loop_closure or delta_m > SLAM_LOOP_MAX_M or abs(delta_yaw) > SLAM_LOOP_MAX_YAW_RAD:
+            self._slam_candidates.clear()
+            self._last_d500_rejection = "slam_innovation_gate"
+            return
+        # Three successive, coherent post-closure transforms are required.
+        if self._slam_candidates:
+            previous = self._slam_candidates[-1]
+            if (math.hypot(anchor.x_m - previous.x_m, anchor.y_m - previous.y_m)
+                    > SLAM_LOOP_CONSISTENCY_M
+                    or abs(normalize_angle_rad(anchor.yaw_rad - previous.yaw_rad))
+                    > SLAM_LOOP_CONSISTENCY_YAW_RAD):
+                self._slam_candidates.clear()
+        self._slam_candidates.append(anchor)
+        if len(self._slam_candidates) < 3:
+            self._last_d500_rejection = "loop_anchor_waiting_for_consensus"
+            return
+        self._slam_migration_start = current
+        self._slam_migration_target = anchor
+        self._slam_migration_started_s = timestamp_s
+        self._slam_candidates.clear()
+        self._slam_received_s = timestamp_s
+        self._last_d500_accepted = True
+
+    def update_field_wall(self, pose: Pose2D, quality: PoseQuality) -> bool:
+        """Align field to slam_map using an accepted fixed-wall observation."""
+        if self.backend != "slam_toolbox" or not _pose_valid(pose, quality) or quality.degraded:
+            return False
+        aligned = self._sample_t265(pose.timestamp_s)
+        if (aligned is None or aligned.confidence < self._min_t265_confidence
+                or self._map_T_t265_odom is None or self._slam_received_s is None
+                or abs(pose.timestamp_s - self._slam_received_s) > 0.5
+                or self._slam_migration_target is not None):
+            return False
+        slam_base = compose_pose2d(self._map_T_t265_odom, aligned.pose)
+        candidate = compose_pose2d(pose, inverse_pose2d(slam_base))
+        old = self._field_T_slam_map
+        if old is None:
+            self._field_T_slam_map = candidate
+            return True
+        dx, dy = candidate.x_m - old.x_m, candidate.y_m - old.y_m
+        dyaw = normalize_angle_rad(candidate.yaw_rad - old.yaw_rad)
+        if math.hypot(dx, dy) > D500_MAX_INNOVATION_M or abs(dyaw) > D500_MAX_INNOVATION_YAW_RAD:
+            return False
+        self._field_T_slam_map = Pose2D(
+            old.x_m + ANCHOR_BLEND * dx,
+            old.y_m + ANCHOR_BLEND * dy,
+            normalize_angle_rad(old.yaw_rad + ANCHOR_BLEND * dyaw),
+            pose.timestamp_s,
+        )
+        return True
+
+    def _advance_slam_migration(self, now_s: float) -> None:
+        if (self._slam_migration_target is None or self._slam_migration_start is None
+                or self._slam_migration_started_s is None):
+            return
+        start, target = self._slam_migration_start, self._slam_migration_target
+        fraction = min(1.0, max(0.0, (now_s - self._slam_migration_started_s) / SLAM_LOOP_MIGRATION_S))
+        self._map_T_t265_odom = Pose2D(
+            start.x_m + fraction * (target.x_m - start.x_m),
+            start.y_m + fraction * (target.y_m - start.y_m),
+            normalize_angle_rad(start.yaw_rad + fraction * normalize_angle_rad(target.yaw_rad - start.yaw_rad)),
+            now_s,
+        )
+        if fraction >= 1.0:
+            self._slam_migration_start = self._slam_migration_target = None
+            self._slam_migration_started_s = None
 
     def update_t265(self, pose: Pose2D | None, quality: PoseQuality) -> None:
         """Add canonical adapter output, rebasing tracker frame jumps continuously."""
@@ -139,7 +293,16 @@ class PoseFusion:
                     self._t265_history.clear()
 
         if self._t265_continuity_broken:
-            if self._fresh_d500_global_fallback(pose.timestamp_s):
+            if self.backend == "slam_toolbox" and self._t265_pose is not None:
+                # Keep odom continuous after tracker recovery.  Navigation
+                # remains gated until slam_toolbox supplies a fresh correction.
+                self._t265_rebase = compose_pose2d(
+                    self._t265_pose, inverse_pose2d(pose)
+                )
+                self._t265_continuity_broken = False
+                self._t265_history.clear()
+                continuous = compose_pose2d(self._t265_rebase, pose)
+            elif self._fresh_d500_global_fallback(pose.timestamp_s):
                 assert self._d500_global_fallback_pose is not None
                 self._map_T_t265_odom = compose_pose2d(
                     self._d500_global_fallback_pose, inverse_pose2d(pose)
@@ -293,8 +456,10 @@ class PoseFusion:
         now = float(now_s)
         if not math.isfinite(now):
             raise ValueError("now_s must be finite monotonic time")
+        if self.backend == "slam_toolbox":
+            self._advance_slam_migration(now)
         t265_age = _age(now, self._t265_pose)
-        d500_age = _age(now, self._d500_pose)
+        d500_age = (None if self._slam_received_s is None else max(0.0, now - self._slam_received_s)) if self.backend == "slam_toolbox" else _age(now, self._d500_pose)
         t265_fresh = (
             t265_age is not None and t265_age <= self.config.t265_max_age_s
             and self._t265_quality is not None and self._t265_quality.valid
@@ -303,14 +468,15 @@ class PoseFusion:
         )
         if self._t265_pose is not None and not t265_fresh:
             self._break_t265_continuity()
-        d500_fresh = (
+        d500_fresh = (self.backend == "slam_toolbox" and d500_age is not None and d500_age <= 0.5) or (
+            self.backend != "slam_toolbox" and
             d500_age is not None and d500_age <= self.config.d500_max_age_s
             and self._d500_quality is not None and self._d500_quality.valid
         )
-        fallback_fresh = self._fresh_d500_global_fallback(now)
+        fallback_fresh = self.backend != "slam_toolbox" and self._fresh_d500_global_fallback(now)
         if t265_fresh and d500_fresh and self._map_T_t265_odom is not None:
             pose = compose_pose2d(self._map_T_t265_odom, self._t265_pose)
-            state, flags, age = PoseFusionState.OK, ("t265", "d500", "fused"), t265_age
+            state, flags, age = PoseFusionState.OK, (("t265", "slam", "fused") if self.backend == "slam_toolbox" else ("t265", "d500", "fused")), t265_age
         elif t265_fresh and self._map_T_t265_odom is not None:
             pose = compose_pose2d(self._map_T_t265_odom, self._t265_pose)
             state, flags, age = PoseFusionState.D500_DEGRADED, ("t265", "dead_reckoning"), t265_age
@@ -329,6 +495,13 @@ class PoseFusion:
             state, flags = PoseFusionState.LOST, ()
             ages = [value for value in (t265_age, d500_age) if value is not None]
             age = max(ages) if ages else None
+
+        if (self.backend == "slam_toolbox" and pose is not None and self.require_field_anchor):
+            if self._field_T_slam_map is None:
+                pose = None
+                state, flags = PoseFusionState.UNANCHORED, ("t265", "slam", "field_unanchored")
+            else:
+                pose = compose_pose2d(self._field_T_slam_map, pose)
 
         return FusedPoseEstimate(
             pose, state, age, flags, t265_age, d500_age,
