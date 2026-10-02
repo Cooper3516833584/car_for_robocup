@@ -39,15 +39,26 @@ starting the optional bridge reports a failed sidecar.
 
 ## Debian 12 board
 
-The currently observed ROCK 5A runs Debian 12/aarch64 and has no ROS 2
-installation. Do not install Ubuntu 22.04 ROS apt packages into this system.
-A separate user owned RoboStack Humble environment is a candidate because it
-provides Linux aarch64 packages. Keep it in a new directory, without editing
-existing system or robot files. The robot's `pyrealsense2` is currently a
-CPython 3.11 extension, so the environment must use Python 3.11 if the Python
-runtime and ROS bridge share a process. Check imports of `rclpy`,
-`slam_toolbox`, `serial`, and `pyrealsense2` in that environment before any
-sensor or motor test. A ROS environment that cannot import the current T265
-extension is not a working runtime configuration.
+The ROCK 5A runs Debian 12/aarch64. ROS Humble is installed only in the new
+user owned `/home/radxa/robocup_ros/env` RoboStack environment; the system ROS
+and apt configuration are untouched. Its Python is pinned to 3.11 to match the
+board's existing T265 extension. OpenCV is pinned below 5 so that installing it
+does not remove the Humble packages. The existing `pyrealsense2` extension is
+linked from `/home/radxa/robocup_ros/python_ext`; no system file was changed.
+
+Use the same environment for the optional SLAM launch and the robot runtime:
+
+```bash
+export MAMBA_ROOT_PREFIX=/home/radxa/robocup_ros/root
+export PYTHONPATH=/home/radxa/robocup_ros/python_ext:/home/radxa/car/code
+/home/radxa/robocup_ros/bin/micromamba run -p /home/radxa/robocup_ros/env \
+  ros2 launch /home/radxa/car/launch/robocup_slam.launch.py
+```
+
+In a separate terminal, use the same two environment variables and
+`micromamba run -p /home/radxa/robocup_ros/env python` for the robot entry.
+The ROS launch and hardware runtime have not been started as part of the
+installation. Confirm scan, TF, timestamps, T265 import, and CPU load with a
+supervised stationary test before enabling the SLAM backend for a mission.
 
 No hardware mission is implied by installing the environment or pulling code.
