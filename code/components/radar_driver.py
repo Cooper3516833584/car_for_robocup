@@ -226,7 +226,7 @@ class RadarScanAssembler:
         self,
         *,
         min_distance_mm: int = 100,
-        max_distance_mm: int = 6500,
+        max_distance_mm: int = 12000,
         min_confidence: int = 30,
         min_points: int = 30,
     ) -> None:

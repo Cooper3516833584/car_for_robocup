@@ -139,6 +139,17 @@ class SafetyNetRobustnessTests(unittest.TestCase):
 
 
 class PolarAggregationTests(unittest.TestCase):
+    def test_default_range_includes_100_to_12000_mm(self) -> None:
+        scan = RadarScan(
+            points=tuple(RadarPoint(0.0, distance, 30) for distance in
+                         (99, 100, 6501, 12000, 12001)),
+            timestamp_ms=0,
+            rotation_speed_deg_s=0,
+        )
+        bins = aggregate_polar_bins([scan])
+        self.assertEqual(len(bins), 1)
+        self.assertEqual(bins[0].ranges_cm, (10.0, 650.1, 1200.0))
+
     def test_low_quantile_recovers_near_boundary(self) -> None:
         """Pooling revolutions lets a low quantile beat through-mesh hits."""
 

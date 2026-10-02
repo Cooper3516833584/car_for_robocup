@@ -79,7 +79,7 @@ def aggregate_polar_bins(
     *,
     bin_deg: float = 2.0,
     min_distance_mm: int = 100,
-    max_distance_mm: int = 6500,
+    max_distance_mm: int = 12000,
     min_confidence: int = 30,
 ) -> list[PolarBin]:
     """Aggregate several scans into angular bins of range hits.

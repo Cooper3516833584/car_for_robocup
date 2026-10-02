@@ -98,8 +98,26 @@ class D500ProtocolTests(unittest.TestCase):
     def test_scan_assembler_defaults_reject_noise_and_unusable_range(self) -> None:
         assembler = RadarScanAssembler()
         self.assertEqual(assembler.min_distance_mm, 100)
-        self.assertEqual(assembler.max_distance_mm, 6500)
+        self.assertEqual(assembler.max_distance_mm, 12000)
         self.assertEqual(assembler.min_confidence, 30)
+
+    def test_scan_assembler_keeps_100_to_12000_mm_inclusively(self) -> None:
+        assembler = RadarScanAssembler(min_points=1)
+        points = tuple(
+            RadarPoint(300 + index, distance, 30)
+            for index, distance in enumerate((99, 100, 6501, 12000, 12001))
+        )
+        data = RadarPacket(3600, 300, 304, 10, points)
+        wrap = RadarPacket(3600, 0, 0, 20, (RadarPoint(0, 0, 30),))
+        assembler.feed(data)
+        assembler.feed(wrap)
+        assembler.feed(data)
+        scans = assembler.feed(wrap)
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(
+            [point.distance_mm for point in scans[0].points],
+            [100, 6501, 12000],
+        )
 
 
 class DroneCoordinateTests(unittest.TestCase):
