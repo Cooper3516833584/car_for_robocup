@@ -292,6 +292,7 @@ class RobocupRuntime:
     def step(self, *, now_s: float | None = None) -> RuntimeStep:
         if not self._started or self._closed:
             raise RuntimeError("RoboCup runtime is not running")
+        live_time = now_s is None
         now = float(self.clock() if now_s is None else now_s)
         if not math.isfinite(now):
             raise ValueError("runtime clock must be finite monotonic time")
@@ -302,11 +303,18 @@ class RobocupRuntime:
             self._emit("safety", event_code="WATCHDOG_STOP", count=watchdog_stops - self._last_watchdog_stop_count, priority=True)
             self._last_watchdog_stop_count = watchdog_stops
         try:
-            self._consume_t265(now)
+            self._consume_t265(now, live_time=live_time)
+            if live_time:
+                # A hardware read can block; use a clock value taken after it.
+                now = float(self.clock())
+                self._current_step_s = now
             # Give the D500 a map-frame prediction before consuming its scans,
             # so wall association never depends on the D500's own ICP.
             self._publish_d500_pose_hint(now)
             self._consume_d500(now)
+            if live_time:
+                now = float(self.clock())
+                self._current_step_s = now
             if self.mode is RuntimeMode.REPLAY:
                 self._consume_replay(now)
             estimate = self.fusion.estimate(now)
@@ -502,13 +510,16 @@ class RobocupRuntime:
                 LOG.exception("failed to close JSONL diagnostics logger")
         self._closed = True
 
-    def _consume_t265(self, now_s: float) -> None:
+    def _consume_t265(self, now_s: float, *, live_time: bool = False) -> None:
         if self.t265_source is None:
             return
         raw = self.t265_source.read()
         if raw is None:
             return
-        update = self.t265_adapter.adapt(raw, now_s=now_s)
+        sample_now = float(self.clock()) if live_time else now_s
+        if live_time:
+            self._current_step_s = sample_now
+        update = self.t265_adapter.adapt(raw, now_s=sample_now)
         if update.pose is not None and update.quality.valid:
             self.fusion.update_t265(update.pose, update.quality)
             self._emit(

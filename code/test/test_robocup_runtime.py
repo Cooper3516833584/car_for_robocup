@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.c10b_diff_backend import FakeDriveBackend
 from components.navigation_common import NavigationGoal, NavigationGrid
+from components.pose_fusion import PoseFusionState
+from components.t265_driver import T265RawPose
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import RobocupMissionState, RuntimeReadinessError, build_runtime
@@ -45,6 +47,32 @@ class RobocupRuntimeTests(unittest.TestCase):
     def test_unmeasured_hardware_mission_is_rejected_before_devices(self) -> None:
         with self.assertRaisesRegex(RuntimeReadinessError, "measured drive geometry"):
             self.make_runtime(mode=RuntimeMode.HARDWARE_MISSION)
+
+    def test_live_step_uses_clock_after_blocking_t265_read(self) -> None:
+        runtime = self.make_runtime()
+        runtime.d500_source = None
+        runtime.start()
+
+        def delayed_read():
+            self.now[0] = 10.05
+            return T265RawPose(
+                translation_xyz=(0.0, 0.0, 0.0),
+                quaternion_xyzw=(0.0, 0.0, 0.0, 1.0),
+                velocity_xyz=None,
+                angular_velocity_xyz=None,
+                tracker_confidence=3,
+                mapper_confidence=0,
+                device_timestamp_ms=10050.0,
+                received_monotonic_s=10.05,
+            )
+
+        runtime.t265_source.read = delayed_read
+        try:
+            result = runtime.step()
+            self.assertEqual(result.estimate.state, PoseFusionState.UNANCHORED)
+            self.assertEqual(result.estimate.t265_age_s, 0.0)
+        finally:
+            runtime.close()
 
     def test_lost_pose_during_navigation_stops_drive(self) -> None:
         runtime = self.make_runtime(count=1)
