@@ -3,6 +3,8 @@
 本流程对应 schema-v2 差速配置 `configs/robocup_diffdrive.toml`。测量数据记录在
 [HARDWARE_MEASUREMENTS.md](HARDWARE_MEASUREMENTS.md)。目前没有实车测量结果；请将示例值视为软件测试占位值，不能据此解锁正式任务。
 
+当前的前后、定距和相对旋转单动作测试见 [BASIC_MOTION_ACCEPTANCE.md](BASIC_MOTION_ACCEPTANCE.md)；该阶段不依赖 D500 全局定位或比赛地图。
+
 ## RoboCup 差速标定顺序
 
 每次只标定一类数据，并记录日期、操作者、测量工具、原始数据和配置提交。坐标约定为 `base_link` 位于左右主动轮轴线中点，`+X` 朝前、`+Y` 朝左、`+Z` 朝上，yaw 逆时针为正。
