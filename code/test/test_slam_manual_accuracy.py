@@ -14,11 +14,13 @@ sys.path.insert(0, str(ROOT / "code"))
 
 from components.c10b_diff_backend import FakeDriveBackend
 from components.radar_driver import RadarScan
+from components.t265_driver import FakeT265PoseSource, T265RawPose
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import build_runtime
 from slam_manual_accuracy import (
-    AccuracySession, FloorPose, PoseSample, ScanOnlyD500Source, Snapshot, relative_delta,
+    AccuracySession, CausalT265Source, FloorPose, PoseSample, ScanOnlyD500Source,
+    Snapshot, relative_delta,
     test_config_from_board as make_probe_config, wrapped_delta_rad,
 )
 
@@ -100,6 +102,22 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertEqual(logger.events[-1]["type"], "accuracy_d500_scan")
         finally:
             runtime.close()
+
+    def test_t265_future_stamp_is_clamped_to_receipt(self):
+        raw = T265RawPose(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), None, None,
+            2, 0, 10.0, 1.0, 1.003,
+        )
+        source = CausalT265Source(FakeT265PoseSource([raw]))
+        source.start()
+        try:
+            adjusted = source.read()
+            self.assertEqual(adjusted.measurement_monotonic_s, 1.0)
+            self.assertEqual(adjusted.received_monotonic_s, 1.0)
+            self.assertEqual(source.clamped_count, 1)
+            self.assertAlmostEqual(source.max_future_ms, 3.0)
+        finally:
+            source.stop()
 
     def test_truth_is_independent_of_nominal_distance_and_yaw_unwraps(self):
         with tempfile.TemporaryDirectory() as directory:

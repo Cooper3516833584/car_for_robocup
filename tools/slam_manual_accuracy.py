@@ -164,6 +164,31 @@ class ScanOnlyD500Source:
         self.serial.close()
 
 
+class CausalT265Source:
+    """Keep a device-clock estimate from placing a frame after its receipt."""
+
+    def __init__(self, source) -> None:
+        self.source = source
+        self.clamped_count = 0
+        self.max_future_ms = 0.0
+
+    def start(self) -> None:
+        self.source.start()
+
+    def read(self):
+        raw = self.source.read()
+        if (raw is not None and raw.measurement_monotonic_s is not None
+                and raw.measurement_monotonic_s > raw.received_monotonic_s):
+            future_ms = (raw.measurement_monotonic_s - raw.received_monotonic_s) * 1000.0
+            self.clamped_count += 1
+            self.max_future_ms = max(self.max_future_ms, future_ms)
+            return replace(raw, measurement_monotonic_s=raw.received_monotonic_s)
+        return raw
+
+    def stop(self) -> None:
+        self.source.stop()
+
+
 class AccuracySession:
     """Bounded sample buffer, manual markers, and independent floor truth."""
 
@@ -215,6 +240,12 @@ class AccuracySession:
             "log_error": self.logger.write_error,
             "dropped_events": self.logger.dropped_events,
             "t265_min_tracker_confidence": MIN_TRACKER_CONFIDENCE,
+            "t265_future_timestamp_clamps": getattr(
+                getattr(self.runtime, "t265_source", None), "clamped_count", 0,
+            ),
+            "t265_max_future_timestamp_ms": getattr(
+                getattr(self.runtime, "t265_source", None), "max_future_ms", 0.0,
+            ),
         }
         (self.output_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -570,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE,
                                 event_logger=logger, sensor_only=True)
+        runtime.t265_source = CausalT265Source(runtime.t265_source)
         runtime.d500_source = ScanOnlyD500Source(
             runtime, config.d500.port, config.d500.baudrate, logger,
         )
