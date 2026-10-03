@@ -1,6 +1,7 @@
-# WARNING: Dimensions and sensor mounts below are temporary software-test
-# placeholders. They are not measurements for this car. Keep measured flags
-# false until values have been measured on the actual platform.
+# WARNING: This is not a deployable car profile. The physical track and left
+# shell dimensions below are reported measurements; the effective track and
+# T265 optical-origin offset remain provisional. Keep measured flags false
+# until the complete geometry and mount have been checked on the actual car.
 schema_version = 2
 robot_name = "robocup_diffdrive"
 
@@ -10,10 +11,10 @@ sensor_extrinsics_measured = false
 c10b_diff_firmware_verified = false
 
 [vehicle.geometry]
-drive_track_width_m = 0.164
+drive_track_width_m = 0.200
 wheel_diameter_m = 0.100
 body_length_m = 0.450
-body_width_m = 0.350
+body_width_m = 0.3596
 drive_axle_to_body_center_x_m = 0.000
 front_support_x_m = 0.180
 rear_support_x_m = -0.180
@@ -85,12 +86,15 @@ verify_writes = true         # read back the state after every switch command
 disconnect_on_shutdown = true
 
 [sensors.t265.mount]
-x_m = 0.0
-y_m = 0.0
-z_m = 0.25
+# Upright left-facing camera, housing centered on the drive axle. Initial
+# optical-origin estimate only: inner shell y=0.1678 m plus 5.95 mm depth;
+# x uses the 9.10 mm offset rotated from the former rear-facing mount.
+x_m = -0.00910
+y_m = 0.17375
+z_m = 0.03225
 roll_rad = 0.0
 pitch_rad = 0.0
-yaw_rad = 0.0
+yaw_rad = 1.5707963267948966
 
 [fusion]
 t265_max_age_s = 0.15

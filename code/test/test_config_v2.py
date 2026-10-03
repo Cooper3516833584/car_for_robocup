@@ -25,7 +25,9 @@ class ConfigV2Tests(unittest.TestCase):
         self.assertFalse(config.calibration.geometry_measured)
         self.assertEqual(config.drive.protocol_mode, "ackermann_firmware_compat")
         self.assertEqual(config.d500_mount.z_m, 0.20)
-        self.assertEqual(config.t265_mount.z_m, 0.25)
+        self.assertEqual(config.t265_mount.z_m, 0.03225)
+        self.assertEqual(config.geometry.drive_track_width_m, 0.200)
+        self.assertEqual(config.geometry.body_width_m, 0.3596)
 
     def _load_modified(self, replacements: dict[str, str]):
         source = DEFAULT_V2_CONFIG.read_text(encoding="utf-8")
@@ -39,7 +41,7 @@ class ConfigV2Tests(unittest.TestCase):
 
     def test_non_positive_track_width_is_rejected(self) -> None:
         with self.assertRaisesRegex(ConfigV2Error, "drive_track_width_m"):
-            self._load_modified({"drive_track_width_m = 0.164": "drive_track_width_m = 0.0"})
+            self._load_modified({"drive_track_width_m = 0.200": "drive_track_width_m = 0.0"})
 
     def test_unknown_protocol_is_rejected(self) -> None:
         with self.assertRaisesRegex(ConfigV2Error, "protocol_mode"):
