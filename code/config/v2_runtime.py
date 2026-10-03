@@ -29,8 +29,10 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
     errors: list[str] = []
     if mode is not RuntimeMode.HARDWARE_MISSION:
         return errors
-    if config.localization.backend == "slam_toolbox" and not config.localization.slam.require_field_anchor:
-        errors.append("hardware mission with field goals requires a fixed-wall field anchor")
+    if (config.localization.backend == "slam_toolbox"
+            and not config.localization.slam.require_field_anchor
+            and not config.localization.slam.relative_goals_only):
+        errors.append("hardware mission without a field anchor requires relative_goals_only")
     if config.localization.backend == "slam_toolbox" and not config.localization.slam.hardware_mission_validated:
         errors.append("SLAM hardware mission requires recorded localization, CPU and communication validation")
     if (config.localization.backend == "slam_toolbox"
@@ -38,6 +40,7 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
             and not config.d500_localization.enable_wall_absolute):
         errors.append("SLAM hardware mission requires the fixed-wall observer")
     if (config.localization.backend == "slam_toolbox"
+            and config.localization.slam.require_field_anchor
             and config.safety.require_measured_d500_reference_for_hardware_mission
             and not config.d500_localization.reference_measured):
         errors.append("SLAM hardware mission requires a measured fixed-wall reference")
@@ -52,6 +55,8 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
     if (
         config.d500.enabled
         and config.d500_localization.require_global_for_hardware
+        and (config.localization.backend != "slam_toolbox"
+             or config.localization.slam.require_field_anchor)
         and config.safety.require_measured_d500_reference_for_hardware_mission
         and not config.d500_localization.reference_measured
     ):

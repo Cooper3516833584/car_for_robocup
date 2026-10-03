@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "code"))
 
 from components.diagnostics_log import JsonlEventLogger  # noqa: E402
-from components.radar_driver import D500SerialDriver, RadarScanAssembler  # noqa: E402
+from components.slam_scan_source import ScanOnlyD500Source  # noqa: E402
 from config.v2_loader import load_v2_config  # noqa: E402
 from config.v2_models import LocalizationConfig, SlamLocalizationConfig  # noqa: E402
 from config.v2_runtime import RuntimeMode  # noqa: E402
@@ -128,40 +128,6 @@ def test_config_from_board(config):
             ),
         ),
     )
-
-
-class ScanOnlyD500Source:
-    """Read D500 revolutions for SLAM without running scan-to-scan ICP."""
-
-    def __init__(self, runtime, port: str, baudrate: int, logger: JsonlEventLogger) -> None:
-        self.runtime = runtime
-        self.logger = logger
-        self.assembler = RadarScanAssembler()
-        self.serial = D500SerialDriver(
-            port=port, baudrate=baudrate, on_packet=self._on_packet,
-        )
-
-    def _on_packet(self, packet) -> None:
-        bridge = self.runtime.slam_bridge
-        if bridge is None:
-            return
-        for scan in self.assembler.feed(packet):
-            received_s = time.monotonic()
-            measurement_s = self.runtime._map_d500_timestamp(scan.timestamp_ms, received_s)
-            bridge.push_d500_scan(scan, measurement_s)
-            self.logger.emit({
-                "type": "accuracy_d500_scan", "monotonic_s": measurement_s,
-                "point_count": len(scan.points),
-                "rotation_speed_deg_s": scan.rotation_speed_deg_s,
-            })
-
-    def start(self) -> "ScanOnlyD500Source":
-        self.assembler.reset()
-        self.serial.start()
-        return self
-
-    def close(self) -> None:
-        self.serial.close()
 
 
 class CausalT265Source:
@@ -693,9 +659,12 @@ def main(argv: list[str] | None = None) -> int:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE,
                                 event_logger=logger, sensor_only=True)
         runtime.t265_source = CausalT265Source(runtime.t265_source)
-        runtime.d500_source = ScanOnlyD500Source(
-            runtime, config.d500.port, config.d500.baudrate, logger,
-        )
+        if isinstance(runtime.d500_source, ScanOnlyD500Source):
+            runtime.d500_source.logger = logger
+        else:
+            runtime.d500_source = ScanOnlyD500Source(
+                runtime, config.d500.port, config.d500.baudrate, logger,
+            )
         session = AccuracySession(runtime, logger, output_dir)
         session.start()
         commands = "status, preflight, begin LABEL [move|pivot], end, truth X_CM Y_CM YAW_DEG, truth-angle YAW_DEG UNCERTAINTY_DEG, loop-start LABEL, closure LABEL, quit"

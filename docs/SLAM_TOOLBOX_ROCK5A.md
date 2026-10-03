@@ -62,3 +62,24 @@ installation. Confirm scan, TF, timestamps, T265 import, and CPU load with a
 supervised stationary test before enabling the SLAM backend for a mission.
 
 No hardware mission is implied by installing the environment or pulling code.
+
+## Relative task localization
+
+For hardware missions whose movement and turns are relative to the starting
+pose, `code/main_robocup.py` applies the relative SLAM profile by default.
+`--relative-slam` selects the same profile in other modes;
+`--localization-from-config` explicitly uses the TOML localization settings.
+Task code that calls `build_runtime()` directly must apply
+`accepted_relative_slam_profile(config)` itself. This in-memory profile selects
+the T265 confidence threshold 2/3, enables the D500 complete-scan SLAM path,
+and does not require a fixed-wall field anchor. The fused pose is passed to
+`runtime.motion.step()` for pending `drive_distance()` and `rotate()` actions.
+The CLI rejects `--goal-*` field coordinates in this mode; selecting the
+localization profile alone does not enqueue a movement.
+
+The user has accepted the relative localization chain for task use. The
+profile leaves the board configuration file untouched. Hardware mission
+readiness still checks measured drive geometry, sensor extrinsics, the task
+map and robot footprint, and the C10B firmware mode. At run time, motion waits
+for a fresh accepted SLAM anchor and stops on localization loss. Start the ROS
+launch separately and verify its topics before a supervised mission run.

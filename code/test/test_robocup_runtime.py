@@ -44,6 +44,31 @@ class RobocupRuntimeTests(unittest.TestCase):
         self.assertTrue(runtime.d500_source.stopped)
         self.assertEqual(runtime.drive.backend.close_count, 1)
 
+    def test_direct_motion_reaches_fake_drive_without_map_navigation(self) -> None:
+        runtime = self.make_runtime()
+        runtime.motion.drive_distance(1.0)
+        runtime.start()
+        try:
+            result = runtime.step(now_s=10.0)
+            self.assertIsNone(result.navigation)
+            self.assertIsNotNone(result.motion)
+            self.assertEqual(result.motion.action_type.value, "drive_distance")
+            self.assertGreater(result.command.linear_x_m_s, 0.0)
+            self.assertIsNone(runtime.navigator.goal)
+        finally:
+            runtime.close()
+
+    def test_direct_motion_completion_advances_mission(self) -> None:
+        runtime = self.make_runtime()
+        runtime.motion.drive_distance(0.0)
+        runtime.start()
+        try:
+            result = runtime.step(now_s=10.0)
+            self.assertEqual(result.mission_state, RobocupMissionState.TARGET_OPERATION)
+            self.assertEqual(result.command.linear_x_m_s, 0.0)
+        finally:
+            runtime.close()
+
     def test_unmeasured_hardware_mission_is_rejected_before_devices(self) -> None:
         with self.assertRaisesRegex(RuntimeReadinessError, "measured drive geometry"):
             self.make_runtime(mode=RuntimeMode.HARDWARE_MISSION)

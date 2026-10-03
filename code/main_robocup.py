@@ -9,6 +9,7 @@ import sys
 
 from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal
+from config.relative_slam_profile import accepted_relative_slam_profile
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
 
@@ -24,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir", help="directory for runtime log output")
     parser.add_argument("--replay-file", help="pose replay log (replay mode)")
     parser.add_argument("--mission-profile", default="default")
+    localization = parser.add_mutually_exclusive_group()
+    localization.add_argument("--relative-slam", action="store_true",
+                              help="use accepted T265(2/3)+D500/SLAM localization for relative task actions")
+    localization.add_argument("--localization-from-config", action="store_true",
+                              help="use localization settings from the TOML profile instead of the hardware-mission default")
     parser.add_argument("--steps", type=int, default=8, help="fixed dry-run/replay step count")
     parser.add_argument("--goal-x", type=float, help="optional navigation goal x in metres")
     parser.add_argument("--goal-y", type=float, help="optional navigation goal y in metres")
@@ -53,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_runtime_config(args.config)
         mode = RuntimeMode(args.mode)
+        if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
+            config = accepted_relative_slam_profile(config)
+        if config.localization.slam.relative_goals_only and any(
+            value is not None for value in (args.goal_x, args.goal_y, args.goal_yaw)
+        ):
+            raise ValueError("relative SLAM task does not accept field-coordinate --goal-* arguments")
         if not config.calibration.geometry_measured or not config.calibration.sensor_extrinsics_measured:
             logging.warning(
                 "configuration contains unmeasured geometry or sensor mounts; autonomous hardware mission remains gated"

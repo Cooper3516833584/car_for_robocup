@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import logging
 import math
@@ -11,7 +11,8 @@ import time
 from typing import Callable, Iterable
 
 from components.differential_drive import DifferentialDrive
-from components.differential_navigation import DifferentialNavigator, NavigationOutput, NavigationState
+from components.basic_motion_controller import BasicMotionController, MotionActionState, MotionOutput
+from components.differential_navigation import DifferentialNavigator, NavigationOutput
 from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
@@ -22,6 +23,7 @@ from components.sensor_clock import DeviceClockMapper
 from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, T265RawPose
 from components.t265_pose_adapter import T265PoseAdapter
 from config.v2_factory import (
+    build_basic_motion_controller,
     build_competition_world,
     build_differential_drive,
     build_differential_navigator,
@@ -82,6 +84,7 @@ class RuntimeStep:
     command: Twist2D
     navigation: NavigationOutput | None
     error: str | None = None
+    motion: MotionOutput | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +140,9 @@ class FakeD500PoseSource:
 class RobocupMission:
     """Competition task-state skeleton, separate from planning and hardware."""
 
-    def __init__(self, navigator: DifferentialNavigator, profile_name: str = "default") -> None:
+    def __init__(self, navigator: DifferentialNavigator, profile_name: str = "default", motion: BasicMotionController | None = None) -> None:
         self.navigator = navigator
+        self.motion = motion or BasicMotionController(navigator, navigator.navigation, navigator.drive)
         self.profile_name = profile_name
         self.state = RobocupMissionState.INIT
         self._goal_pending = False
@@ -147,7 +151,10 @@ class RobocupMission:
     def set_navigation_goal(self, goal: NavigationGoal) -> None:
         if self.state in {RobocupMissionState.FINISHED, RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
             raise RuntimeError(f"cannot set a goal while mission is {self.state.value}")
-        self.navigator.set_goal(goal)
+        if goal.yaw_rad is None:
+            self.motion.navigate_to(goal.x_m, goal.y_m)
+        else:
+            self.motion.navigate_to_pose(goal.x_m, goal.y_m, goal.yaw_rad)
         self._goal_pending = True
         if self.state is RobocupMissionState.READY:
             self.state = RobocupMissionState.NAVIGATING
@@ -166,13 +173,18 @@ class RobocupMission:
         if self.state in {RobocupMissionState.INIT, RobocupMissionState.WAIT_FOR_LOCALIZATION}:
             self.state = RobocupMissionState.NAVIGATING if self._goal_pending else RobocupMissionState.READY
 
-    def on_goal_reached(self) -> None:
+    def on_motion_done(self) -> None:
         if self.state in {RobocupMissionState.NAVIGATING, RobocupMissionState.RETURNING}:
             self._goal_pending = False
             self.state = RobocupMissionState.TARGET_OPERATION
 
+    def on_goal_reached(self) -> None:
+        self.on_motion_done()
+
     def on_target_detected(self) -> None:
         if self.state is RobocupMissionState.NAVIGATING:
+            self.motion.stop()
+            self._goal_pending = False
             self.state = RobocupMissionState.TARGET_OPERATION
 
     def on_payload_action_done(self) -> None:
@@ -180,18 +192,24 @@ class RobocupMission:
             self.state = RobocupMissionState.READY
 
     def set_return_goal(self, goal: NavigationGoal) -> None:
-        self.navigator.set_goal(goal)
+        if goal.yaw_rad is None:
+            self.motion.navigate_to(goal.x_m, goal.y_m)
+        else:
+            self.motion.navigate_to_pose(goal.x_m, goal.y_m, goal.yaw_rad)
         self._goal_pending = True
         self.state = RobocupMissionState.RETURNING
 
     def finish(self) -> None:
+        self.motion.stop()
         self.state = RobocupMissionState.FINISHED
 
     def request_safe_stop(self, reason: str = "operator requested safe stop") -> None:
+        self.motion.safe_stop(reason)
         self.last_error = reason
         self.state = RobocupMissionState.SAFE_STOP
 
     def request_error(self, reason: str) -> None:
+        self.motion.safe_stop(reason)
         self.last_error = reason
         self.state = RobocupMissionState.ERROR
 
@@ -212,6 +230,7 @@ class RobocupRuntime:
         radar_adapter: RadarPoseAdapter,
         fusion: PoseFusion,
         navigator: DifferentialNavigator,
+        motion: BasicMotionController | None = None,
         clock: Callable[[], float],
         mission_profile: str = "default",
         constraints: RuntimeConstraints | None = None,
@@ -236,7 +255,8 @@ class RobocupRuntime:
         self.radar_adapter = radar_adapter
         self.fusion = fusion
         self.navigator = navigator
-        self.mission = RobocupMission(navigator, mission_profile)
+        self.motion = motion or BasicMotionController(navigator, config.navigation, config.drive)
+        self.mission = RobocupMission(navigator, mission_profile, self.motion)
         self.clock = clock
         self.constraints = constraints or runtime_constraints(config, mode)
         self.world = world
@@ -304,9 +324,15 @@ class RobocupRuntime:
         now = float(self.clock() if now_s is None else now_s)
         if not math.isfinite(now):
             raise ValueError("runtime clock must be finite monotonic time")
+        if self.mode is RuntimeMode.DRY_RUN and self.motion.state is MotionActionState.IDLE and self.mission.state in {
+            RobocupMissionState.INIT, RobocupMissionState.WAIT_FOR_LOCALIZATION, RobocupMissionState.READY,
+        }:
+            # Supply the synthetic acceptance goal only if no task action was submitted.
+            self.mission.set_navigation_goal(NavigationGoal(0.8, 0.0))
         self._current_step_s = now
         watchdog_stops = self.drive.watchdog_stop_count
         navigation_output: NavigationOutput | None = None
+        motion_output: MotionOutput | None = None
         if watchdog_stops > self._last_watchdog_stop_count:
             self._emit("safety", event_code="WATCHDOG_STOP", count=watchdog_stops - self._last_watchdog_stop_count, priority=True)
             self._last_watchdog_stop_count = watchdog_stops
@@ -360,34 +386,42 @@ class RobocupRuntime:
                 self._emit("safety", event_code="D500_GLOBAL_PENDING", state=self.mission.state.value, priority=True)
             self._d500_global_pending = d500_global_pending
 
+            if self.mission.state is RobocupMissionState.READY and self.motion.state is MotionActionState.RUNNING:
+                self.mission.state = RobocupMissionState.NAVIGATING
+
             command = Twist2D(0.0, 0.0)
             if not localization_loss_pending and not d500_global_pending and self.mode is not RuntimeMode.HARDWARE_PROBE and self.mission.state in {
                 RobocupMissionState.NAVIGATING,
                 RobocupMissionState.RETURNING,
             }:
-                navigation_output = self.navigator.step(
+                motion_output = self.motion.step(
                     estimate.pose,
                     self.world,
                     now_s=now,
                     pose_state=estimate.state,
                 )
-                command = navigation_output.command
-                if navigation_output.state is NavigationState.GOAL_REACHED:
-                    self.mission.on_goal_reached()
+                navigation_output = self.motion.last_navigation_output
+                command = motion_output.command
+                if motion_output.state is MotionActionState.SUCCEEDED:
+                    self.mission.on_motion_done()
                     command = Twist2D(0.0, 0.0)
-                elif navigation_output.state in {NavigationState.BLOCKED, NavigationState.POSE_LOST, NavigationState.ERROR}:
+                elif motion_output.state in {MotionActionState.BLOCKED, MotionActionState.POSE_LOST, MotionActionState.SAFE_STOPPED, MotionActionState.ERROR}:
                     self.mission.request_safe_stop(
-                        str(navigation_output.diagnostics.get("reason", navigation_output.state.value))
+                        str(motion_output.diagnostics.get("reason", motion_output.state.value))
                     )
                     command = Twist2D(0.0, 0.0)
-                self._emit(
-                    "navigation",
-                    state=navigation_output.state.value,
-                    diagnostics=navigation_output.diagnostics,
-                    path=navigation_output.path,
-                    command=command,
-                    goal=self.navigator.goal,
-                )
+                self._emit("motion_action", action=None if motion_output.action_type is None else motion_output.action_type.value,
+                           state=motion_output.state.value, phase=None if motion_output.phase is None else motion_output.phase.value,
+                           diagnostics=motion_output.diagnostics, command=command)
+                if navigation_output is not None:
+                    self._emit(
+                        "navigation",
+                        state=navigation_output.state.value,
+                        diagnostics=navigation_output.diagnostics,
+                        path=navigation_output.path,
+                        command=command,
+                        goal=self.navigator.goal,
+                    )
 
             if self.mission.state in {
                 RobocupMissionState.SAFE_STOP,
@@ -441,7 +475,7 @@ class RobocupRuntime:
                 actuation_enabled=self.drive.is_running,
             )
 
-            return RuntimeStep(now, estimate, self.mission.state, command, navigation_output)
+            return RuntimeStep(now, estimate, self.mission.state, command, navigation_output, motion=motion_output)
         except Exception as exc:
             self._error = f"{type(exc).__name__}: {exc}"
             self.mission.request_error(self._error)
@@ -451,7 +485,7 @@ class RobocupRuntime:
             self._emit("runtime_error", error=self._error, priority=True)
             LOG.exception("RoboCup runtime step failed")
             estimate = self.fusion.estimate(now)
-            return RuntimeStep(now, estimate, self.mission.state, Twist2D(0.0, 0.0), navigation_output, self._error)
+            return RuntimeStep(now, estimate, self.mission.state, Twist2D(0.0, 0.0), navigation_output, self._error, motion_output)
 
     def run_steps(self, count: int, *, period_s: float = 0.05) -> list[RuntimeStep]:
         if count < 0 or period_s <= 0.0:
@@ -530,6 +564,12 @@ class RobocupRuntime:
         raw = self.t265_source.read()
         if raw is None:
             return
+        if (live_time and self.config.localization.backend == "slam_toolbox"
+                and raw.measurement_monotonic_s is not None
+                and raw.measurement_monotonic_s > raw.received_monotonic_s):
+            # The device-clock fit can lead the host receipt by a few ms.
+            # Keep the production SLAM path causal, as in the manual probe.
+            raw = replace(raw, measurement_monotonic_s=raw.received_monotonic_s)
         sample_now = float(self.clock()) if live_time else now_s
         if live_time:
             self._current_step_s = sample_now
@@ -1045,12 +1085,18 @@ def build_runtime(
         raise RuntimeReadinessError("; ".join(readiness))
     replay_events = read_pose_events(replay_file) if mode is RuntimeMode.REPLAY and replay_file else ()
     fake_mode = mode in {RuntimeMode.DRY_RUN, RuntimeMode.REPLAY}
+    relative_slam_scans = (
+        not fake_mode and config.d500.enabled
+        and config.localization.backend == "slam_toolbox"
+        and not config.localization.slam.require_field_anchor
+    )
     now = float(clock())
     period_s = 0.05
 
     drive = build_differential_drive(config, fake=fake_mode or sensor_only, clock=clock)
     fusion = build_pose_fusion(config)
     navigator = build_differential_navigator(config)
+    motion = build_basic_motion_controller(config, navigator)
     relay = None if sensor_only else build_relay(config, fake=fake_mode)
     slam_bridge = None
     if config.localization.slam.enabled and not fake_mode:
@@ -1092,7 +1138,7 @@ def build_runtime(
         d500_fake = True
     else:
         t265_source = RealSenseT265PoseSource(config.t265.serial) if config.t265.enabled else None
-        if config.d500.enabled:
+        if config.d500.enabled and not relative_slam_scans:
             from components.radar_driver import (
                 D500RadarComponent,
                 DroneGlobalAlignment,
@@ -1146,6 +1192,7 @@ def build_runtime(
         radar_adapter=radar_adapter,
         fusion=fusion,
         navigator=navigator,
+        motion=motion,
         clock=clock,
         mission_profile=mission_profile,
         constraints=constraints,
@@ -1155,12 +1202,14 @@ def build_runtime(
         relay=relay,
         slam_bridge=slam_bridge,
     )
-    if not d500_fake and d500_source is not None:
+    if relative_slam_scans:
+        from components.slam_scan_source import ScanOnlyD500Source
+
+        runtime.d500_source = ScanOnlyD500Source(
+            runtime, config.d500.port, config.d500.baudrate,
+        )
+    elif not d500_fake and d500_source is not None:
         d500_source.on_update = runtime.on_d500_update
-    if mode is RuntimeMode.DRY_RUN:
-        # A short synthetic goal ensures the default acceptance command
-        # exercises planning and the fake actuation path without touching hardware.
-        runtime.mission.set_navigation_goal(NavigationGoal(0.8, 0.0))
     return runtime
 
 

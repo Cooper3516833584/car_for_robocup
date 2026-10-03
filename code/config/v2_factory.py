@@ -126,6 +126,14 @@ def build_differential_navigator(config: DifferentialRobotConfig):
     return DifferentialNavigator(config.geometry, config.drive, config.navigation)
 
 
+def build_basic_motion_controller(config: DifferentialRobotConfig, navigator):
+    """Build the non-blocking task action layer without opening hardware."""
+
+    from components.basic_motion_controller import BasicMotionController
+
+    return BasicMotionController(navigator, config.navigation, config.drive)
+
+
 def build_competition_world(config: DifferentialRobotConfig):
     """Build the configured static competition map without hardware side effects."""
 

@@ -202,6 +202,7 @@ class SlamLocalizationConfig:
     enabled: bool = False
     require_field_anchor: bool = True
     hardware_mission_validated: bool = False
+    relative_goals_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +215,8 @@ class LocalizationConfig:
             raise ConfigV2Error("localization.backend must be legacy or slam_toolbox")
         if self.backend == "slam_toolbox" and not self.slam.enabled:
             raise ConfigV2Error("slam_toolbox backend requires localization.slam.enabled=true")
+        if self.slam.relative_goals_only and (self.backend != "slam_toolbox" or self.slam.require_field_anchor):
+            raise ConfigV2Error("relative_goals_only requires relative slam_toolbox localization")
 
 
 @dataclass(frozen=True, slots=True)
