@@ -35,13 +35,13 @@ class _Logger:
         return True
 
 
-def _sample(t, x=0.0, y=0.0, yaw=0.0):
+def _sample(t, x=0.0, y=0.0, yaw=0.0, confidence=1.0):
     return PoseSample(
         t_s=t, x_m=x, y_m=y,
         yaw_rad=(yaw + math.pi) % (2 * math.pi) - math.pi,
         yaw_unwrapped_rad=yaw,
         t265_x_m=x, t265_y_m=y, t265_yaw_rad=yaw,
-        t265_confidence=1.0, fusion_state="ok", slam_state="SLAM_OK",
+        t265_confidence=confidence, fusion_state="ok", slam_state="SLAM_OK",
         anchor_age_s=0.1, scan_count=int(t * 5), scan_age_ms=15,
         tf_age_ms=10,
     )
@@ -58,8 +58,13 @@ class ManualAccuracyTests(unittest.TestCase):
 
     def test_probe_uses_fake_drive_and_never_enables_hardware_mission(self):
         source = load_v2_config()
-        source = replace(source, d500=replace(source.d500, enabled=False))
+        source = replace(
+            source, d500=replace(source.d500, enabled=False),
+            fusion=replace(source.fusion, t265_min_tracker_confidence=3),
+        )
         config = make_probe_config(source)
+        self.assertEqual(source.fusion.t265_min_tracker_confidence, 3)
+        self.assertEqual(config.fusion.t265_min_tracker_confidence, 2)
         self.assertTrue(config.d500.enabled)
         self.assertFalse(config.d500_localization.enable_wall_absolute)
         self.assertEqual(config.localization.backend, "slam_toolbox")
@@ -74,6 +79,13 @@ class ManualAccuracyTests(unittest.TestCase):
             runtime.close()
         with self.assertRaisesRegex(ValueError, "hardware-probe"):
             build_runtime(config, RuntimeMode.HARDWARE_MISSION, sensor_only=True)
+
+    def test_medium_t265_confidence_is_accepted_but_low_is_not(self):
+        medium = _sample(1.0, confidence=2.0 / 3.0)
+        low = _sample(1.0, confidence=1.0 / 3.0)
+        self.assertEqual(AccuracySession._health_reasons([medium]), [])
+        self.assertIn("T265 tracker confidence below 2/3",
+                      AccuracySession._health_reasons([low]))
 
     def test_scan_only_source_queues_scan_without_icp(self):
         config = make_probe_config(load_v2_config())

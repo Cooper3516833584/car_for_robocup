@@ -38,6 +38,7 @@ MAX_SEGMENT_S = 180.0
 POSITION_LIMIT_M = 0.03
 YAW_LIMIT_DEG = 3.0
 JUMP_LIMIT_M = 0.30
+MIN_TRACKER_CONFIDENCE = 2
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ def test_config_from_board(config):
         raise ValueError("disable the payload relay before a sensor-only probe")
     return replace(
         config,
+        fusion=replace(config.fusion, t265_min_tracker_confidence=MIN_TRACKER_CONFIDENCE),
         d500=replace(config.d500, enabled=True),
         d500_localization=replace(config.d500_localization, enable_wall_absolute=False),
         localization=LocalizationConfig(
@@ -212,6 +214,7 @@ class AccuracySession:
             "sampler_error": self.error,
             "log_error": self.logger.write_error,
             "dropped_events": self.logger.dropped_events,
+            "t265_min_tracker_confidence": MIN_TRACKER_CONFIDENCE,
         }
         (self.output_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -310,8 +313,9 @@ class AccuracySession:
         if any(s.x_m is None or s.y_m is None or s.yaw_unwrapped_rad is None for s in samples):
             reasons.append("missing fused pose")
         # PoseFusion reports tracker confidence normalized from 0..3 to 0..1.
-        if any(s.t265_confidence is None or s.t265_confidence < 1.0 for s in samples):
-            reasons.append("T265 tracker confidence below 3/3")
+        minimum = MIN_TRACKER_CONFIDENCE / 3.0
+        if any(s.t265_confidence is None or s.t265_confidence < minimum for s in samples):
+            reasons.append("T265 tracker confidence below 2/3")
         if any(s.slam_state != "SLAM_OK" or s.fusion_state != "ok" for s in samples):
             reasons.append("SLAM/fusion not healthy throughout segment")
         if any(s.anchor_age_s is None or s.anchor_age_s > 0.5 for s in samples):
@@ -557,6 +561,10 @@ def main(argv: list[str] | None = None) -> int:
     config = test_config_from_board(load_v2_config(args.config))
     output_dir.mkdir(parents=True)
     logger = JsonlEventLogger(output_dir / "events.jsonl")
+    logger.emit({
+        "type": "accuracy_profile", "t265_min_tracker_confidence": MIN_TRACKER_CONFIDENCE,
+        "position_limit_cm": POSITION_LIMIT_M * 100, "yaw_limit_deg": YAW_LIMIT_DEG,
+    }, priority=True)
     runtime = None
     session = None
     try:
