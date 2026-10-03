@@ -1032,9 +1032,14 @@ def build_runtime(
     fake_sample_count: int = 32,
     world: NavigationGrid | None = None,
     event_logger: JsonlEventLogger | None = None,
+    sensor_only: bool = False,
 ) -> RobocupRuntime:
     """Build all runtime dependencies without starting a device."""
 
+    if sensor_only and mode is not RuntimeMode.HARDWARE_PROBE:
+        raise ValueError("sensor_only requires hardware-probe mode")
+    if sensor_only and config.relay.enabled:
+        raise ValueError("sensor_only requires the payload relay to be disabled")
     readiness = validate_runtime_readiness(config, mode)
     if readiness:
         raise RuntimeReadinessError("; ".join(readiness))
@@ -1043,10 +1048,10 @@ def build_runtime(
     now = float(clock())
     period_s = 0.05
 
-    drive = build_differential_drive(config, fake=fake_mode, clock=clock)
+    drive = build_differential_drive(config, fake=fake_mode or sensor_only, clock=clock)
     fusion = build_pose_fusion(config)
     navigator = build_differential_navigator(config)
-    relay = build_relay(config, fake=fake_mode)
+    relay = None if sensor_only else build_relay(config, fake=fake_mode)
     slam_bridge = None
     if config.localization.slam.enabled and not fake_mode:
         from components.slam_bridge import SlamBridge
