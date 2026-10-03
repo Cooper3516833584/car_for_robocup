@@ -13,11 +13,12 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "code"))
 
 from components.c10b_diff_backend import FakeDriveBackend
+from components.radar_driver import RadarScan
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import build_runtime
 from slam_manual_accuracy import (
-    AccuracySession, FloorPose, PoseSample, Snapshot, relative_delta,
+    AccuracySession, FloorPose, PoseSample, ScanOnlyD500Source, Snapshot, relative_delta,
     test_config_from_board as make_probe_config, wrapped_delta_rad,
 )
 
@@ -26,7 +27,11 @@ class _Logger:
     write_error = None
     dropped_events = 0
 
+    def __init__(self):
+        self.events = []
+
     def emit(self, *_args, **_kwargs):
+        self.events.append(_args[0])
         return True
 
 
@@ -69,6 +74,20 @@ class ManualAccuracyTests(unittest.TestCase):
             runtime.close()
         with self.assertRaisesRegex(ValueError, "hardware-probe"):
             build_runtime(config, RuntimeMode.HARDWARE_MISSION, sensor_only=True)
+
+    def test_scan_only_source_queues_scan_without_icp(self):
+        config = make_probe_config(load_v2_config())
+        runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE, sensor_only=True)
+        logger = _Logger()
+        source = ScanOnlyD500Source(runtime, config.d500.port, config.d500.baudrate, logger)
+        try:
+            scan = RadarScan((), 123, 1800)
+            source.assembler.feed = lambda _packet: [scan]
+            source._on_packet(object())
+            self.assertEqual(runtime.slam_bridge.metrics()["slam.scan_input_count"], 1)
+            self.assertEqual(logger.events[-1]["type"], "accuracy_d500_scan")
+        finally:
+            runtime.close()
 
     def test_truth_is_independent_of_nominal_distance_and_yaw_unwraps(self):
         with tempfile.TemporaryDirectory() as directory:
