@@ -208,6 +208,8 @@ class AccuracySession:
         self.segment_kind = "move"
         self.start_truth = FloorPose(0.0, 0.0, 0.0)
         self.current_truth = self.start_truth
+        self.current_angle_uncertainty_deg = 0.0
+        self.position_truth_available = True
         self.last_end_snapshot: Snapshot | None = None
         self.loop_start_snapshot: Snapshot | None = None
         self.loop_start_truth: FloorPose | None = None
@@ -234,6 +236,9 @@ class AccuracySession:
             "segments": len(self.results),
             "passed": sum(r["status"] == "PASS" for r in self.results),
             "failed": sum(r["status"] == "FAIL" for r in self.results),
+            "angle_passed": sum(r["status"] == "PASS_ANGLE" for r in self.results),
+            "angle_failed": sum(r["status"] == "FAIL_ANGLE" for r in self.results),
+            "angle_inconclusive": sum(r["status"] == "INCONCLUSIVE_ANGLE" for r in self.results),
             "invalid": sum(r["status"] == "INVALID" for r in self.results),
             "closures": self.closures,
             "sampler_error": self.error,
@@ -355,6 +360,10 @@ class AccuracySession:
         if any(math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) > JUMP_LIMIT_M
                for a, b in zip(valid, valid[1:])):
             reasons.append("fused position jump above 0.30 m")
+        valid_yaw = [s for s in samples if s.yaw_unwrapped_rad is not None]
+        if any(abs(b.yaw_unwrapped_rad - a.yaw_unwrapped_rad) > math.radians(45)
+               for a, b in zip(valid_yaw, valid_yaw[1:])):
+            reasons.append("fused yaw jump above 45 degrees per sample")
         return reasons
 
     def preflight(self) -> tuple[bool, list[str]]:
@@ -431,6 +440,8 @@ class AccuracySession:
     def truth(self, measured: FloorPose) -> dict:
         if self.segment_label is None or self.start_snapshot is None or self.end_snapshot is None:
             raise ValueError("use begin and end before entering ground truth")
+        if not self.position_truth_available:
+            raise ValueError("position truth is unavailable after angle-only testing; start a new run")
         if not all(math.isfinite(v) for v in (measured.x_m, measured.y_m, measured.yaw_deg)):
             raise ValueError("ground truth must be finite")
         start, end = self.start_snapshot, self.end_snapshot
@@ -469,6 +480,7 @@ class AccuracySession:
             "truth_x_cm": round(measured.x_m * 100, 2),
             "truth_y_cm": round(measured.y_m * 100, 2),
             "truth_yaw_deg": round(measured.yaw_deg, 2),
+            "angle_truth_uncertainty_deg": None,
             "actual_dx_cm": round(actual[0] * 100, 2),
             "actual_dy_cm": round(actual[1] * 100, 2),
             "actual_dyaw_deg": round(math.degrees(actual[2]), 2),
@@ -497,7 +509,84 @@ class AccuracySession:
         self.start_snapshot = self.end_snapshot = None
         return row
 
+    def truth_angle(self, measured_yaw_deg: float, uncertainty_deg: float) -> dict:
+        """Score a pivot using independent continuous yaw truth only."""
+        if self.segment_label is None or self.start_snapshot is None or self.end_snapshot is None:
+            raise ValueError("use begin and end before entering ground truth")
+        if self.segment_kind != "pivot":
+            raise ValueError("angle-only truth requires a pivot segment")
+        if (not math.isfinite(measured_yaw_deg) or not math.isfinite(uncertainty_deg)
+                or uncertainty_deg < 0):
+            raise ValueError("yaw and nonnegative uncertainty must be finite")
+        start, end = self.start_snapshot, self.end_snapshot
+        with self.lock:
+            interval = [s for s in self.samples if start.t_s <= s.t_s <= end.t_s]
+        reasons = self._health_reasons(interval)
+        if end.t_s - start.t_s > MAX_SEGMENT_S:
+            reasons.append("segment exceeded 180 s sample retention limit")
+        if not interval or interval[0].t_s - start.t_s > 0.2:
+            reasons.append("segment samples were lost from the bounded buffer")
+        estimated = relative_delta(start.x_m, start.y_m, start.yaw_unwrapped_rad,
+                                   end.x_m, end.y_m, end.yaw_unwrapped_rad)
+        actual_yaw_deg = measured_yaw_deg - self.start_truth.yaw_deg
+        yaw_error_deg = math.degrees(estimated[2]) - actual_yaw_deg
+        segment_uncertainty_deg = self.current_angle_uncertainty_deg + uncertainty_deg
+        tf_ages = [s.tf_age_ms for s in interval if s.tf_age_ms is not None]
+        scan_rate = ((interval[-1].scan_count - interval[0].scan_count)
+                     / max(0.001, interval[-1].t_s - interval[0].t_s)) if len(interval) >= 2 else 0.0
+        if percentile(tf_ages, 0.95) >= 30.0:
+            reasons.append("T265/scan TF alignment p95 is not below 30 ms")
+        if scan_rate < 3.5:
+            reasons.append("scan publication below 3.5 Hz")
+        if self.logger.write_error or self.logger.dropped_events:
+            reasons.append("event log write failed or dropped events")
+        if reasons:
+            status = "INVALID"
+        elif abs(yaw_error_deg) + segment_uncertainty_deg <= YAW_LIMIT_DEG:
+            status = "PASS_ANGLE"
+        elif abs(yaw_error_deg) - segment_uncertainty_deg > YAW_LIMIT_DEG:
+            status = "FAIL_ANGLE"
+        else:
+            status = "INCONCLUSIVE_ANGLE"
+        row = {
+            "label": self.segment_label, "kind": self.segment_kind, "status": status,
+            "duration_s": round(end.t_s - start.t_s, 3),
+            "truth_x_cm": None, "truth_y_cm": None,
+            "truth_yaw_deg": round(measured_yaw_deg, 2),
+            "angle_truth_uncertainty_deg": round(segment_uncertainty_deg, 2),
+            "actual_dx_cm": None, "actual_dy_cm": None,
+            "actual_dyaw_deg": round(actual_yaw_deg, 2),
+            "estimate_dx_cm": round(estimated[0] * 100, 2),
+            "estimate_dy_cm": round(estimated[1] * 100, 2),
+            "estimate_dyaw_deg": round(math.degrees(estimated[2]), 2),
+            "position_error_cm": None,
+            "yaw_error_deg": round(yaw_error_deg, 2),
+            "scan_hz": round(scan_rate, 2),
+            "tf_age_p95_ms": None if not tf_ages else round(percentile(tf_ages, 0.95), 2),
+            "invalid_reasons": "; ".join(reasons),
+        }
+        with (self.output_dir / "segments.csv").open("a", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(row))
+            if stream.tell() == 0:
+                writer.writeheader()
+            writer.writerow(row)
+        self.logger.emit({"t": end.t_s - self.start_time_s,
+                          "monotonic_s": end.t_s, "type": "accuracy_result",
+                          **row}, priority=True)
+        self.results.append(row)
+        self.current_truth = FloorPose(self.current_truth.x_m, self.current_truth.y_m,
+                                       measured_yaw_deg)
+        self.current_angle_uncertainty_deg = uncertainty_deg
+        self.position_truth_available = False
+        self.last_end_snapshot = end
+        self.segment_label = None
+        self.segment_kind = "move"
+        self.start_snapshot = self.end_snapshot = None
+        return row
+
     def mark_loop_start(self, label: str) -> Snapshot:
+        if not self.position_truth_available:
+            raise ValueError("position truth is unavailable after angle-only testing")
         if self.segment_label is not None:
             raise ValueError("finish the active segment before marking a loop")
         recent = self._recent(WINDOW_S)
@@ -514,6 +603,8 @@ class AccuracySession:
         return snap
 
     def closure(self, label: str) -> dict:
+        if not self.position_truth_available:
+            raise ValueError("position truth is unavailable after angle-only testing")
         if self.segment_label is not None:
             raise ValueError("finish the active segment before checking closure")
         if (self.loop_start_snapshot is None or self.loop_start_truth is None
@@ -607,7 +698,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         session = AccuracySession(runtime, logger, output_dir)
         session.start()
-        print("SENSOR-ONLY; no C10B or relay port opened. Commands: status, preflight, begin LABEL [move|pivot], end, truth X_CM Y_CM YAW_DEG, loop-start LABEL, closure LABEL, quit", flush=True)
+        commands = "status, preflight, begin LABEL [move|pivot], end, truth X_CM Y_CM YAW_DEG, truth-angle YAW_DEG UNCERTAINTY_DEG, loop-start LABEL, closure LABEL, quit"
+        print("SENSOR-ONLY; no C10B or relay port opened. Commands: " + commands, flush=True)
         print("accuracy> ", end="", flush=True)
         while not session.stop_event.is_set():
             try:
@@ -645,6 +737,14 @@ def main(argv: list[str] | None = None) -> int:
                         row["estimate_dx_cm"], row["estimate_dy_cm"], row["estimate_dyaw_deg"],
                         row["position_error_cm"], row["yaw_error_deg"], row["invalid_reasons"]
                     ), flush=True)
+                elif parts[0] == "truth-angle" and len(parts) == 3:
+                    row = session.truth_angle(float(parts[1]), float(parts[2]))
+                    print("%s %s: measured turn %+.2f°, estimated turn %+.2f°, yaw error %+.2f° ± %.2f°; estimated centre motion (%+.2f,%+.2f) cm (unverified); %s" % (
+                        row["status"], row["label"], row["actual_dyaw_deg"],
+                        row["estimate_dyaw_deg"], row["yaw_error_deg"],
+                        row["angle_truth_uncertainty_deg"], row["estimate_dx_cm"],
+                        row["estimate_dy_cm"], row["invalid_reasons"]
+                    ), flush=True)
                 elif parts[0] == "loop-start" and len(parts) == 2:
                     session.mark_loop_start(parts[1])
                     print("LOOP START %s" % parts[1], flush=True)
@@ -657,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
                 elif parts[0] == "quit" and len(parts) == 1:
                     break
                 else:
-                    print("Unknown command. Use status, preflight, begin LABEL [move|pivot], end, truth X_CM Y_CM YAW_DEG, loop-start LABEL, closure LABEL, quit", flush=True)
+                    print("Unknown command. Use " + commands, flush=True)
             except (ValueError, RuntimeError) as exc:
                 print("REJECTED: %s" % exc, flush=True)
             print("accuracy> ", end="", flush=True)

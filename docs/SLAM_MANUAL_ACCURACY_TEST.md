@@ -62,6 +62,19 @@ export ROS_LOG_DIR="/home/radxa/car_test_logs/$RUN_ID/ros"
 传感器；若看到 `REJECTED` 或 `PREFLIGHT FAIL`，先排查后再继续。
 原地转向段使用 `begin left_90_1 pivot` 等命令，并照常实测轴心 X、Y；
 程序将真实轴心漂移纳入二维位置误差。
+
+如果只能测量角度，可在独立测试运行中使用 `begin left_90_1 pivot`、
+`end`、`truth-angle 90 1`。最后两个数字分别为相对初始 P0 方向的**连续绝对角度**
+（度）和测量不确定度（度）；例如右转回初始方向输入 `truth-angle 0 1`，
+左转一整圈输入 `truth-angle 360 1`，随后右转一整圈回正输入
+`truth-angle 0 1`。测量者应用独立的地面方向标记和角度仪，不能参考程序估计值填数。
+程序按起点和终点角度读数的不确定度之和保守评估单段转角；初始 P0 校零
+按 0° 基准处理，之后两端各 ±1° 的段落按 ±2° 评估。
+角度专测行的 X/Y 真值、位置误差留空；估计轴心位移只作诊断，不判定位置精度。
+其结果只可能是 `PASS_ANGLE`、`FAIL_ANGLE`、`INCONCLUSIVE_ANGLE` 或
+`INVALID`：误差加不确定度仍不超过 3° 才通过，误差减不确定度超过 3° 才失败，
+夹在边界上的读数为结论不确定。角度专测后，位置真值链中断；若需恢复完整
+二维位置测试，应新开一次运行并重新标记 P0。
 矩形测试前，车回到起点并静止两秒，输入 `loop-start rectangle`；四条边
 各完成一次 `begin`／`end`／`truth` 后，输入 `closure rectangle` 计算只针对
 这圈矩形的闭合误差。

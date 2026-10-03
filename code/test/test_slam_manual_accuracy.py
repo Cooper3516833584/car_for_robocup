@@ -89,6 +89,11 @@ class ManualAccuracyTests(unittest.TestCase):
         self.assertIn("T265 tracker confidence below 2/3",
                       AccuracySession._health_reasons([low]))
 
+    def test_implausible_yaw_jump_invalidates_angle_segment(self):
+        samples = [_sample(1.0, yaw=0.0), _sample(1.02, yaw=math.pi / 2)]
+        self.assertIn("fused yaw jump above 45 degrees per sample",
+                      AccuracySession._health_reasons(samples))
+
     def test_scan_only_source_queues_scan_without_icp(self):
         config = make_probe_config(load_v2_config())
         runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE, sensor_only=True)
@@ -170,6 +175,77 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertEqual(row["kind"], "pivot")
             self.assertEqual(row["status"], "FAIL")
             self.assertAlmostEqual(row["position_error_cm"], 4.0)
+
+    def test_angle_only_scores_signed_turn_without_inventing_position_truth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = AccuracySession(None, _Logger(), Path(directory))
+            session.start_time_s = 0.0
+            session.preflight_ok = True
+            session.samples = deque((_sample(i * 0.05) for i in range(41)), maxlen=12000)
+            session.begin("left_90", "pivot")
+            for i in range(41, 121):
+                session.samples.append(_sample(i * 0.05, yaw=(math.pi / 2) * (i - 40) / 80,
+                                               x=0.02 * (i - 40) / 80))
+            for i in range(121, 162):
+                session.samples.append(_sample(i * 0.05, yaw=math.pi / 2, x=0.02))
+            session.end()
+            row = session.truth_angle(90.0, 1.0)
+            self.assertEqual(row["status"], "PASS_ANGLE")
+            self.assertIsNone(row["truth_x_cm"])
+            self.assertIsNone(row["position_error_cm"])
+            self.assertEqual(row["estimate_dx_cm"], 2.0)
+            self.assertEqual(session.current_truth.yaw_deg, 90.0)
+            with self.assertRaisesRegex(ValueError, "position truth is unavailable"):
+                session.mark_loop_start("rectangle")
+
+            session.begin("right_90", "pivot")
+            for i in range(162, 242):
+                session.samples.append(_sample(i * 0.05,
+                                               yaw=(math.pi / 2) * (242 - i) / 80,
+                                               x=0.02))
+            for i in range(242, 283):
+                session.samples.append(_sample(i * 0.05, yaw=0.0, x=0.02))
+            session.end()
+            row = session.truth_angle(0.0, 1.0)
+            self.assertEqual(row["status"], "PASS_ANGLE")
+            self.assertEqual(row["actual_dyaw_deg"], -90.0)
+            self.assertEqual(row["estimate_dyaw_deg"], -90.0)
+            self.assertEqual(row["angle_truth_uncertainty_deg"], 2.0)
+
+    def test_angle_only_uncertainty_prevents_false_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = AccuracySession(None, _Logger(), Path(directory))
+            session.start_time_s = 0.0
+            session.preflight_ok = True
+            session.samples = deque((_sample(i * 0.05) for i in range(41)), maxlen=12000)
+            session.begin("left_360", "pivot")
+            for i in range(41, 121):
+                session.samples.append(_sample(i * 0.05,
+                                               yaw=2 * math.pi * (i - 40) / 80))
+            for i in range(121, 162):
+                session.samples.append(_sample(i * 0.05, yaw=2 * math.pi))
+            session.end()
+            row = session.truth_angle(362.5, 1.0)
+            self.assertEqual(row["status"], "INCONCLUSIVE_ANGLE")
+            self.assertEqual(row["estimate_dyaw_deg"], 360.0)
+            self.assertEqual(row["actual_dyaw_deg"], 362.5)
+            self.assertEqual(row["yaw_error_deg"], -2.5)
+
+    def test_angle_only_rejects_non_pivot_and_invalid_uncertainty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = AccuracySession(None, _Logger(), Path(directory))
+            session.start_time_s = 0.0
+            session.preflight_ok = True
+            session.samples = deque((_sample(i * 0.05) for i in range(41)), maxlen=12000)
+            session.begin("forward")
+            for i in range(41, 162):
+                session.samples.append(_sample(i * 0.05))
+            session.end()
+            with self.assertRaisesRegex(ValueError, "pivot"):
+                session.truth_angle(0.0, 1.0)
+            session.segment_kind = "pivot"
+            with self.assertRaisesRegex(ValueError, "nonnegative"):
+                session.truth_angle(0.0, -1.0)
 
     def test_rectangle_closure_uses_its_own_start_pose(self):
         with tempfile.TemporaryDirectory() as directory:
