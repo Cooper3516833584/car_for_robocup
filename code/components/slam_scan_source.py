@@ -24,7 +24,12 @@ class ScanOnlyD500Source:
             return
         for scan in self.assembler.feed(packet):
             received_s = time.monotonic()
-            measurement_s = self.runtime._map_d500_timestamp(scan.timestamp_ms, received_s)
+            measurement_s = min(
+                self.runtime._map_d500_timestamp(scan.timestamp_ms, received_s),
+                received_s,
+            )
+            # A startup clock fit can lead host receipt; a future scan waits for
+            # a TF that may arrive only after the next scan overwrites it.
             bridge.push_d500_scan(scan, measurement_s)
             if self.logger is not None:
                 self.logger.emit({
