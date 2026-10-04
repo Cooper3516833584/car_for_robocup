@@ -22,7 +22,7 @@ The canonical robot frame is `base_link` at the midpoint of the two driven wheel
 
 ## Calibration and hardware safety
 
-- Treat values in `configs/robocup_diffdrive.example.toml` as software-test placeholders. Keep geometry/extrinsics flags false until measurements and validation are recorded in `docs/HARDWARE_MEASUREMENTS.md`.
+- Treat values in `configs/robocup_diffdrive.example.toml` as software-test placeholders. Record geometry and mount checks in `docs/HARDWARE_MEASUREMENTS.md`; the former measurement-status flags are no longer runtime gates.
 - `hardware-mission` must fail closed when readiness requirements are not met. Do not add a routine `--force` bypass. The CLI should clearly warn when the example measurements remain unverified.
 - `hardware-probe` is sensor-only and does not run autonomous navigation. Any motor smoke test must be separately operator-triggered, low-speed, supervised, and have an immediately accessible emergency stop.
 - Startup failure, sensor loss during motion, backend error, SIGINT, and normal mission completion must leave the base stopped. Stop drive output before joining sensor workers or closing logs.

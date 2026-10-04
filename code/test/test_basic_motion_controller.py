@@ -13,7 +13,6 @@ from components.basic_motion_controller import (
     BasicMotionController, MotionActionState, MotionBusyError, MotionPhase,
 )
 from components.differential_navigation import DifferentialNavigator
-from components.navigation_common import NavigationGrid
 from config.v2_loader import load_v2_config
 from core.types import Pose2D
 
@@ -21,7 +20,7 @@ from core.types import Pose2D
 class BasicMotionTests(unittest.TestCase):
     def setUp(self) -> None:
         config = load_v2_config()
-        navigator = DifferentialNavigator(config.geometry, config.drive, config.navigation)
+        navigator = DifferentialNavigator(config.drive, config.navigation)
         self.motion = BasicMotionController(navigator, config.navigation, config.drive)
         self.speed = config.drive.max_linear_speed_m_s
 
@@ -30,7 +29,7 @@ class BasicMotionTests(unittest.TestCase):
         return Pose2D(x, y, yaw, t)
 
     def step(self, pose=None, state="ok"):
-        return self.motion.step(self.pose() if pose is None else pose, None, now_s=1.0, pose_state=state)
+        return self.motion.step(self.pose() if pose is None else pose, now_s=1.0, pose_state=state)
 
     def test_busy_cancel_safe_stop_and_zero_distance(self) -> None:
         self.motion.drive_distance(1.0)
@@ -142,15 +141,14 @@ class BasicMotionTests(unittest.TestCase):
         degraded = self.step(state="t265_degraded").command
         scale = self.motion.navigation.degraded_speed_scale
         self.assertAlmostEqual(degraded.linear_x_m_s, normal.linear_x_m_s * scale)
-        lost = self.motion.step(None, None, now_s=1.0)
+        lost = self.motion.step(None, now_s=1.0)
         self.assertIs(lost.state, MotionActionState.POSE_LOST)
         self.assertEqual(lost.command.linear_x_m_s, 0.0)
 
     def test_navigation_delegates_without_second_degraded_scale(self) -> None:
-        grid = NavigationGrid(100, 100, 0.1, origin_x_m=-5.0, origin_y_m=-5.0)
         self.motion.navigate_to(2.0, 0.0)
-        normal = self.motion.step(self.pose(), grid, now_s=1.0)
-        degraded = self.motion.step(self.pose(), grid, now_s=1.0, pose_state="d500_degraded")
+        normal = self.motion.step(self.pose(), now_s=1.0)
+        degraded = self.motion.step(self.pose(), now_s=1.0, pose_state="d500_degraded")
         self.assertGreater(normal.command.linear_x_m_s, 0.0)
         self.assertAlmostEqual(degraded.command.linear_x_m_s,
                                normal.command.linear_x_m_s * self.motion.navigation.degraded_speed_scale)

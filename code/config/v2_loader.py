@@ -14,7 +14,6 @@ except ModuleNotFoundError:  # Keep v1 package imports usable on Python 3.10.
 from .v2_models import (
     C10BConfig,
     CalibrationStatusConfig,
-    CompetitionMapConfig,
     ConfigV2Error,
     D500Config,
     DifferentialDriveConfig,
@@ -24,7 +23,6 @@ from .v2_models import (
     FusionConfig,
     LocalizationConfig,
     SlamLocalizationConfig,
-    FootprintConfig,
     NavigationConfig,
     RelayConfig,
     SafetyConfig,
@@ -100,9 +98,17 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         raise ConfigV2Error("D500 sensor config requires [mount] and [localization]; T265 requires [mount]")
 
     navigation_table = _table(document, "navigation", "navigation")
-    navigation_map = _table(navigation_table, "map", "navigation.map")
-    footprint = _table(navigation_table, "footprint", "navigation.footprint")
-    navigation_settings = {key: value for key, value in navigation_table.items() if key not in {"map", "footprint"}}
+    # Older board-local profiles may still contain retired map/footprint tables.
+    # They have no effect on open relative navigation.
+    navigation_settings = {key: value for key, value in navigation_table.items()
+                           if key not in {"map", "footprint", "safety_margin_m"}}
+    calibration_settings = {key: value for key, value in _table(document, "calibration", "calibration").items()
+                            if key not in {"geometry_measured", "sensor_extrinsics_measured"}}
+    safety_settings = {key: value for key, value in _table(document, "safety", "safety").items()
+                       if key not in {"require_measured_geometry_for_hardware_mission",
+                                      "require_measured_extrinsics_for_hardware_mission",
+                                      "require_measured_map_for_hardware_mission",
+                                      "require_measured_footprint_for_hardware_mission"}}
 
     localization_table = document.get("localization", {})
     if not isinstance(localization_table, dict):
@@ -129,7 +135,7 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
     return DifferentialRobotConfig(
         schema_version=version,
         robot_name=document.get("robot_name", ""),
-        calibration=_build(CalibrationStatusConfig, _table(document, "calibration", "calibration"), "calibration"),
+        calibration=_build(CalibrationStatusConfig, calibration_settings, "calibration"),
         geometry=_build(DifferentialGeometryConfig, _table(vehicle, "geometry", "vehicle.geometry"), "vehicle.geometry"),
         drive=_build(DifferentialDriveConfig, _table(vehicle, "drive", "vehicle.drive"), "vehicle.drive"),
         c10b=_build(C10BConfig, _table(devices, "c10b", "devices.c10b"), "devices.c10b"),
@@ -145,8 +151,6 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         fusion=_build(FusionConfig, _table(document, "fusion", "fusion"), "fusion"),
         localization=localization,
         navigation=_build(NavigationConfig, navigation_settings, "navigation"),
-        competition_map=_build(CompetitionMapConfig, navigation_map, "navigation.map"),
-        footprint=_build(FootprintConfig, footprint, "navigation.footprint"),
-        safety=_build(SafetyConfig, _table(document, "safety", "safety"), "safety"),
+        safety=_build(SafetyConfig, safety_settings, "safety"),
         relay=relay,
     )

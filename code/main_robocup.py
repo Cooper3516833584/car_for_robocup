@@ -31,9 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     localization.add_argument("--localization-from-config", action="store_true",
                               help="use localization settings from the TOML profile instead of the hardware-mission default")
     parser.add_argument("--steps", type=int, default=8, help="fixed dry-run/replay step count")
-    parser.add_argument("--goal-x", type=float, help="optional navigation goal x in metres")
-    parser.add_argument("--goal-y", type=float, help="optional navigation goal y in metres")
-    parser.add_argument("--goal-yaw", type=float, help="optional final yaw in radians")
+    parser.add_argument("--goal-x", type=float, help="optional goal x in the current fused pose frame, metres")
+    parser.add_argument("--goal-y", type=float, help="optional goal y in the current fused pose frame, metres")
+    parser.add_argument("--goal-yaw", type=float, help="optional final yaw in the current fused pose frame, radians")
     return parser
 
 
@@ -55,20 +55,15 @@ def main(argv: list[str] | None = None) -> int:
     if (args.goal_x is None) != (args.goal_y is None):
         logging.error("--goal-x and --goal-y must be provided together")
         return 2
+    if args.goal_yaw is not None and args.goal_x is None:
+        logging.error("--goal-yaw requires --goal-x and --goal-y")
+        return 2
 
     try:
         config = load_runtime_config(args.config)
         mode = RuntimeMode(args.mode)
         if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
             config = accepted_relative_slam_profile(config)
-        if config.localization.slam.relative_goals_only and any(
-            value is not None for value in (args.goal_x, args.goal_y, args.goal_yaw)
-        ):
-            raise ValueError("relative SLAM task does not accept field-coordinate --goal-* arguments")
-        if not config.calibration.geometry_measured or not config.calibration.sensor_extrinsics_measured:
-            logging.warning(
-                "configuration contains unmeasured geometry or sensor mounts; autonomous hardware mission remains gated"
-            )
         runtime = build_runtime(
             config,
             mode,

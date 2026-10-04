@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.loader import load_car_config
+from config.relative_slam_profile import accepted_relative_slam_profile
 from config.v2_loader import DEFAULT_V2_CONFIG, load_v2_config
 from config.v2_models import ConfigV2Error
 from config.v2_runtime import RuntimeMode, runtime_constraints, validate_runtime_readiness
@@ -22,7 +23,7 @@ class ConfigV2Tests(unittest.TestCase):
     def test_example_loads_as_schema_v2(self) -> None:
         config = load_v2_config(DEFAULT_V2_CONFIG)
         self.assertEqual(config.schema_version, 2)
-        self.assertFalse(config.calibration.geometry_measured)
+        self.assertFalse(config.calibration.c10b_diff_firmware_verified)
         self.assertEqual(config.drive.protocol_mode, "ackermann_firmware_compat")
         self.assertEqual(config.d500_mount.z_m, 0.20)
         self.assertEqual(config.t265_mount.z_m, 0.03225)
@@ -49,22 +50,17 @@ class ConfigV2Tests(unittest.TestCase):
                 'protocol_mode = "ackermann_firmware_compat"': 'protocol_mode = "unknown"'
             })
 
-    def test_dry_run_allows_unmeasured_geometry(self) -> None:
+    def test_dry_run_has_no_hardware_readiness_gate(self) -> None:
         config = load_v2_config()
         self.assertEqual(validate_runtime_readiness(config, RuntimeMode.DRY_RUN), [])
 
-    def test_hardware_mission_rejects_unmeasured_geometry_and_extrinsics(self) -> None:
-        errors = validate_runtime_readiness(load_v2_config(), RuntimeMode.HARDWARE_MISSION)
-        self.assertTrue(any("measured drive geometry" in error for error in errors))
-        self.assertTrue(any("sensor extrinsics" in error for error in errors))
+    def test_relative_hardware_mission_has_no_four_measurement_gates(self) -> None:
+        config = accepted_relative_slam_profile(load_v2_config())
+        self.assertEqual(validate_runtime_readiness(config, RuntimeMode.HARDWARE_MISSION), [])
 
-    def test_measured_and_verified_config_passes_hardware_mission_gate(self) -> None:
+    def test_verified_config_passes_hardware_mission_gate(self) -> None:
         config = self._load_modified({
-            "geometry_measured = false": "geometry_measured = true",
-            "sensor_extrinsics_measured = false": "sensor_extrinsics_measured = true",
             "c10b_diff_firmware_verified = false": "c10b_diff_firmware_verified = true",
-            "measured = false\nstatic_obstacles = []": "measured = true\nstatic_obstacles = []",
-            "measured = false\n\n[safety]": "measured = true\n\n[safety]",
             "reference_measured = false": "reference_measured = true",
             'protocol_mode = "ackermann_firmware_compat"': 'protocol_mode = "differential_vx_vz"',
         })
@@ -73,8 +69,6 @@ class ConfigV2Tests(unittest.TestCase):
     def test_unverified_differential_firmware_is_rejected_for_hardware_mission(self) -> None:
         config = self._load_modified({
             'protocol_mode = "ackermann_firmware_compat"': 'protocol_mode = "differential_vx_vz"',
-            "geometry_measured = false": "geometry_measured = true",
-            "sensor_extrinsics_measured = false": "sensor_extrinsics_measured = true",
         })
         errors = validate_runtime_readiness(config, RuntimeMode.HARDWARE_MISSION)
         self.assertTrue(any("verified C10B differential firmware" in error for error in errors))
@@ -84,6 +78,20 @@ class ConfigV2Tests(unittest.TestCase):
         self.assertFalse(constraints.autonomous_navigation_allowed)
         self.assertEqual(constraints.max_linear_speed_m_s, 0.10)
         self.assertEqual(constraints.max_angular_speed_rad_s, 0.35)
+
+    def test_retired_board_local_keys_are_ignored(self) -> None:
+        config = self._load_modified({
+            "[calibration]": "[calibration]\ngeometry_measured = false\nsensor_extrinsics_measured = false",
+            "[navigation]": "[navigation]\nsafety_margin_m = 0.05",
+            "[safety]": "[navigation.map]\nwidth_m = 10.0\nmeasured = false\n\n"
+                        "[navigation.footprint]\nmeasured = false\n\n[safety]\n"
+                        "require_measured_geometry_for_hardware_mission = true\n"
+                        "require_measured_extrinsics_for_hardware_mission = true\n"
+                        "require_measured_map_for_hardware_mission = true\n"
+                        "require_measured_footprint_for_hardware_mission = true",
+        })
+        self.assertEqual(validate_runtime_readiness(
+            accepted_relative_slam_profile(config), RuntimeMode.HARDWARE_MISSION), [])
 
     def test_v1_profile_remains_on_legacy_loader(self) -> None:
         root = Path(__file__).resolve().parents[2]
