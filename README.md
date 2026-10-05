@@ -10,13 +10,13 @@ Run the complete synthetic runtime on Windows, Linux, or macOS without connectin
 py -3 code\main_robocup.py --config configs\robocup_diffdrive.example.toml --mode dry-run
 ```
 
-The dry-run uses fake sensors, a fake drive backend, and a synthetic open-field goal. It warns that the example geometry and mounts are unmeasured. To make a local profile, copy the example and edit only the local file:
+The dry-run uses fake sensors, a fake drive backend, and a synthetic open-field goal. The example geometry and mounts are unverified placeholders. To make a local profile, copy the example and edit only the local file:
 
 ```powershell
 Copy-Item configs\robocup_diffdrive.example.toml configs\robocup_diffdrive.toml
 ```
 
-`configs/robocup_diffdrive.toml` is ignored by Git. Keep calibration flags false until measurements are recorded. `hardware-mission` rejects unmeasured geometry/extrinsics and unverified differential firmware when that protocol is selected. `hardware-probe` starts sensors only and does not run autonomous navigation.
+`configs/robocup_diffdrive.toml` is ignored by Git. Record and verify geometry and sensor mounts before relying on them for real motion; there are no geometry/extrinsics or map/footprint `measured` readiness flags. `hardware-mission` checks localization readiness and rejects unverified differential firmware when that protocol is selected. `hardware-probe` starts sensors only and does not run autonomous navigation.
 
 ## Runtime modes
 

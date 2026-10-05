@@ -9,7 +9,7 @@
 
 每次只标定一类数据，并记录日期、操作者、测量工具、原始数据和配置提交。坐标约定为 `base_link` 位于左右主动轮轴线中点，`+X` 朝前、`+Y` 朝左、`+Z` 朝上，yaw 逆时针为正。
 
-1. **准备配置和安全措施。** 复制 `configs/robocup_diffdrive.example.toml` 到本机忽略文件 `configs/robocup_diffdrive.toml`。确认 `geometry_measured`、`sensor_extrinsics_measured`、`c10b_diff_firmware_verified` 均为 `false`；架空车轮或选空旷测试区，确认急停可用，限速保持最低。
+1. **准备配置和安全措施。** 复制 `configs/robocup_diffdrive.example.toml` 到本机忽略文件 `configs/robocup_diffdrive.toml`。未经差速固件实测验证，保持 `c10b_diff_firmware_verified=false`；架空车轮或选空旷测试区，确认急停可用，限速保持最低。
 2. **测量机械参数。** 测左右主动轮接触中心线距离、左右轮有效滚动直径、车身四边相对 `base_link` 的 footprint，以及前后支撑轮坐标。轮距做至少三次并记录平均值。按实测结果更新 v2 geometry。
 3. **记录传感器外参。** 分别填写 `base_link -> d500_link` 和 `base_link -> t265_link` 的 x/y/z/roll/pitch/yaw。不要因传感器看起来位于车体中心就把偏置写成零。
 4. **验证 T265 外参。** 固定车体位置缓慢原地转动；raw camera center 可走圆，adapter 输出的 `base_link` 位置应基本固定。若仍呈圆周，检查外参方向和变换顺序。
@@ -19,7 +19,7 @@
 8. **标定有效轮距与速度尺度。** 使用多个角速度/方向拟合有效轮距；直行 1–2 m，在左右方向和多个速度档对比命令值与传感器实测值。不要用导航控制增益掩盖驱动尺度误差。
 9. **先分开检查定位，再启用融合。** 分别画 T265 base 轨迹、D500 map 轨迹，确认单位、方向、外参正确后才调整 fusion gain 和创新门限。保存带时间戳的 JSONL 日志，用 `tools/replay_pose_log.py` 比较参数变更。
 10. **最后调导航。** 从很低速度开始，依序调整原地旋转增益、最终 yaw 容差、路径航向、lookahead、减速距离、加速度限制；确认停车和失定位策略后再逐步提速。
-11. **更新解锁标记。** 只有实际完成并复核测量后，才将对应 calibration flag 改为 `true`。提交配置变更时同时填写测量记录和 Git commit。运行时会在标记缺失时警告，并由 readiness gate 拒绝未测 geometry/extrinsics 的 `hardware-mission`。
+11. **记录验证结果。** 只有实际完成并复核差速固件验证后，才将 `c10b_diff_firmware_verified` 改为 `true`。提交配置变更时同时填写测量记录和 Git commit。当前配置没有 geometry/extrinsics 的 `measured` 标记或对应的 `hardware-mission` 准入门限；实车运行前仍须确认填写的尺寸、外参和方向与车辆一致。
 
 所有步骤按顺序执行；若定位丢失、轮速方向不符、固件拒绝命令或出现不可解释的漂移，立即发出零速/急停并返回前一项排查。
 
