@@ -6,6 +6,28 @@ This repository now contains a RoboCup differential ground robot path: two cente
 
 Old Ackermann task entries and modules remain available for the older vehicle and are legacy-only. Do not add them to the RoboCup dependency path. Established module locations stay in place because old launchers, ROS bridge code, and regression tests import them. See `code/legacy/README.md` and `docs/legacy/`.
 
+## Development and board deployment
+
+`/home/radxa/car` on the ROCK 5A is a deployment copy, not a development
+workspace. Make every tracked code, configuration, test, script, and document
+change in the local PC checkout first. Run the applicable hardware-free checks
+there, commit the intended files, and push the correct GitHub branch. Only
+then connect to the board, confirm its branch and HEAD, verify that its tracked
+worktree is clean and can fast-forward, run `git pull --ff-only`, and verify the
+new HEAD and clean worktree.
+
+Do not edit, copy, or upload repository files directly on the board, and do not
+commit, merge, rebase, cherry-pick, or create development branches there. If the
+board has local changes, untracked files that conflict with the update, or a
+diverged branch, stop deployment and preserve the data before reconciling it on
+the PC and GitHub. Routine deployment must not use board-side stash, reset,
+restore, clean, or forced pull. A separately authorized one-time cleanup must
+first save and verify a recoverable snapshot of all affected board files.
+
+Pulling code does not authorize a motor test or autonomous mission. Keep SSH
+passwords out of scripts, command arguments, environment variables, logs, and
+the repository.
+
 ## Architecture boundaries
 
 - `code/config/` owns TOML parsing, readiness checks, and factories. Components receive validated config objects and do not read TOML themselves.
