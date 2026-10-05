@@ -2,6 +2,8 @@
 
 This document records the imported Ackermann repository before differential-drive changes.
 
+Historical audit only: the old task/steering/navigation/v1 config and ROS2 actuation paths described below were removed on 2026-10-05. Current behavior and the retained firmware adapter are documented in `LEGACY_CLEANUP.md`; the commands below are not current launch instructions.
+
 ## Checkout and test status
 
 - Baseline commit: `704fb64a57d30b2ff84743da68635c39e160e2b3` (`chore: import verified Ackermann car baseline`).

@@ -1,39 +1,24 @@
-# 测试与临时工具
+# 测试与硬件工具
 
-此目录存放硬件联调脚本、一次性配置工具、固件试验补丁及单元测试。它们不是最终上位机主程序的一部分。
-
-- `wheel_test.py`：后轮低速实车测试。
-- `steering_servo_test.py`：前轮转向舵机测试。
-- `servo_pulse_test.py`：直接修改文件顶部 `PULSE_US` 后点击运行，仅输出前轮舵机原始
-  PWM，不访问后轮电机。
-- `drive_forward_1m_test.py`：点击运行后仅控制后轮，以默认 `1 m/s` 开环前进约 `1 m`
-  并自动停车；保持当前舵机 PWM 不变，需先运行 `servo_pulse_test.py` 设置直行方向。
-- `hc14_*.py`：HC-14 查询、配置和双向链路测试。
-- `d500_uart_probe.py`：只读打开 `/dev/ttyS6`，统计 D500 `54 2C` 有效包、CRC 和完整
-  圆周；不写雷达、不访问驱动板、舵机或电机。
-- `relay_selftest.py`：LCUS USB 继电器自检（识别路数 + 查询状态）；默认只读，
-  只有显式 `--channel N --on/--off` 或 `--all-off` 才会吸合触点。见 `docs/RELAY_LCUS.md`。
-- `gimbal_*`、`c10b_a2_a3_gimbal.patch`：已停止采用的云台临时方案。
-- `test_rear_motor.py`：后驱组件的纯软件协议与运动学单元测试，不访问真实串口。
-- `test_ackermann_drive.py`：转向标定、偏航方向及前后轮联动的纯软件单元测试，不访问真实 PWM 或串口。
-- `test_serial_communication.py`：HC-14桥封装、分片重组、噪声重同步及组件参数验证，不访问真实串口。
-- `test_radar_driver.py`：D500 分段收包、CRC 错帧重同步、完整圆周拼接、雷达安装
-  旋转、无人机全局参考变换、顺时针正角 ICP、矩形墙线绝对观测、异常残差拒绝及
-  ICP 状态纠漂回写、启动矩形场地拟合及零点/零度角建立，不打开真实串口。
-- `test_navigation.py`：导航角度转换、实车矩形碰撞、Hybrid A*、可选最终朝向、
-  倒车开关、Pure Pursuit、换向前停车、定位超时和到达停车，不访问真实 PWM 或串口。
-- `test_navigation_protocol.py`：坐标/可选航向编解码、V2 HMAC、防篡改、命令去重和
-  停止命令测试，不访问真实 HC-14。
-- `test_main.py`：正式主程序的启动 `(0,0,0°)` 坐标重基准、旋转矩形外禁行、SSH
-  `x y [heading]` 解析、角度范围、坐标转交及越界拒绝测试，不启动雷达、串口、PWM
-  或电机。
-- `test_relay_lcus.py`：LCUS 继电器指令帧与校验和、回读校验与幂等重发、失败关闭、
-  参数校验及假串口注入，不打开真实串口。
-- `test_relay_runtime.py`：`[devices.relay]` 构造、dry-run 内存继电器、启动失败释放与
-  关停顺序（先停底盘 → `all_off` → 关端口），不接触真实设备。
-
-运行单元测试：
+默认单元测试覆盖差速运动、C10B 后端、D500/T265 定位、配置、watchdog、
+通信、报警/继电器及任务板识别，不访问真实电机、相机或串口。
 
 ```bash
+python3 -m compileall -q code tools
 python3 -m unittest discover -s code/test -p 'test_*.py'
 ```
+
+旧转向舵机、赛道视觉、task1/task2 及 v1 配置测试已随旧实现删除。
+当前数量与删除清单见 `docs/LEGACY_CLEANUP.md`。
+
+新诊断脚本放在仓库 `tools/`。现有共享工具包括：
+
+- `wheel_test.py`：低层电机手动测试，需操作员监督。
+- `d500_uart_probe.py`：D500 UART 只读帧统计。
+- `hc14_*.py`：无线链路探测，修改无线参数仍需明确授权。
+- `relay_selftest.py`：默认查询；显式输出触点动作见 `docs/RELAY_LCUS.md`。
+- `tools/basic_motion.py`：现行差速动作测试入口。
+- `tools/task_board_demo.py`、`tools/validate_task_boards.py`：离线/静态识别验收。
+
+保留的 C10B、雷达、GPIO/PWM、通信及继电器测试保护共享硬件行为。
+真实相机、OCR 模型和实车动作不放进普通 unittest discovery。

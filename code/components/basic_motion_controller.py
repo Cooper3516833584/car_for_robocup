@@ -11,7 +11,7 @@ from core.frames import normalize_angle_rad
 from core.types import Pose2D, Twist2D
 
 from .differential_navigation import DifferentialNavigator, NavigationOutput, NavigationState
-from .navigation_common import NavigationGoal
+from .navigation_common import NavigationGoal, NavigationGrid
 
 
 SEGMENT_STRONG_ENTER_M = 0.10
@@ -188,7 +188,7 @@ class BasicMotionController:
         self._diagnostics = {"reason": str(reason)}
         self.last_navigation_output = None
 
-    def step(self, pose: Pose2D | None, *, now_s: float, pose_state: object = "ok") -> MotionOutput:
+    def step(self, pose: Pose2D | None, grid: NavigationGrid | None, *, now_s: float, pose_state: object = "ok") -> MotionOutput:
         _finite(now_s)
         action = self._active
         if action is None:
@@ -201,7 +201,7 @@ class BasicMotionController:
             return self._output(_ZERO, {"reason": "pose_unavailable", "pose_state": str(state_name)})
         self._state = MotionActionState.RUNNING
         if action.kind in {MotionActionType.NAVIGATE_TO, MotionActionType.NAVIGATE_TO_POSE}:
-            return self._step_navigation(pose, now_s, pose_state)
+            return self._step_navigation(pose, grid, now_s, pose_state)
         if not action.initialized:
             action.start = (pose.x_m, pose.y_m)
             action.start_yaw = pose.yaw_rad
@@ -232,8 +232,8 @@ class BasicMotionController:
             command = Twist2D(command.linear_x_m_s * scale, command.angular_z_rad_s * scale)
         return self._output(command, diagnostics)
 
-    def _step_navigation(self, pose, now_s, pose_state):
-        result = self.navigator.step(pose, now_s=now_s, pose_state=pose_state)
+    def _step_navigation(self, pose, grid, now_s, pose_state):
+        result = self.navigator.step(pose, grid, now_s=now_s, pose_state=pose_state)
         self.last_navigation_output = result
         self._phase = {
             NavigationState.ROTATING_TO_PATH: MotionPhase.ALIGNING,
@@ -286,12 +286,11 @@ class BasicMotionController:
             return _ZERO, diagnostics
         direction = 1.0 if distance >= 0.0 else -1.0
         if direction * remaining <= 0.0:
-            self._phase = MotionPhase.ALIGNING
-            heading = math.atan2(goal_y - pose.y_m, goal_x - pose.x_m)
-            error = normalize_angle_rad(heading - pose.yaw_rad - (math.pi if direction < 0.0 else 0.0))
-        else:
-            correction = _clamp(math.atan(self.navigation.path_yaw_gain * cross), SEGMENT_MAX_CORRECTION_RAD)
-            error = normalize_angle_rad(action.start_yaw - direction * correction - pose.yaw_rad)
+            command, error = self._approach_goal(pose, goal_x, goal_y, goal_distance)
+            diagnostics["heading_error_rad"] = error
+            return command, diagnostics
+        correction = _clamp(math.atan(self.navigation.path_yaw_gain * cross), SEGMENT_MAX_CORRECTION_RAD)
+        error = normalize_angle_rad(action.start_yaw - direction * correction - pose.yaw_rad)
         diagnostics["heading_error_rad"] = error
         return self._line_command(error, goal_distance, direction), diagnostics
 
@@ -394,6 +393,37 @@ class BasicMotionController:
             "recovery_target_x_m": start[0] + clamped * tx,
             "recovery_target_y_m": start[1] + clamped * ty,
         }
+
+    def _approach_goal(self, pose, goal_x, goal_y, goal_distance):
+        """Close a small end-of-distance residual instead of spinning on the spot.
+
+        ``drive_distance`` reaches this branch once its along-track target is met
+        but the vehicle is still outside the position tolerance -- normally a
+        lateral residual of a few centimetres.  The previous rule always faced
+        ``yaw - pi`` (the reverse of the travel direction) and reversed to the
+        goal.  That target sits behind the goal, so the vehicle turned away from
+        it, a turn in place never changes ``remaining``, and the action stayed in
+        ``aligning`` at the angular limit until its deadline instead of
+        completing.  Picking the body direction by bearing keeps ``|error|``
+        within 90 deg of the goal and lets the vehicle translate, which is what
+        makes the residual shrink.
+        """
+        bearing = math.atan2(goal_y - pose.y_m, goal_x - pose.x_m)
+        forward_error = normalize_angle_rad(bearing - pose.yaw_rad)
+        if abs(forward_error) <= math.pi / 2.0:
+            direction, error = 1.0, forward_error
+        else:
+            direction, error = -1.0, normalize_angle_rad(forward_error - math.pi)
+        speed = self.drive.max_linear_speed_m_s
+        speed *= min(1.0, goal_distance / self.navigation.slowdown_distance_m)
+        # Cap the turn radius v/omega at the remaining gap; with v/omega larger
+        # than ``goal_distance`` the vehicle orbits the goal at a fixed radius
+        # and never lands inside the position tolerance.
+        speed = min(speed, 0.5 * self.drive.max_angular_speed_rad_s * goal_distance)
+        speed *= max(0.0, math.cos(error))
+        omega = _clamp(self.navigation.path_yaw_gain * error, self.drive.max_angular_speed_rad_s)
+        self._phase = MotionPhase.ALIGNING
+        return Twist2D(direction * speed, omega), error
 
     def _line_command(self, error, remaining, direction, speed_scale=1.0, yaw_gain_scale=1.0):
         if abs(error) > self.navigation.rotate_in_place_threshold_rad:

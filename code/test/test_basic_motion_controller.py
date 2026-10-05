@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 from pathlib import Path
 import sys
@@ -13,14 +14,16 @@ from components.basic_motion_controller import (
     BasicMotionController, MotionActionState, MotionBusyError, MotionPhase,
 )
 from components.differential_navigation import DifferentialNavigator
+from components.navigation_common import NavigationGrid
 from config.v2_loader import load_v2_config
+from core.frames import normalize_angle_rad
 from core.types import Pose2D
 
 
 class BasicMotionTests(unittest.TestCase):
     def setUp(self) -> None:
         config = load_v2_config()
-        navigator = DifferentialNavigator(config.drive, config.navigation)
+        navigator = DifferentialNavigator(config.geometry, config.drive, config.navigation)
         self.motion = BasicMotionController(navigator, config.navigation, config.drive)
         self.speed = config.drive.max_linear_speed_m_s
 
@@ -29,7 +32,7 @@ class BasicMotionTests(unittest.TestCase):
         return Pose2D(x, y, yaw, t)
 
     def step(self, pose=None, state="ok"):
-        return self.motion.step(self.pose() if pose is None else pose, now_s=1.0, pose_state=state)
+        return self.motion.step(self.pose() if pose is None else pose, None, now_s=1.0, pose_state=state)
 
     def test_busy_cancel_safe_stop_and_zero_distance(self) -> None:
         self.motion.drive_distance(1.0)
@@ -74,6 +77,55 @@ class BasicMotionTests(unittest.TestCase):
         self.motion.drive_distance(-0.5)
         self.assertLess(self.step(self.pose(x=1.0)).command.linear_x_m_s, 0.0)
         self.assertIs(self.step(self.pose(x=0.5)).state, MotionActionState.SUCCEEDED)
+
+    def _tight_motion(self) -> BasicMotionController:
+        config = load_v2_config()
+        navigation = replace(config.navigation, position_tolerance_m=0.01)
+        return BasicMotionController(
+            DifferentialNavigator(config.geometry, config.drive, navigation), navigation, config.drive)
+
+    def test_drive_distance_endgame_turns_toward_the_goal(self) -> None:
+        motion = self._tight_motion()
+        motion.drive_distance(-0.20)
+        self.assertIs(motion.step(self.pose(), None, now_s=1.0).state, MotionActionState.RUNNING)
+        output = motion.step(self.pose(x=-0.22, y=0.03), None, now_s=1.0)
+        self.assertIs(output.state, MotionActionState.RUNNING)
+        self.assertIs(output.phase, MotionPhase.ALIGNING)
+        self.assertAlmostEqual(output.diagnostics["remaining_m"], 0.02, places=9)
+        self.assertGreater(output.diagnostics["goal_distance_m"], motion.navigation.position_tolerance_m)
+        self.assertGreater(output.command.linear_x_m_s, 0.0)
+        self.assertLess(output.command.angular_z_rad_s, 0.0)
+
+    def test_drive_distance_overshoot_drives_back_to_the_goal(self) -> None:
+        motion = self._tight_motion()
+        motion.drive_distance(0.20)
+        motion.step(self.pose(), None, now_s=1.0)
+        output = motion.step(self.pose(x=0.25), None, now_s=1.0)
+        self.assertAlmostEqual(output.diagnostics["remaining_m"], -0.05, places=9)
+        self.assertLess(output.command.linear_x_m_s, 0.0)
+
+    def test_drive_distance_finishes_with_a_weak_wheel(self) -> None:
+        config = load_v2_config()
+        navigation = replace(config.navigation, position_tolerance_m=0.01, slowdown_distance_m=0.15)
+        motion = BasicMotionController(
+            DifferentialNavigator(config.geometry, config.drive, navigation), navigation, config.drive)
+        motion.drive_distance(-0.20)
+        track = config.geometry.drive_track_width_m
+        x = y = yaw = t = 0.0
+        for _ in range(600):
+            output = motion.step(Pose2D(x, y, yaw, t), None, now_s=t, pose_state="ok")
+            if output.state is MotionActionState.SUCCEEDED:
+                break
+            v, w = output.command.linear_x_m_s, output.command.angular_z_rad_s
+            left = v - w * track / 2.0
+            right = (v + w * track / 2.0) * 0.65
+            x += (left + right) / 2.0 * math.cos(yaw) * 0.05
+            y += (left + right) / 2.0 * math.sin(yaw) * 0.05
+            yaw = normalize_angle_rad(yaw + (right - left) / track * 0.05)
+            t += 0.05
+        else:
+            self.fail("backward drive never completed with a weak right wheel")
+        self.assertIs(output.state, MotionActionState.SUCCEEDED)
 
     def test_drive_to_is_straight_and_requires_no_map(self) -> None:
         self.motion.drive_to(1.0, 0.0)
@@ -141,14 +193,15 @@ class BasicMotionTests(unittest.TestCase):
         degraded = self.step(state="t265_degraded").command
         scale = self.motion.navigation.degraded_speed_scale
         self.assertAlmostEqual(degraded.linear_x_m_s, normal.linear_x_m_s * scale)
-        lost = self.motion.step(None, now_s=1.0)
+        lost = self.motion.step(None, None, now_s=1.0)
         self.assertIs(lost.state, MotionActionState.POSE_LOST)
         self.assertEqual(lost.command.linear_x_m_s, 0.0)
 
     def test_navigation_delegates_without_second_degraded_scale(self) -> None:
+        grid = NavigationGrid(100, 100, 0.1, origin_x_m=-5.0, origin_y_m=-5.0)
         self.motion.navigate_to(2.0, 0.0)
-        normal = self.motion.step(self.pose(), now_s=1.0)
-        degraded = self.motion.step(self.pose(), now_s=1.0, pose_state="d500_degraded")
+        normal = self.motion.step(self.pose(), grid, now_s=1.0)
+        degraded = self.motion.step(self.pose(), grid, now_s=1.0, pose_state="d500_degraded")
         self.assertGreater(normal.command.linear_x_m_s, 0.0)
         self.assertAlmostEqual(degraded.command.linear_x_m_s,
                                normal.command.linear_x_m_s * self.motion.navigation.degraded_speed_scale)

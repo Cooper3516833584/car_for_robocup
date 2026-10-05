@@ -119,11 +119,11 @@ def build_pose_fusion(config: DifferentialRobotConfig):
 
 
 def build_differential_navigator(config: DifferentialRobotConfig):
-    """Build the direct relative-goal controller from validated v2 models."""
+    """Build the pure planner/controller from validated v2 models."""
 
     from components.differential_navigation import DifferentialNavigator
 
-    return DifferentialNavigator(config.drive, config.navigation)
+    return DifferentialNavigator(config.geometry, config.drive, config.navigation)
 
 
 def build_basic_motion_controller(config: DifferentialRobotConfig, navigator):
@@ -132,3 +132,21 @@ def build_basic_motion_controller(config: DifferentialRobotConfig, navigator):
     from components.basic_motion_controller import BasicMotionController
 
     return BasicMotionController(navigator, config.navigation, config.drive)
+
+
+def build_competition_world(config: DifferentialRobotConfig):
+    """Build the configured static competition map without hardware side effects."""
+
+    from components.competition_map import CompetitionMapSpec, build_competition_navigation_grid
+
+    map_config = config.competition_map
+    spec = CompetitionMapSpec(
+        width_m=map_config.width_m,
+        height_m=map_config.height_m,
+        resolution_m=map_config.resolution_m,
+        origin_x_m=map_config.origin_x_m,
+        origin_y_m=map_config.origin_y_m,
+        static_obstacles=map_config.static_obstacles,
+        allowed_regions=map_config.allowed_regions,
+    )
+    return build_competition_navigation_grid(spec)

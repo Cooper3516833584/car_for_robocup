@@ -2,7 +2,7 @@
 <package format="3">
   <name>car_components</name>
   <version>0.1.0</version>
-  <description>Hardware and navigation components for the Ackermann car.</description>
+  <description>Hardware and navigation components for the differential RoboCup car.</description>
   <maintainer email="maintainer@example.invalid">car maintainers</maintainer>
   <license>Proprietary</license>
   <buildtool_depend>ament_python</buildtool_depend>

@@ -1,10 +1,7 @@
 import time
-import threading
 import unittest
 from types import SimpleNamespace
 
-from components.navigation import NavigationPose, NavigationState
-from components.fixed_track_runtime import CompetitionCarApplication
 from fleet_bus.command_queue import CarCommandQueue
 from fleet_bus.models import (
     AckStatus,
@@ -48,30 +45,13 @@ class CarCommandQueueTests(unittest.TestCase):
 
 
 class CarFleetStateProviderTests(unittest.TestCase):
-    def test_application_runtime_snapshot_is_read_only_and_local(self):
-        application = object.__new__(CompetitionCarApplication)
-        application._lock = threading.Lock()
-        application._ready = True
-        application._map_ready = True
-        application._latest_navigation_pose = NavigationPose(5, -6, 90)
-        application._follower_state = SimpleNamespace(
-            completed=False, running=True
-        )
-        application._localization_degraded = False
-        application._fleet_error_code = 0
-        snapshot = application.fleet_runtime_snapshot()
-        self.assertEqual((5, -6, 90), (
-            snapshot.pose.x_cm, snapshot.pose.y_cm, snapshot.pose.heading_deg
-        ))
-        self.assertIs(NavigationState.FOLLOWING, snapshot.navigation_state)
-
     def test_fresh_local_pose_is_reported_without_field_transform(self):
         now = time.monotonic()
         snapshot = SimpleNamespace(
             ready=True,
             map_ready=True,
-            pose=NavigationPose(12.4, -8.6, 359.99, now),
-            navigation_state=NavigationState.FOLLOWING,
+            pose=SimpleNamespace(x_cm=12.4, y_cm=-8.6, heading_deg=359.99, timestamp_s=now),
+            navigation_state=SimpleNamespace(name="FOLLOWING"),
             localization_degraded=False,
             error_code=0,
             localization_timeout_s=0.5,
@@ -90,8 +70,8 @@ class CarFleetStateProviderTests(unittest.TestCase):
         snapshot = SimpleNamespace(
             ready=True,
             map_ready=True,
-            pose=NavigationPose(1, 2, 3, time.monotonic() - 2),
-            navigation_state=NavigationState.IDLE,
+            pose=SimpleNamespace(x_cm=1, y_cm=2, heading_deg=3, timestamp_s=time.monotonic() - 2),
+            navigation_state=SimpleNamespace(name="IDLE"),
             localization_degraded=False,
             error_code=7,
             localization_timeout_s=0.5,

@@ -8,6 +8,10 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 User=root
+# The component is part of the `components` package and imports `hal` from the
+# checkout root, so a direct script invocation needs the checkout on PYTHONPATH;
+# the working directory alone is not on sys.path for `python3 <script>`.
+Environment=PYTHONPATH=/home/radxa/car/code
 ExecStart=/usr/bin/python3 /home/radxa/car/code/components/sound_light_alarm.py --off --grant-group gpio
 ExecStop=/usr/bin/python3 /home/radxa/car/code/components/sound_light_alarm.py --off --grant-group gpio
 RemainAfterExit=yes

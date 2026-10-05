@@ -1,0 +1,538 @@
+{
+  "views": [
+    {
+      "file": "view_00_front.png",
+      "detected": true,
+      "mean_corner_error_px": 8.683245658874512,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.93677,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            354.0,
+            226.0
+          ],
+          [
+            925.0,
+            225.0
+          ],
+          [
+            926.0,
+            472.0
+          ],
+          [
+            355.0,
+            473.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3671.9651999992493,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_01_yaw_left_15.png",
+      "detected": true,
+      "mean_corner_error_px": 8.801212310791016,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.93597,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            322.0,
+            221.0
+          ],
+          [
+            860.0,
+            240.0
+          ],
+          [
+            861.0,
+            460.0
+          ],
+          [
+            323.0,
+            477.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 2918.2953000017733,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_02_yaw_right_15.png",
+      "detected": true,
+      "mean_corner_error_px": 8.801202774047852,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.92705,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            420.0,
+            240.0
+          ],
+          [
+            958.0,
+            221.0
+          ],
+          [
+            957.0,
+            477.0
+          ],
+          [
+            419.0,
+            460.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3422.6071999983105,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_03_yaw_left_30.png",
+      "detected": true,
+      "mean_corner_error_px": 8.30650520324707,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.937603,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            339.0,
+            219.0
+          ],
+          [
+            807.0,
+            252.0
+          ],
+          [
+            809.0,
+            449.0
+          ],
+          [
+            340.0,
+            479.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3251.228399996762,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_04_yaw_right_30.png",
+      "detected": true,
+      "mean_corner_error_px": 8.306506156921387,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.93366,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            473.0,
+            252.0
+          ],
+          [
+            941.0,
+            219.0
+          ],
+          [
+            940.0,
+            479.0
+          ],
+          [
+            471.0,
+            449.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3092.027799997595,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_05_pitch_up_12.png",
+      "detected": true,
+      "mean_corner_error_px": 8.706496238708496,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.935627,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            377.0,
+            243.0
+          ],
+          [
+            902.0,
+            242.0
+          ],
+          [
+            917.0,
+            469.0
+          ],
+          [
+            364.0,
+            470.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3006.276299998717,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_06_pitch_down_12.png",
+      "detected": true,
+      "mean_corner_error_px": 8.807193756103516,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.94631,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            363.0,
+            230.0
+          ],
+          [
+            915.0,
+            228.0
+          ],
+          [
+            903.0,
+            457.0
+          ],
+          [
+            378.0,
+            458.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3223.878299999342,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_07_compound_left.png",
+      "detected": true,
+      "mean_corner_error_px": 8.463129997253418,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.932487,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            320.0,
+            242.0
+          ],
+          [
+            810.0,
+            238.0
+          ],
+          [
+            807.0,
+            434.0
+          ],
+          [
+            332.0,
+            486.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3319.7625000029802,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_08_compound_right.png",
+      "detected": true,
+      "mean_corner_error_px": 8.768260955810547,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.96027,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            496.0,
+            244.0
+          ],
+          [
+            960.0,
+            250.0
+          ],
+          [
+            938.0,
+            491.0
+          ],
+          [
+            468.0,
+            432.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3425.3027999984624,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_09_far.png",
+      "detected": true,
+      "mean_corner_error_px": 6.1199049949646,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.957617,
+        "raw_lines": [
+          "☐红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "□绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            472.0,
+            280.0
+          ],
+          [
+            817.0,
+            278.0
+          ],
+          [
+            815.0,
+            430.0
+          ],
+          [
+            473.0,
+            425.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3205.7037000013224,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_10_dim.png",
+      "detected": true,
+      "mean_corner_error_px": 7.615778923034668,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.9993,
+        "raw_lines": [
+          "红色地块投入2个物资;",
+          "蓝色地块投入1个物资;",
+          "绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            367.0,
+            238.0
+          ],
+          [
+            831.0,
+            255.0
+          ],
+          [
+            824.0,
+            445.0
+          ],
+          [
+            367.0,
+            461.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3295.1543999988644,
+      "ocr_passed": true
+    },
+    {
+      "file": "view_11_soft_motion.png",
+      "detected": true,
+      "mean_corner_error_px": 8.610240936279297,
+      "geometry_passed": true,
+      "ocr": {
+        "valid": true,
+        "task": {
+          "red": 2,
+          "blue": 1,
+          "green": 1
+        },
+        "confidence": 0.93457,
+        "raw_lines": [
+          "□红色地块投入2个物资;",
+          "□蓝色地块投入1个物资;",
+          "☐绿色地块投入1个物资;"
+        ],
+        "inferred_colors": [],
+        "board_quad": [
+          [
+            465.0,
+            256.0
+          ],
+          [
+            925.0,
+            238.0
+          ],
+          [
+            923.0,
+            465.0
+          ],
+          [
+            455.0,
+            446.0
+          ]
+        ],
+        "source": "rectified",
+        "reason": null,
+        "votes": 1
+      },
+      "ocr_ms": 3203.1363999994937,
+      "ocr_passed": true
+    }
+  ],
+  "total": 12,
+  "detected": 12,
+  "mean_corner_error_px": 8.332473158836365,
+  "worst_mean_corner_error_px": 8.807193756103516,
+  "ocr_passed": 12,
+  "passed": true
+}

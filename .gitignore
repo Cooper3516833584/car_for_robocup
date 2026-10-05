@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv-task-board/
 venv/
 logs/
 configs/robocup_diffdrive.toml

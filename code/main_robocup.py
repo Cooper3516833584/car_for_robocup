@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 from pathlib import Path
 import sys
 
@@ -31,9 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     localization.add_argument("--localization-from-config", action="store_true",
                               help="use localization settings from the TOML profile instead of the hardware-mission default")
     parser.add_argument("--steps", type=int, default=8, help="fixed dry-run/replay step count")
-    parser.add_argument("--goal-x", type=float, help="optional goal x in the current fused pose frame, metres")
-    parser.add_argument("--goal-y", type=float, help="optional goal y in the current fused pose frame, metres")
-    parser.add_argument("--goal-yaw", type=float, help="optional final yaw in the current fused pose frame, radians")
+    parser.add_argument("--goal-x", type=float, help="optional navigation goal x in metres")
+    parser.add_argument("--goal-y", type=float, help="optional navigation goal y in metres")
+    parser.add_argument("--goal-yaw", type=float, help="optional final yaw in radians")
+    parser.add_argument("--task-board-camera", help="enable startup task acquisition using a stable camera path or index")
+    parser.add_argument("--task-board-turn-deg", type=float,
+                        help="measured signed chassis turn toward the board, required with --task-board-camera")
+    parser.add_argument("--task-board-debug-dir", type=Path, help="optional task-board images and OCR evidence")
     return parser
 
 
@@ -55,8 +60,13 @@ def main(argv: list[str] | None = None) -> int:
     if (args.goal_x is None) != (args.goal_y is None):
         logging.error("--goal-x and --goal-y must be provided together")
         return 2
-    if args.goal_yaw is not None and args.goal_x is None:
-        logging.error("--goal-yaw requires --goal-x and --goal-y")
+    task_board_enabled = args.task_board_camera is not None
+    if task_board_enabled != (args.task_board_turn_deg is not None):
+        logging.error("--task-board-camera and --task-board-turn-deg must be provided together")
+        return 2
+    if task_board_enabled and (args.mode != RuntimeMode.HARDWARE_MISSION.value
+                               or not math.isfinite(args.task_board_turn_deg)):
+        logging.error("task-board startup requires hardware-mission and a finite measured turn")
         return 2
 
     try:
@@ -64,6 +74,14 @@ def main(argv: list[str] | None = None) -> int:
         mode = RuntimeMode(args.mode)
         if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
             config = accepted_relative_slam_profile(config)
+        if config.localization.slam.relative_goals_only and any(
+            value is not None for value in (args.goal_x, args.goal_y, args.goal_yaw)
+        ):
+            raise ValueError("relative SLAM task does not accept field-coordinate --goal-* arguments")
+        if not config.calibration.geometry_measured or not config.calibration.sensor_extrinsics_measured:
+            logging.warning(
+                "configuration contains unmeasured geometry or sensor mounts; autonomous hardware mission remains gated"
+            )
         runtime = build_runtime(
             config,
             mode,
@@ -72,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.log_dir is not None:
             runtime.event_logger = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
+        elif task_board_enabled:
+            runtime.event_logger = JsonlEventLogger(Path("logs") / "task-board" / "events.jsonl")
     except (RuntimeReadinessError, FileNotFoundError, ValueError, NotImplementedError) as exc:
         logging.error("cannot start RoboCup runtime: %s", exc)
         if isinstance(exc, RuntimeReadinessError) and args.log_dir is not None:
@@ -92,6 +112,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        if task_board_enabled:
+            from components.task_board_reader import TaskBoardConfig, TaskBoardReader
+            from task_board_startup import acquire_task_board
+
+            camera = int(args.task_board_camera) if args.task_board_camera.isdigit() else args.task_board_camera
+            result = acquire_task_board(
+                runtime, TaskBoardReader(TaskBoardConfig(debug_directory=args.task_board_debug_dir)),
+                camera=camera, turn_rad=math.radians(args.task_board_turn_deg),
+            )
+            if not result.valid:
+                logging.error("task-board acquisition failed: %s", result.reason)
+                return 1
+            logging.info("task-board task=%s confidence=%.3f votes=%d", result.task, result.confidence, result.votes)
         if args.goal_x is not None:
             runtime.mission.set_navigation_goal(
                 NavigationGoal(args.goal_x, args.goal_y, args.goal_yaw)

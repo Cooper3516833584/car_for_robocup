@@ -12,7 +12,7 @@ py -3 -m unittest discover -s code/test -p "test_*.py"
 git diff --check
 ```
 
-Acceptance: zero syntax errors, all new tests pass, and only the eight documented legacy skips remain. The current baseline is 605 tests with 8 skips; update this count after changing tests.
+Acceptance: zero syntax errors and all tests pass. After the 2026-10-05 legacy cleanup, the suite contains 532 tests with no skips. The old suite's eight skips belonged to retired Ackermann tests. See `LEGACY_CLEANUP.md` for removal and validation details.
 
 ## Stage 1 — hardware-free dry-run
 

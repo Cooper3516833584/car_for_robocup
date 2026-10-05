@@ -1,15 +1,28 @@
-# ROS 2 Nav2 integration
+# Optional ROS2 sensor and map utilities
 
-The original `code/main.py` and Python `Navigation` implementation remain the rollback path.  ROS nodes only adapt existing hardware components.
+The Ackermann base bridge, mission-to-Nav2 bridge, Twist-to-steering converter,
+Nav2 motion parameters, old vehicle footprint, behavior trees and autonomous
+bringup have been removed. This checkout does not provide a replacement Nav2
+chassis bridge. Differential motion runs through `code/main_robocup.py`.
 
-The TF chain is exactly `map -> odom -> base_link -> laser`. D500 ICP publishes continuous `odom -> base_link`; wall-line corrections use `GlobalCorrectionMode.UPDATE_ALIGNMENT`, so they update `map -> odom` only.
+Retained ROS2 utilities:
 
-Nav2 uses Smac Hybrid-A* with `REEDS_SHEPP`, MPPI `Ackermann` motion model and a conservative `0.49 m` turning radius. Both supplied behavior trees exclude `Spin`; the base node rejects any in-place Twist and centres/stops on timeout, stale localization or emergency stop.
+- `car_ros_bridge.d500_localization_node` publishes sensor data, odometry and TF.
+- `car_ros_bridge.ros_conversions` and `field_geometry` remain hardware-free helpers.
+- `car_nav_bringup.generate_field_map` creates map files from measured polygons.
+- `car_nav_bringup hardware.launch.py` now launches only D500, with hardware disabled by default.
+- `code/scripts/build_ros2.sh` builds/tests these remaining packages.
 
-The Smac plugin is written using the current `nav2_smac_planner::SmacPlannerHybrid` class spelling; this is required for Jazzy, whereas older releases used the slash spelling. Collision Monitor uses Jazzy's `min_points` parameter (Humble requires the corresponding `max_points` semantics), so the board distribution must be checked before reuse.
-
-Build on the board with `code/scripts/build_ros2.sh`. Generate a map only after supplying a measured field file:
+Do not run this D500 bridge at the same time as the standalone runtime's D500
+owner. Supply measured radar mount values explicitly when selecting either path.
 
 ```bash
-ros2 run car_nav_bringup generate_field_map /home/radxa/car/config/field.yaml /home/radxa/car/maps/competition_field
+ros2 launch car_nav_bringup hardware.launch.py use_hardware:=false \
+  radar_x_m:=MEASURED_X radar_y_m:=MEASURED_Y radar_yaw_rad:=MEASURED_YAW
+ros2 run car_nav_bringup generate_field_map measured-field.yaml maps/field
 ```
+
+The package name `car_nav_bringup` is retained for these existing utilities; it
+no longer launches autonomous navigation. See `LEGACY_CLEANUP.md` for removal
+inventory and migration of old systemd units. Actual ROS2 launch and board
+deployment were not performed during this software cleanup.

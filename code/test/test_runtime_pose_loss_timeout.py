@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from components.navigation_common import NavigationGoal
+from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import PoseFusionState
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
@@ -29,6 +29,7 @@ class PoseLossTimeoutTests(unittest.TestCase):
             config,
             RuntimeMode.DRY_RUN,
             clock=lambda: 10.0,
+            world=NavigationGrid(100, 100, 0.1, origin_x_m=-5.0, origin_y_m=-5.0),
         )
         runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 10.0), PoseQuality("t265", True, False))
         runtime.fusion.update_d500(Pose2D(0.0, 0.0, 0.0, 10.0), PoseQuality("d500", True, False))

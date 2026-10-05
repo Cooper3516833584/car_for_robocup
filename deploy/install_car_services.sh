@@ -1,8 +1,8 @@
 #!/bin/sh
 # Install the car's project systemd units with paths pointing at this checkout.
 #
-# The units live in the repository (code/test/*.service and
-# code/mission-screen-launcher.service) and are the single source of truth.
+# The shared alarm and battery units live in code/test/*.service and are the
+# single source of truth. Retired steering/screen units are not installed.
 # Older installs hard-coded a different checkout (car_for_ECDC); a stale path
 # silently breaks every service, so this script rewrites the paths instead of
 # keeping a second copy of each unit in sync.
@@ -47,13 +47,11 @@ install_one() {
 
 install_one "$CAR_CODE/test/sound-light-alarm.service"        sound-light-alarm.service
 install_one "$CAR_CODE/test/battery-voltage-monitor.service"  battery-voltage-monitor.service
-install_one "$CAR_CODE/test/rock5a-pwm0-permissions.service"  rock5a-pwm0-permissions.service
-install_one "$CAR_CODE/mission-screen-launcher.service"       mission-screen-launcher.service
 
 systemctl daemon-reload
 echo
 echo "installed units (none enabled by this script):"
-for unit in sound-light-alarm battery-voltage-monitor rock5a-pwm0-permissions mission-screen-launcher; do
+for unit in sound-light-alarm battery-voltage-monitor; do
     printf '  %-32s enabled=%s active=%s\n' \
         "$unit" \
         "$(systemctl is-enabled "$unit.service" 2>&1 || true)" \
