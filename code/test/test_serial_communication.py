@@ -1,8 +1,10 @@
-"""Hardware-free tests for the HC-14 bridge codec and component validation."""
+"""Hardware-free tests for the HC-15 UART and ground-station bridge codec."""
 
 from __future__ import annotations
 
 from pathlib import Path
+import errno
+import struct
 import sys
 from types import SimpleNamespace
 import unittest
@@ -12,7 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.serial_communication import (  # noqa: E402
     FCWirelessBridgeCodec,
+    DEFAULT_HC14_PORT,
+    DEFAULT_HC15_PORT,
     HC14SerialDriver,
+    HC15SerialDriver,
+    SerialCommunicationDriver,
     SerialDriverError,
 )
 
@@ -81,8 +87,21 @@ class HC14SerialDriverValidationTests(unittest.TestCase):
         driver = HC14SerialDriver(on_bytes=lambda data: None)
         self.assertTrue(driver.bridge_envelope)
         self.assertEqual(driver.baudrate, 115200)
+        self.assertEqual(driver.port, "/dev/ttyS4")
         self.assertFalse(driver.connected)
         self.assertFalse(driver.wait_connected(0.0))
+
+    def test_hc15_and_legacy_imports_share_the_new_wiring(self) -> None:
+        from components import HC15SerialDriver as exported_driver
+        from components import DEFAULT_HC15_PORT as exported_port
+        self.assertIs(HC14SerialDriver, HC15SerialDriver)
+        self.assertIs(SerialCommunicationDriver, HC15SerialDriver)
+        self.assertIs(exported_driver, HC15SerialDriver)
+        self.assertEqual(DEFAULT_HC14_PORT, DEFAULT_HC15_PORT)
+        self.assertEqual(exported_port, "/dev/ttyS4")
+        # Explicit port overrides still support an operator-selected USB link.
+        driver = HC15SerialDriver(on_bytes=lambda data: None, port="/dev/serial/by-path/operator-selected")
+        self.assertEqual(driver.port, "/dev/serial/by-path/operator-selected")
 
     def test_callback_is_required(self) -> None:
         with self.assertRaises(TypeError):
@@ -111,8 +130,55 @@ class HC14SerialDriverValidationTests(unittest.TestCase):
             self.assertEqual(41, driver._open_serial())
 
         fake_fcntl.flock.assert_called_once_with(41, 3)
+        fake_fcntl.ioctl.assert_called_once_with(41, fake_termios.TIOCMBIC, struct.pack("I", 6))
         fake_termios.tcgetattr.assert_called_once_with(41)
         close.assert_not_called()
+
+    def test_native_uart_opens_without_modem_control_support(self) -> None:
+        for error_number in (errno.ENOTTY, errno.EINVAL, errno.EOPNOTSUPP):
+            with self.subTest(errno=error_number):
+                fake_fcntl = SimpleNamespace(
+                    LOCK_EX=1, LOCK_NB=2, flock=mock.Mock(),
+                    ioctl=mock.Mock(side_effect=OSError(error_number, "unsupported")),
+                )
+                fake_termios = self._fake_termios()
+                driver = HC15SerialDriver(on_bytes=lambda data: None)
+                with mock.patch.multiple("components.serial_communication.os",
+                                         O_NOCTTY=0, O_NONBLOCK=0, create=True), \
+                     mock.patch("components.serial_communication.fcntl", fake_fcntl), \
+                     mock.patch("components.serial_communication.termios", fake_termios), \
+                     mock.patch("components.serial_communication.os.open", return_value=41) as opened, \
+                     mock.patch("components.serial_communication.os.close") as close:
+                    self.assertEqual(driver._open_serial(), 41)
+                self.assertEqual(opened.call_args.args[0], "/dev/ttyS4")
+                configured = fake_termios.tcsetattr.call_args.args[2]
+                self.assertEqual(configured[2], 115200 | 2 | 4 | 8)
+                self.assertEqual(configured[4:6], [115200, 115200])
+                close.assert_not_called()
+
+    def test_real_modem_control_io_error_closes_the_port(self) -> None:
+        fake_fcntl = SimpleNamespace(
+            LOCK_EX=1, LOCK_NB=2, flock=mock.Mock(),
+            ioctl=mock.Mock(side_effect=OSError(errno.EIO, "I/O error")),
+        )
+        driver = HC15SerialDriver(on_bytes=lambda data: None)
+        with mock.patch.multiple("components.serial_communication.os",
+                                 O_NOCTTY=0, O_NONBLOCK=0, create=True), \
+             mock.patch("components.serial_communication.fcntl", fake_fcntl), \
+             mock.patch("components.serial_communication.termios", self._fake_termios()), \
+             mock.patch("components.serial_communication.os.open", return_value=42), \
+             mock.patch("components.serial_communication.os.close") as close:
+            with self.assertRaises(OSError) as caught:
+                driver._open_serial()
+        self.assertEqual(caught.exception.errno, errno.EIO)
+        close.assert_called_once_with(42)
+
+    def test_simulator_accepts_new_and_legacy_opt_in_flags(self) -> None:
+        from fleet_car_pose_simulator import build_parser
+        parser = build_parser()
+        self.assertFalse(parser.parse_args([]).connect_hc15)
+        self.assertTrue(parser.parse_args(["--connect-hc15"]).connect_hc15)
+        self.assertTrue(parser.parse_args(["--connect-hc14"]).connect_hc15)
 
     def test_open_serial_rejects_second_process_and_closes_fd(self) -> None:
         fake_fcntl = SimpleNamespace(

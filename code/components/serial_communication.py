@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Callable HC-14 serial transport compatible with the ground station.
+"""Callable HC-15 UART transport compatible with the ground station.
 
 This component owns only the serial link and the ``BB 33`` bridge envelope.
 Callers provide and receive complete inner ``AA 22`` protocol frames.  It does
@@ -9,6 +9,7 @@ not parse commands, send ACKs, hold an HMAC key, or control any car actuator.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import os
 import select
 import struct
@@ -24,9 +25,10 @@ except ModuleNotFoundError:  # Codec tests are supported on non-Linux hosts.
     termios = None
 
 
-DEFAULT_HC14_PORT: Final[str] = (
-    "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
-)
+# ROCK 5A UART4-M2: board TX pin 7 -> radio RXD; RX pin 29 <- TXD.
+DEFAULT_HC15_PORT: Final[str] = "/dev/ttyS4"
+# Compatibility name: old callers also follow the current car wiring.
+DEFAULT_HC14_PORT: Final[str] = DEFAULT_HC15_PORT
 DEFAULT_BAUDRATE: Final[int] = 115200
 FC_WIRELESS_HEADER: Final[bytes] = b"\xBB\x33"
 FC_WIRELESS_MAX_PAYLOAD: Final[int] = 255
@@ -101,8 +103,8 @@ def _safe_callback(callback: Callable | None, *args) -> None:
         callback(*args)
 
 
-class HC14SerialDriver:
-    """Threaded HC-14 serial component with automatic reconnect.
+class HC15SerialDriver:
+    """Threaded HC-15 serial component with automatic reconnect.
 
     ``on_bytes`` is called with one complete inner payload for each valid bridge
     envelope.  With ``bridge_envelope=False`` it receives raw serial chunks and
@@ -114,7 +116,7 @@ class HC14SerialDriver:
         self,
         *,
         on_bytes: Callable[[bytes], None],
-        port: str = DEFAULT_HC14_PORT,
+        port: str = DEFAULT_HC15_PORT,
         baudrate: int = DEFAULT_BAUDRATE,
         bridge_envelope: bool = True,
         reconnect_seconds: float = 1.0,
@@ -167,7 +169,7 @@ class HC14SerialDriver:
     def codec_stats(self) -> BridgeCodecStats:
         return self._codec.stats
 
-    def start(self) -> "HC14SerialDriver":
+    def start(self) -> "HC15SerialDriver":
         with self._state_lock:
             if self._thread is not None and self._thread.is_alive():
                 return self
@@ -176,13 +178,13 @@ class HC14SerialDriver:
             self._last_error = None
             self._thread = threading.Thread(
                 target=self._run,
-                name="hc14-serial-driver",
+                name="hc15-serial-driver",
                 daemon=True,
             )
             self._thread.start()
         return self
 
-    def __enter__(self) -> "HC14SerialDriver":
+    def __enter__(self) -> "HC15SerialDriver":
         return self.start()
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
@@ -232,19 +234,19 @@ class HC14SerialDriver:
                 with self._state_lock:
                     fd = self._fd
                 if fd is None:
-                    raise SerialDriverError("HC-14 serial link is not connected")
+                    raise SerialDriverError("HC-15 serial link is not connected")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
-                    raise SerialDriverError("HC-14 serial write timed out")
+                    raise SerialDriverError("HC-15 serial write timed out")
                 _, writable, _ = select.select([], [fd], [], remaining)
                 if not writable:
-                    raise SerialDriverError("HC-14 serial write timed out")
+                    raise SerialDriverError("HC-15 serial write timed out")
                 try:
                     written = os.write(fd, view)
                 except OSError as exc:
-                    raise SerialDriverError("HC-14 serial write failed") from exc
+                    raise SerialDriverError("HC-15 serial write failed") from exc
                 if written <= 0:
-                    raise SerialDriverError("HC-14 serial write made no progress")
+                    raise SerialDriverError("HC-15 serial write made no progress")
                 view = view[written:]
 
     def _run(self) -> None:
@@ -291,7 +293,7 @@ class HC14SerialDriver:
             except BlockingIOError:
                 continue
             if not data:
-                raise SerialDriverError("HC-14 serial device disconnected")
+                raise SerialDriverError("HC-15 serial device disconnected")
             chunks = self._codec.feed(data) if self.bridge_envelope else [data]
             for chunk in chunks:
                 try:
@@ -301,7 +303,7 @@ class HC14SerialDriver:
 
     def _open_serial(self) -> int:
         if termios is None or fcntl is None:
-            raise SerialDriverError("HC-14 serial I/O requires Linux termios")
+            raise SerialDriverError("HC-15 serial I/O requires Linux termios")
         speed = {
             9600: termios.B9600,
             115200: termios.B115200,
@@ -312,13 +314,13 @@ class HC14SerialDriver:
                 os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK,
             )
         except OSError as exc:
-            raise SerialDriverError(f"cannot open HC-14 serial port {self.port}") from exc
+            raise SerialDriverError(f"cannot open HC-15 serial port {self.port}") from exc
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
                 raise SerialDriverError(
-                    f"HC-14 serial port {self.port} is already in use"
+                    f"HC-15 serial port {self.port} is already in use"
                 ) from exc
             settings = termios.tcgetattr(fd)
             settings[0] = termios.IGNPAR
@@ -332,7 +334,13 @@ class HC14SerialDriver:
             termios.tcsetattr(fd, termios.TCSANOW, settings)
             termios.tcflush(fd, termios.TCIOFLUSH)
             clear_lines = termios.TIOCM_DTR | termios.TIOCM_RTS
-            fcntl.ioctl(fd, termios.TIOCMBIC, struct.pack("I", clear_lines))
+            try:
+                fcntl.ioctl(fd, termios.TIOCMBIC, struct.pack("I", clear_lines))
+            except OSError as exc:
+                # Three-wire UARTs may expose no modem-control ioctl. Keep USB
+                # adapters deasserted when supported; genuine I/O errors fail.
+                if exc.errno not in (errno.ENOTTY, errno.EINVAL, errno.EOPNOTSUPP):
+                    raise
             return fd
         except BaseException:
             os.close(fd)
@@ -349,5 +357,6 @@ class HC14SerialDriver:
                     pass
 
 
-# Clear, descriptive alias for application code that does not need HC-14 naming.
-SerialCommunicationDriver = HC14SerialDriver
+# Preserve existing imports while making the current HC-15 name available.
+HC14SerialDriver = HC15SerialDriver
+SerialCommunicationDriver = HC15SerialDriver

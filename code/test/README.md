@@ -15,7 +15,7 @@ python3 -m unittest discover -s code/test -p 'test_*.py'
 
 - `wheel_test.py`：低层电机手动测试，需操作员监督。
 - `d500_uart_probe.py`：D500 UART 只读帧统计。
-- `hc14_*.py`：无线链路探测，修改无线参数仍需明确授权。
+- `hc14_*.py`：旧 HC-14 USB 链路工具，不用于当前 HC-15 接线；修改无线参数仍需明确授权。当前 HC-15 UART4-M2 的无发送检查使用 `tools/hc15_probe.py`，接线见 `docs/platforms/rock5a.md`。
 - `relay_selftest.py`：默认查询；显式输出触点动作见 `docs/RELAY_LCUS.md`。
 - `tools/basic_motion.py`：现行差速动作测试入口。
 - `tools/task_board_demo.py`、`tools/validate_task_boards.py`：离线/静态识别验收。

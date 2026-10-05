@@ -41,8 +41,41 @@
 - 电机使能由驱动板 `KEY2` 控制；串口遥测帧第 2 字节 `00`=已使能。
 - 左后轮接左侧带编码器电机接口，右后轮接右侧带编码器电机接口。
 
-## HC-14 无线串口
+## HC-15 无线串口（2026-10-05 新接线）
 
-- 设备 `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`（CH340）。
-- `115200 8N1`，关闭流控，打开串口前后清除 DTR/RTS。
-- 参数 `B115200 / C28 / S8 / +20 dBm`；AT 命令必须纯 ASCII、不带 CR/LF。
+用户提供的接线如下，Pin 均为 ROCK 5A 40Pin 排针的物理编号：
+
+| HC-15 | ROCK 5A |
+|---|---|
+| VCC | Pin 1，3.3V |
+| GND | Pin 9，GND |
+| RXD | Pin 7，UART4_TX_M2（主板 TX → 模块 RX） |
+| TXD | Pin 29，UART4_RX_M2（模块 TX → 主板 RX） |
+
+Pin 7/29 和 `/dev/ttyS4` 的对应关系见
+[Radxa 引脚表](https://docs.radxa.com/rock5/rock5a/hardware-design/hardware-interface)与
+[UART4-M2 使用说明](https://docs.radxa.com/en/rock5/rock5a/getting-started/interface-usage/pin-40-test)。
+板端通过 `rsetup` 启用 UART4-M2 overlay（`rk3588-uart4-m2.dtbo`）并重启后，
+确认 `/dev/ttyS4` 存在且运行用户属于 `dialout`。保留已有 UART6-M1 雷达 overlay；
+仅推送仓库代码不会自动修改设备树或重启小车。
+
+串口组件默认 `/dev/ttyS4`，沿用 `115200 8N1`、无软件/硬件流控。
+接线图未说明新的 UART 波特率，本次不修改电台存储的波特率、信道、空速或功率，
+也不假设旧 HC-14 的 AT 指令适用于 HC-15。
+原生 UART 没有连接 DTR/RTS；内核不支持该 ioctl 时允许打开，实际 I/O 错误仍失败。
+串口独占、重连和地面站 `BB 33` 封装保持原有行为。
+
+新接口是 `HC15SerialDriver` / `DEFAULT_HC15_PORT`；旧 HC14 名称和
+`SerialCommunicationDriver` 保留为别名，旧调用也使用新端口。若需要旧 USB 硬件，
+必须显式传入它的端口，不能自动猜测 CH340 或回退到 `/dev/ttyUSB0`。
+`code/test/hc14_*.py` 仍是旧 HC-14 工具，只适用于原 USB 配置。
+
+新接线的无发送串口检查（不发 AT、不开底盘；会独占串口并消费接收数据）：
+
+```bash
+python3 tools/hc15_probe.py --duration-s 3
+```
+
+需要合成位置应答时，显式运行 `code/test/fleet_car_pose_simulator.py --connect-hc15`；
+它会向地面站发送模拟位置，不能与真实任务同时运行。
+以上接线依据用户提供的图片，尚未执行真机双向通信验证。

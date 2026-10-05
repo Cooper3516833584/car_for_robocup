@@ -1,4 +1,4 @@
-"""HC-14-only car pose simulator with no vehicle actuator access.
+"""HC-15-only car pose simulator with no vehicle actuator access.
 
 The simulator replies to ground-station FleetBus polls and trace requests with
 a moving synthetic pose.  It imports no motor, steering, radar, or mission
@@ -22,9 +22,10 @@ if str(CODE_DIR) not in sys.path:
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--connect-hc14",
+        "--connect-hc15", "--connect-hc14",
+        dest="connect_hc15",
         action="store_true",
-        help="open only the car CH340/HC-14 serial link",
+        help="open only the car HC-15 UART4-M2 link (--connect-hc14 is a compatibility alias)",
     )
     parser.add_argument("--port", default=None)
     parser.add_argument("--baudrate", type=int, default=115200)
@@ -69,8 +70,8 @@ class SimulatedCarStateProvider:
 
 def main():
     args = build_parser().parse_args()
-    if not args.connect_hc14:
-        print("No serial port opened. Add --connect-hc14 for the bounded test.")
+    if not args.connect_hc15:
+        print("No serial port opened. Add --connect-hc15 for the bounded test.")
         return 2
     if args.duration_s <= 0.0:
         raise SystemExit("--duration-s must be positive")
@@ -87,12 +88,12 @@ def main():
     )
     from components.fleet_trace import TraceSamplingOptions
     from components.serial_communication import (
-        DEFAULT_HC14_PORT,
+        DEFAULT_HC15_PORT,
         SerialCommunicationDriver,
     )
 
     stop_event = threading.Event()
-    port = args.port or DEFAULT_HC14_PORT
+    port = args.port or DEFAULT_HC15_PORT
     state_provider = SimulatedCarStateProvider(
         CarFleetState,
         NodeFlags.POSE_VALID | NodeFlags.READY | NodeFlags.COORDINATE_FRAME_SYNCED,
@@ -140,7 +141,7 @@ def main():
     try:
         if not link.wait_connected(args.connect_timeout_s):
             raise RuntimeError(
-                "car HC-14 did not connect within the timeout: {}".format(
+                "car HC-15 did not connect within the timeout: {}".format(
                     link.last_error
                 )
             )
