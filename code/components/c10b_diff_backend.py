@@ -41,9 +41,10 @@ class C10BDifferentialBackend:
     """Translate canonical m/s wheel targets to the preserved C10B driver.
 
     Compatibility mode checks the old firmware's minimum radius before
-    forwarding. Differential mode skips only that legacy radius check; the
-    frame encoder, command range checks, periodic sender, and watchdog remain
-    owned by ``RearMotorDriver``.
+    forwarding. Differential mode also compensates for the vendor Diff_Car
+    firmware reversing Vz when Vx is negative. The frame encoder, command
+    range checks, periodic sender, and watchdog remain owned by
+    ``RearMotorDriver``.
     """
 
     def __init__(
@@ -98,10 +99,20 @@ class C10BDifferentialBackend:
                     f"minimum {self.firmware_min_turn_radius_m:.3f} m"
                 )
 
+        # In the supplied C10B Diff_Car firmware, Get_Target_Encoder() does
+        # ``if (Vx < 0) Vz = -Vz``. RearMotorDriver encodes Vz from the wheel
+        # difference, so exchange the encoded wheel targets only while moving
+        # backward. The firmware exchanges them back; the physical wheel
+        # targets then retain the canonical (+yaw = left) sign. Vx=0 turns and
+        # equal-speed reverse remain unchanged.
+        encoded_left, encoded_right = left, right
+        if self.protocol_mode is C10BProtocolMode.DIFFERENTIAL_VX_VZ and linear < 0.0:
+            encoded_left, encoded_right = right, left
+
         try:
             self.rear_driver.set_wheels(
-                left * 1000.0,
-                right * 1000.0,
+                encoded_left * 1000.0,
+                encoded_right * 1000.0,
                 enforce_min_turn_radius=not (
                     self.protocol_mode is C10BProtocolMode.DIFFERENTIAL_VX_VZ
                 ),

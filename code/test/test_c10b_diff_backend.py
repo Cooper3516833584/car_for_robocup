@@ -71,6 +71,27 @@ class C10BDifferentialBackendTests(unittest.TestCase):
 
         rear.set_wheels.assert_called_once_with(100.0, 300.0, enforce_min_turn_radius=False)
 
+    def test_differential_reverse_turn_compensates_vendor_firmware_sign(self) -> None:
+        rear, backend = self.make_backend(C10BProtocolMode.DIFFERENTIAL_VX_VZ)
+
+        # Desired +yaw with both wheels in reverse. The vendor firmware flips
+        # Vz for Vx<0, so the serial command must carry the opposite sign.
+        backend.command_wheel_speeds(WheelSpeeds(-0.100, -0.065))
+
+        rear.set_wheels.assert_called_once_with(-65.0, -100.0, enforce_min_turn_radius=False)
+        encoded = wheel_speeds_to_chassis(-65.0, -100.0, enforce_min_turn_radius=False)
+        self.assertEqual(encoded.linear_mm_s, -82)
+        self.assertLess(encoded.angular_mrad_s, 0)
+
+    def test_reverse_straight_and_in_place_turn_keep_their_signs(self) -> None:
+        rear, backend = self.make_backend(C10BProtocolMode.DIFFERENTIAL_VX_VZ,
+                                          allow_in_place=True)
+
+        backend.command_wheel_speeds(WheelSpeeds(-0.1, -0.1))
+        rear.set_wheels.assert_called_with(-100.0, -100.0, enforce_min_turn_radius=False)
+        backend.command_wheel_speeds(WheelSpeeds(-0.1, 0.1))
+        rear.set_wheels.assert_called_with(-100.0, 100.0, enforce_min_turn_radius=False)
+
     def test_low_level_radius_gate_only_disables_when_explicit(self) -> None:
         with self.assertRaises(UnsupportedWheelCommand):
             wheel_speeds_to_chassis(100.0, 300.0)

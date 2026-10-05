@@ -3,9 +3,16 @@
 The `C10BDifferentialBackend` accepts SI wheel speeds and delegates framing,
 serial I/O, periodic command refresh, watchdog stopping, and close behavior to
 the existing `RearMotorDriver`. `ackermann_firmware_compat` applies the
-installed firmware's tested motion limits. `differential_vx_vz` removes only
-the legacy minimum-radius check and must be selected only after the firmware
-and full motion chain have been verified on the actual car.
+installed firmware's tested motion limits. `differential_vx_vz` removes
+the legacy minimum-radius check and compensates for the WHEELTEC `Diff_Car`
+firmware's reverse-yaw sign change. In the supplied `CONTROL/control.c`,
+`Get_Target_Encoder()` does `if (Vx < 0) Vz = -Vz`; the backend therefore sends
+the opposite `Vz` for a moving reverse turn so the physical wheels receive the
+requested left/right targets. Straight reverse, forward turns, and in-place
+turns keep their previous frames. This sign behavior must be checked on the
+installed C10B firmware with a supervised reverse-turn test; the supplied
+source alone does not prove which binary is flashed. Select this mode only
+after the firmware and full motion chain have been verified on the actual car.
 
 The following values describe different things and must stay separate:
 
