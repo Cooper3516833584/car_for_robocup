@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.basic_motion_controller import (
+    LINE_MINIMUM_SPEED_M_S,
     BasicMotionController, MotionActionState, MotionBusyError, MotionPhase,
 )
 from components.differential_navigation import DifferentialNavigator
@@ -83,6 +84,72 @@ class BasicMotionTests(unittest.TestCase):
         navigation = replace(config.navigation, position_tolerance_m=0.01)
         return BasicMotionController(
             DifferentialNavigator(config.drive, navigation), navigation, config.drive)
+
+    def _run_against_a_deadband(self, motion, track_m, deadband_m_s,
+                                max_steps=600, dt=0.05):
+        """Integrate the commanded twist through a plant that ignores slow wheels.
+
+        The 2026-10-05 session measured that the drivetrain delivers nothing below
+        roughly 0.03 m/s, which is what stalled the reverse endgame.
+        """
+        x = y = yaw = 0.0
+        t = 0.0
+        output = None
+        for _ in range(max_steps):
+            output = motion.step(Pose2D(x, y, yaw, t), now_s=t, pose_state="ok")
+            if output.state is not MotionActionState.RUNNING:
+                return output, (x, y, yaw)
+            v, w = output.command.linear_x_m_s, output.command.angular_z_rad_s
+            left = v - w * track_m / 2.0
+            right = v + w * track_m / 2.0
+            left = 0.0 if abs(left) < deadband_m_s else left
+            right = 0.0 if abs(right) < deadband_m_s else right
+            x += (left + right) / 2.0 * math.cos(yaw) * dt
+            y += (left + right) / 2.0 * math.sin(yaw) * dt
+            yaw = normalize_angle_rad(yaw + (right - left) / track_m * dt)
+            t += dt
+        return None, (x, y, yaw)
+
+    def test_stop_at_target_commands_at_least_the_drive_minimum(self) -> None:
+        """The slow endgame must stay above the drivetrain's effective minimum."""
+        motion = self._tight_motion()
+        motion.drive_distance(0.50)
+        motion.step(self.pose(), now_s=1.0)
+        output = motion.step(self.pose(x=0.48), now_s=1.0)
+        self.assertIs(output.state, MotionActionState.RUNNING)
+        self.assertLess(output.diagnostics["goal_distance_m"],
+                        motion.navigation.slowdown_distance_m)
+        floor = min(motion.drive.max_linear_speed_m_s, LINE_MINIMUM_SPEED_M_S)
+        self.assertGreaterEqual(output.command.linear_x_m_s, floor)
+
+    def test_drive_distance_finishes_against_a_deadband_plant(self) -> None:
+        """Every acceptance distance must still land on target when slow commands do nothing."""
+        config = load_v2_config()
+        track = config.geometry.drive_track_width_m
+        for distance in (-0.50, -0.20, 0.20, 0.50):
+            navigation = replace(config.navigation, position_tolerance_m=0.01)
+            motion = BasicMotionController(
+                DifferentialNavigator(config.drive, navigation), navigation, config.drive)
+            motion.drive_distance(distance)
+            output, (x, _y, _yaw) = self._run_against_a_deadband(motion, track, 0.030)
+            self.assertIsNotNone(output, "action never finished for %+.2f m" % distance)
+            self.assertIs(output.state, MotionActionState.SUCCEEDED,
+                          "action did not succeed for %+.2f m" % distance)
+            self.assertLessEqual(abs(x - distance), navigation.position_tolerance_m + 1e-9,
+                                 "landed %.4f m short/over for %+.2f m" % (x - distance, distance))
+
+    def test_drive_to_finishes_against_a_deadband_plant(self) -> None:
+        config = load_v2_config()
+        track = config.geometry.drive_track_width_m
+        navigation = replace(config.navigation, position_tolerance_m=0.01)
+        motion = BasicMotionController(
+            DifferentialNavigator(config.drive, navigation), navigation, config.drive)
+        motion.drive_to(0.30, 0.20)
+        output, (x, y, _yaw) = self._run_against_a_deadband(motion, track, 0.030)
+        self.assertIsNotNone(output, "drive_to never finished against the deadband plant")
+        self.assertIs(output.state, MotionActionState.SUCCEEDED)
+        self.assertLessEqual(math.hypot(x - 0.30, y - 0.20),
+                             navigation.position_tolerance_m + 1e-9)
 
     def test_reverse_endgame_does_not_pivot_toward_lateral_residual(self) -> None:
         """A straight reverse action cannot turn sideways to chase a missed point."""

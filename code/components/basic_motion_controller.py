@@ -22,6 +22,18 @@ SEGMENT_RECOVERY_MAX_SPEED_M_S = 0.10
 SEGMENT_STRONG_GAIN_MULTIPLIER = 2.0
 SEGMENT_MAX_CORRECTION_RAD = math.radians(35.0)
 REVERSE_DISTANCE_MAX_HEADING_DRIFT_RAD = math.radians(20.0)
+# Stop-at-target actions must not command below the drivetrain's effective
+# minimum speed: the deceleration profile reaches zero at the target, and the
+# 2026-10-05 session measured that a reverse move stalls there (a 0.027 m/s
+# command produced 3 mm in 4 s; 0.042 m/s tracked at 76%), leaving the vehicle
+# 3.33 cm short of a 50 cm target.
+#
+# 0.045 m/s sits ~1.7x above the measured stall threshold and its braking
+# distance `v^2 / (2 * max_linear_accel) = 6.75 mm` stays inside the 1 cm
+# position tolerance, so the floor can never itself carry the vehicle past the
+# goal: whichever sample first sees `remaining` inside the tolerance band, the
+# worst-case stop is 6.75 mm short or long of it.
+LINE_MINIMUM_SPEED_M_S = 0.045
 _ZERO = Twist2D(0.0, 0.0)
 
 
@@ -302,7 +314,8 @@ class BasicMotionController:
         correction = _clamp(math.atan(self.navigation.path_yaw_gain * cross), SEGMENT_MAX_CORRECTION_RAD)
         error = normalize_angle_rad(action.start_yaw - direction * correction - pose.yaw_rad)
         diagnostics["heading_error_rad"] = error
-        return self._line_command(error, goal_distance, direction), diagnostics
+        return self._line_command(error, goal_distance, direction,
+                                  min_speed_m_s=LINE_MINIMUM_SPEED_M_S), diagnostics
 
     def _step_drive_to(self, pose, action):
         end = action.args
@@ -321,7 +334,8 @@ class BasicMotionController:
             target_yaw = geometry["segment_yaw_rad"] - correction
         error = normalize_angle_rad(target_yaw - pose.yaw_rad)
         geometry["heading_error_rad"] = error
-        return self._line_command(error, geometry["goal_distance_m"], 1.0), geometry
+        return self._line_command(error, geometry["goal_distance_m"], 1.0,
+                                  min_speed_m_s=LINE_MINIMUM_SPEED_M_S), geometry
 
     def _step_follow_segment(self, pose, action):
         g = self._segment_geometry(action.args[0], action.args[1], pose)
@@ -431,11 +445,13 @@ class BasicMotionController:
         # and never lands inside the position tolerance.
         speed = min(speed, 0.5 * self.drive.max_angular_speed_rad_s * goal_distance)
         speed *= max(0.0, math.cos(error))
+        speed = max(speed, min(self.drive.max_linear_speed_m_s, LINE_MINIMUM_SPEED_M_S))
         omega = _clamp(self.navigation.path_yaw_gain * error, self.drive.max_angular_speed_rad_s)
         self._phase = MotionPhase.ALIGNING
         return Twist2D(direction * speed, omega), error
 
-    def _line_command(self, error, remaining, direction, speed_scale=1.0, yaw_gain_scale=1.0):
+    def _line_command(self, error, remaining, direction, speed_scale=1.0, yaw_gain_scale=1.0,
+                      min_speed_m_s=0.0):
         if abs(error) > self.navigation.rotate_in_place_threshold_rad:
             if not self.drive.allow_in_place_rotation:
                 self._block("in_place_rotation_unavailable")
@@ -445,6 +461,10 @@ class BasicMotionController:
         speed = self.drive.max_linear_speed_m_s * speed_scale
         speed *= min(1.0, remaining / self.navigation.slowdown_distance_m)
         speed *= max(0.25, math.cos(min(abs(error), math.pi / 2.0)))
+        # Applied last so the floor survives the shaping above; only
+        # stop-at-target callers pass it, because segment recovery deliberately
+        # wants a much slower approach.
+        speed = max(speed, min(self.drive.max_linear_speed_m_s, min_speed_m_s))
         omega = _clamp(self.navigation.path_yaw_gain * yaw_gain_scale * error, self.drive.max_angular_speed_rad_s)
         return Twist2D(direction * speed, omega)
 
