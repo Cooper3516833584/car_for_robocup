@@ -328,10 +328,16 @@ class BasicMotionController:
             return _ZERO, geometry
         self._phase = MotionPhase.TRACKING
         if geometry["remaining_m"] < 0.0:
-            target_yaw = math.atan2(end[1] - pose.y_m, end[0] - pose.x_m)
-        else:
-            correction = _clamp(math.atan(self.navigation.path_yaw_gain * geometry["cross_track_error_m"]), SEGMENT_MAX_CORRECTION_RAD)
-            target_yaw = geometry["segment_yaw_rad"] - correction
+            # Past the end point: close the residual with the same approach used by
+            # drive_distance.  Facing a point a few centimetres away made atan2
+            # noise-dominated, and the in-place turn that followed spun the vehicle
+            # (177 deg observed on 2026-10-05) although the goal distance itself was
+            # already inside the position tolerance.
+            command, error = self._approach_goal(pose, end[0], end[1], geometry["goal_distance_m"])
+            geometry["heading_error_rad"] = error
+            return command, geometry
+        correction = _clamp(math.atan(self.navigation.path_yaw_gain * geometry["cross_track_error_m"]), SEGMENT_MAX_CORRECTION_RAD)
+        target_yaw = geometry["segment_yaw_rad"] - correction
         error = normalize_angle_rad(target_yaw - pose.yaw_rad)
         geometry["heading_error_rad"] = error
         return self._line_command(error, geometry["goal_distance_m"], 1.0,
@@ -359,6 +365,14 @@ class BasicMotionController:
             action.recovering = False
             action.recovery_started = False
             exited_recovery = True
+        elif action.recovering and g["remaining_m"] <= 0.0:
+            # Past the end of the segment the recovery exit test (`remaining_m > 0`)
+            # can never come true, so the vehicle kept aligning for the rest of the
+            # deadline (138 deg observed on 2026-10-05).  Hand the endpoint to the
+            # drive_distance approach instead.
+            action.recovering = False
+            action.recovery_started = False
+            return self._segment_endpoint_approach(pose, g, diagnostics)
         elif action.recovering:
             return self._segment_recovery(pose, action, g, diagnostics)
         elif cross > SEGMENT_RECOVERY_ENTER_M or g["remaining_m"] <= 0.0:
@@ -376,7 +390,27 @@ class BasicMotionController:
         command = self._line_command(
             error, max(0.0, g["remaining_m"]), 1.0, scale,
             SEGMENT_STRONG_GAIN_MULTIPLIER if strong else 1.0,
+            min_speed_m_s=LINE_MINIMUM_SPEED_M_S,
         )
+        return command, diagnostics
+
+    def _segment_endpoint_approach(self, pose, geometry, diagnostics):
+        """Close the last centimetres to the segment end without pivoting on it.
+
+        The recovery turn aims at the clamped endpoint, whose bearing is
+        noise-dominated at centimetre range, and its exit test can never be met
+        once the vehicle is past the end of the segment.
+        """
+        command, error = self._approach_goal(
+            pose, geometry["segment_end_x_m"], geometry["segment_end_y_m"],
+            geometry["goal_distance_m"])
+        diagnostics.update({
+            "target_yaw_rad": math.atan2(geometry["segment_end_y_m"] - pose.y_m,
+                                         geometry["segment_end_x_m"] - pose.x_m),
+            "heading_error_rad": error,
+            "speed_scale": 1.0,
+            "recovery_active": False,
+        })
         return command, diagnostics
 
     def _segment_recovery(self, pose, action, geometry, diagnostics):
@@ -440,12 +474,15 @@ class BasicMotionController:
             direction, error = -1.0, normalize_angle_rad(forward_error - math.pi)
         speed = self.drive.max_linear_speed_m_s
         speed *= min(1.0, goal_distance / self.navigation.slowdown_distance_m)
-        # Cap the turn radius v/omega at the remaining gap; with v/omega larger
-        # than ``goal_distance`` the vehicle orbits the goal at a fixed radius
-        # and never lands inside the position tolerance.
-        speed = min(speed, 0.5 * self.drive.max_angular_speed_rad_s * goal_distance)
-        speed *= max(0.0, math.cos(error))
+        # Raise the ramp above the drivetrain's effective minimum speed first ...
         speed = max(speed, min(self.drive.max_linear_speed_m_s, LINE_MINIMUM_SPEED_M_S))
+        speed *= max(0.0, math.cos(error))
+        # ... then cap the turn radius v/omega at the remaining gap.  The cap has
+        # to win: with v/omega larger than ``goal_distance`` the vehicle orbits the
+        # goal at a fixed radius and never lands inside the position tolerance, and
+        # the per-wheel speeds still stay above the stall threshold because the
+        # angular term dominates this close in.
+        speed = min(speed, 0.5 * self.drive.max_angular_speed_rad_s * goal_distance)
         omega = _clamp(self.navigation.path_yaw_gain * error, self.drive.max_angular_speed_rad_s)
         self._phase = MotionPhase.ALIGNING
         return Twist2D(direction * speed, omega), error

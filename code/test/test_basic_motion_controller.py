@@ -94,11 +94,12 @@ class BasicMotionTests(unittest.TestCase):
         """
         x = y = yaw = 0.0
         t = 0.0
+        travel = 0.0
         output = None
         for _ in range(max_steps):
             output = motion.step(Pose2D(x, y, yaw, t), now_s=t, pose_state="ok")
             if output.state is not MotionActionState.RUNNING:
-                return output, (x, y, yaw)
+                return output, (x, y, yaw), travel
             v, w = output.command.linear_x_m_s, output.command.angular_z_rad_s
             left = v - w * track_m / 2.0
             right = v + w * track_m / 2.0
@@ -107,8 +108,9 @@ class BasicMotionTests(unittest.TestCase):
             x += (left + right) / 2.0 * math.cos(yaw) * dt
             y += (left + right) / 2.0 * math.sin(yaw) * dt
             yaw = normalize_angle_rad(yaw + (right - left) / track_m * dt)
+            travel += abs((right - left) / track_m) * dt
             t += dt
-        return None, (x, y, yaw)
+        return None, (x, y, yaw), travel
 
     def test_stop_at_target_commands_at_least_the_drive_minimum(self) -> None:
         """The slow endgame must stay above the drivetrain's effective minimum."""
@@ -131,7 +133,7 @@ class BasicMotionTests(unittest.TestCase):
             motion = BasicMotionController(
                 DifferentialNavigator(config.drive, navigation), navigation, config.drive)
             motion.drive_distance(distance)
-            output, (x, _y, _yaw) = self._run_against_a_deadband(motion, track, 0.030)
+            output, (x, _y, _yaw), _travel = self._run_against_a_deadband(motion, track, 0.030)
             self.assertIsNotNone(output, "action never finished for %+.2f m" % distance)
             self.assertIs(output.state, MotionActionState.SUCCEEDED,
                           "action did not succeed for %+.2f m" % distance)
@@ -145,11 +147,59 @@ class BasicMotionTests(unittest.TestCase):
         motion = BasicMotionController(
             DifferentialNavigator(config.drive, navigation), navigation, config.drive)
         motion.drive_to(0.30, 0.20)
-        output, (x, y, _yaw) = self._run_against_a_deadband(motion, track, 0.030)
+        output, (x, y, _yaw), _travel = self._run_against_a_deadband(motion, track, 0.030)
         self.assertIsNotNone(output, "drive_to never finished against the deadband plant")
         self.assertIs(output.state, MotionActionState.SUCCEEDED)
         self.assertLessEqual(math.hypot(x - 0.30, y - 0.20),
                              navigation.position_tolerance_m + 1e-9)
+
+    def test_drive_to_endgame_keeps_translating_instead_of_pivoting(self) -> None:
+        """Past the end point the residual must be closed by driving, not pivoting.
+
+        Regression: the branch used ``atan2(end - pose)`` for its heading, which at
+        centimetre range is noise-dominated, and the in-place turn that followed
+        spun the vehicle -- 177 deg was observed on the car on 2026-10-05 even
+        though the goal distance itself stayed inside tolerance.
+        """
+        motion = self._tight_motion()
+        motion.drive_to(0.30, 0.20)
+        motion.step(self.pose(), now_s=1.0)
+        # 5 cm past the end point, abeam of it: the goal sits ~90 deg to the side.
+        output = motion.step(self.pose(x=0.30, y=0.25, yaw=math.pi / 2), now_s=1.0)
+        self.assertIs(output.state, MotionActionState.RUNNING)
+        self.assertNotEqual(output.command.linear_x_m_s, 0.0)
+
+    def test_follow_segment_finishes_against_a_deadband_plant(self) -> None:
+        config = load_v2_config()
+        track = config.geometry.drive_track_width_m
+        navigation = replace(config.navigation, position_tolerance_m=0.01)
+        motion = BasicMotionController(
+            DifferentialNavigator(config.drive, navigation), navigation, config.drive)
+        motion.follow_segment((0.0, 0.0), (0.50, 0.0))
+        output, (x, y, _yaw), travel = self._run_against_a_deadband(
+            motion, track, 0.030, max_steps=1200)
+        self.assertIsNotNone(output, "follow_segment never finished against the deadband plant")
+        self.assertIs(output.state, MotionActionState.SUCCEEDED)
+        self.assertLessEqual(math.hypot(x - 0.50, y), navigation.position_tolerance_m + 1e-9)
+        self.assertLess(travel, math.radians(60.0),
+                        "follow_segment turned %.1f deg to finish" % math.degrees(travel))
+
+    def test_follow_segment_past_the_end_hands_over_to_the_endpoint_approach(self) -> None:
+        """Recovery can never exit past the segment end, so it must hand over.
+
+        Regression for the 138 deg spin observed on the car on 2026-10-05: the
+        recovery exit test requires ``remaining_m > 0``, which is never true once
+        the vehicle has passed the end of the segment.
+        """
+        motion = self._tight_motion()
+        motion.follow_segment((0.0, 0.0), (0.50, 0.0))
+        motion.step(self.pose(), now_s=1.0)
+        self.assertIs(motion.step(self.pose(x=0.45, y=0.25), now_s=1.0).phase,
+                      MotionPhase.RECOVERY_ALIGN)
+        output = motion.step(self.pose(x=0.55, y=0.22), now_s=1.0)
+        self.assertIs(output.state, MotionActionState.RUNNING)
+        self.assertIsNot(output.phase, MotionPhase.RECOVERY_ALIGN)
+        self.assertFalse(output.diagnostics["recovery_active"])
 
     def test_reverse_endgame_does_not_pivot_toward_lateral_residual(self) -> None:
         """A straight reverse action cannot turn sideways to chase a missed point."""
