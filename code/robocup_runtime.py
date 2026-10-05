@@ -17,7 +17,7 @@ from components.differential_drive import DifferentialDrive
 from components.basic_motion_controller import BasicMotionController, MotionActionState, MotionOutput
 from components.differential_navigation import DifferentialNavigator, NavigationOutput
 from components.diagnostics_log import JsonlEventLogger
-from components.navigation_common import NavigationGoal, NavigationGrid
+from components.navigation_common import NavigationGoal
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
 from components.pose_log_replay import PoseLogEvent, read_pose_events
 from components.radar_driver import D500_TIMESTAMP_MODULUS_MS
@@ -27,7 +27,6 @@ from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, 
 from components.t265_pose_adapter import T265PoseAdapter
 from config.v2_factory import (
     build_basic_motion_controller,
-    build_competition_world,
     build_differential_drive,
     build_differential_navigator,
     build_pose_fusion,
@@ -249,7 +248,6 @@ class RobocupRuntime:
         clock: Callable[[], float],
         mission_profile: str = "default",
         constraints: RuntimeConstraints | None = None,
-        world: NavigationGrid | None = None,
         event_logger: JsonlEventLogger | None = None,
         replay_events: tuple[PoseLogEvent, ...] = (),
         relay=None,
@@ -274,7 +272,6 @@ class RobocupRuntime:
         self.mission = RobocupMission(navigator, mission_profile, self.motion)
         self.clock = clock
         self.constraints = constraints or runtime_constraints(config, mode)
-        self.world = world
         self.event_logger = event_logger
         self._replay_events = replay_events
         self._replay_index = 0
@@ -411,7 +408,6 @@ class RobocupRuntime:
             }:
                 motion_output = self.motion.step(
                     estimate.pose,
-                    self.world,
                     now_s=now,
                     pose_state=estimate.state,
                 )
@@ -1094,7 +1090,6 @@ def build_runtime(
     mission_profile: str = "default",
     clock: Callable[[], float] = time.monotonic,
     fake_sample_count: int = 32,
-    world: NavigationGrid | None = None,
     event_logger: JsonlEventLogger | None = None,
     sensor_only: bool = False,
 ) -> RobocupRuntime:
@@ -1198,13 +1193,6 @@ def build_runtime(
         d500_fake = False
 
     constraints = runtime_constraints(config, mode)
-    # Dry-run uses a clearly synthetic open field so the full planner can be
-    # exercised without implying that hardware has a surveyed competition map.
-    if world is None:
-        if mode is RuntimeMode.DRY_RUN:
-            world = NavigationGrid(120, 120, 0.1, origin_x_m=-6.0, origin_y_m=-6.0)
-        elif mode in {RuntimeMode.HARDWARE_MISSION, RuntimeMode.REPLAY}:
-            world = build_competition_world(config)
     runtime = RobocupRuntime(
         config,
         mode,
@@ -1220,7 +1208,6 @@ def build_runtime(
         clock=clock,
         mission_profile=mission_profile,
         constraints=constraints,
-        world=world,
         event_logger=event_logger,
         replay_events=tuple(replay_events),
         relay=relay,

@@ -66,7 +66,7 @@ The differential module boundaries follow common linorobot2 interface ideas but 
 
 ## Measurements and calibration
 
-The example profile contains software-test placeholders only. Record actual wheel geometry, body footprint, sensor extrinsics, motor signs, and C10B protocol behavior in [docs/HARDWARE_MEASUREMENTS.md](docs/HARDWARE_MEASUREMENTS.md), then follow [docs/CALIBRATION.md](docs/CALIBRATION.md). Do not set measured flags based on the example values. T265 SDK import remains optional and is needed only when starting a real T265 source.
+The example profile contains software-test placeholders only. Record actual wheel geometry, sensor extrinsics, motor signs, and C10B protocol behavior in [docs/HARDWARE_MEASUREMENTS.md](docs/HARDWARE_MEASUREMENTS.md), then follow [docs/CALIBRATION.md](docs/CALIBRATION.md). Do not infer verified calibration from the example values. Relative navigation uses the current fused pose frame and a direct path; it does not provide static-map obstacle avoidance. T265 SDK import remains optional and is needed only when starting a real T265 source.
 
 ## Removed legacy stack
 

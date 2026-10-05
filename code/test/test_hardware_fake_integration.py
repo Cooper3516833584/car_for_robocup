@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from components.c10b_diff_backend import FakeDriveBackend
 from components.differential_drive import DifferentialDrive
 from components.differential_kinematics import DifferentialGeometry
-from components.navigation_common import NavigationGoal, NavigationGrid
+from components.navigation_common import NavigationGoal
 from components.radar_driver import Pose2D as RadarPose2D
 from components.t265_driver import T265RawPose
 from config.v2_loader import load_v2_config
@@ -31,9 +31,6 @@ def ready_config():
     source = load_v2_config()
     return replace(
         source,
-        calibration=replace(source.calibration, geometry_measured=True, sensor_extrinsics_measured=True),
-        competition_map=replace(source.competition_map, measured=True),
-        footprint=replace(source.footprint, measured=True),
         d500_localization=replace(source.d500_localization, reference_measured=True),
     )
 
@@ -96,7 +93,6 @@ class HardwareFakeIntegrationTests(unittest.TestCase):
                 config,
                 RuntimeMode.HARDWARE_MISSION,
                 clock=clock,
-                world=NavigationGrid(120, 120, 0.1, origin_x_m=-6.0, origin_y_m=-6.0),
             )
         return runtime
 
@@ -187,19 +183,6 @@ class HardwareFakeIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(anchored.navigation)
         self.assertTrue(runtime.drive.backend.commands)
         runtime.close()
-
-    def test_competition_map_builder_failure_refuses_runtime(self) -> None:
-        config = ready_config()
-        clock = FakeClock(40.0)
-        with (
-            patch.object(robocup_runtime, "build_differential_drive", side_effect=lambda cfg, **_: make_drive(cfg, clock)),
-            patch.object(robocup_runtime, "RealSenseT265PoseSource", return_value=FakeT265()),
-            patch("components.radar_driver.D500RadarComponent", return_value=FakeD500()),
-            patch.object(robocup_runtime, "build_competition_world", side_effect=ValueError("invalid field map")),
-        ):
-            with self.assertRaisesRegex(ValueError, "invalid field map"):
-                robocup_runtime.build_runtime(config, RuntimeMode.HARDWARE_MISSION, clock=clock)
-
 
 if __name__ == "__main__":
     unittest.main()

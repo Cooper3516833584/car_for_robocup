@@ -74,12 +74,14 @@ Task code that calls `build_runtime()` directly must apply
 the T265 confidence threshold 2/3, enables the D500 complete-scan SLAM path,
 and does not require a fixed-wall field anchor. The fused pose is passed to
 `runtime.motion.step()` for pending `drive_distance()` and `rotate()` actions.
-The CLI rejects `--goal-*` field coordinates in this mode; selecting the
-localization profile alone does not enqueue a movement.
+In this mode, `--goal-x`, `--goal-y`, and optional `--goal-yaw` refer to the
+current fused pose frame. Selecting the localization profile alone does not
+enqueue a movement. Direct navigation follows the start-to-goal line; it does
+not check a static map, enforce a footprint, or avoid obstacles.
 
 The user has accepted the relative localization chain for task use. The
 profile leaves the board configuration file untouched. Hardware mission
-readiness still checks measured drive geometry, sensor extrinsics, the task
-map and robot footprint, and the C10B firmware mode. At run time, motion waits
-for a fresh accepted SLAM anchor and stops on localization loss. Start the ROS
-launch separately and verify its topics before a supervised mission run.
+readiness still checks localization and the C10B firmware mode. At run time,
+motion waits for a fresh accepted SLAM anchor and stops on localization loss.
+Start the ROS launch separately and verify its topics before a supervised
+mission run in a cleared area.

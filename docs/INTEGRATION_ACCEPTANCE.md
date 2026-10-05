@@ -65,19 +65,19 @@ Acceptance: direction, distance scale, turn direction, stop and backend accept/r
 
 ## Stage 6 — localization closed loop
 
-With a verified map and low speed, approach front-left, front-right, straight-ahead, and position-fixed yaw-only goals. Record position/yaw error, settle time, overshoot, T265 confidence, and D500 innovation. Do not claim accuracy tighter than the measurements support.
+In a cleared area and at low speed, approach front-left, front-right, straight-ahead, and position-fixed yaw-only goals in the current fused pose frame. Record position/yaw error, settle time, overshoot, T265 confidence, and D500 innovation. Do not claim accuracy tighter than the measurements support.
 
 Acceptance: goals settle repeatably, final yaw is handled separately, and degraded localization reduces speed while lost localization stops the base.
 
-## Stage 7 — obstacles and planning
+## Stage 7 — direct-navigation boundary
 
-Use fixed obstacles in a controlled test area. Check path around an obstacle, inflated footprint clearance, map boundary clearance, obstacle appearance during motion, and a no-path case.
+Direct relative navigation does not use a static occupancy grid or plan around obstacles. Keep the test area cleared, supervise every motion, and verify that localization loss and operator stop produce zero base command. Do not treat a successful straight-line run as obstacle-avoidance acceptance.
 
-Acceptance: paths preserve footprint clearance; blocked/no-path conditions stop safely and never drive through unknown cells.
+Acceptance: the base stops on lost localization or an operator stop; no map or obstacle-avoidance capability is claimed.
 
 ## Stage 8 — mission integration
 
-Only after Stages 0–7 pass and the readiness gate accepts measured geometry/extrinsics, connect recognition, payload actions, and return goals. Confirm payload work holds zero base command and pose loss prevents both movement and payload release. If a relay payload action is added, its channel mapping and its failure behavior (a failed verified switch must not silently continue the mission) must be recorded here; dry-run and replay use the in-memory relay and never open the port.
+Only after Stages 0–7 pass and the remaining localization and firmware readiness gates accept the profile, connect recognition, payload actions, and return goals. Confirm payload work holds zero base command and pose loss prevents both movement and payload release. If a relay payload action is added, its channel mapping and its failure behavior (a failed verified switch must not silently continue the mission) must be recorded here; dry-run and replay use the in-memory relay and never open the port.
 
 ## Current status
 

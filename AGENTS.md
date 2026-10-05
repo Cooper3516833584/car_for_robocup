@@ -34,6 +34,7 @@ the repository.
 - `code/core/` owns canonical SI types, frame math, health, and monotonic-time contracts; it must not import hardware drivers.
 - `code/components/differential_kinematics.py` is pure math. `DifferentialDrive` is the only differential motion-output facade and owns limiting, acceleration shaping, watchdog, and safe stop.
 - Differential navigation emits `Twist2D`; it must not write serial frames or import steering/Ackermann components.
+- Relative SLAM navigation uses a direct start-to-goal path in the current fused pose frame. Do not reintroduce static-grid A*, map/footprint path gates, or measured map/footprint readiness requirements without an explicit user request. This path does not avoid obstacles.
 - T265 and D500 callbacks provide measurements only. They must never call the motor driver.
 - Pose fusion stays independent of navigation and mission strategy.
 - New hardware behavior belongs behind an adapter or backend; avoid rewriting validated D500 packet parsing/ICP or the C10B low-level frame sender without a reproduced defect and regression coverage.

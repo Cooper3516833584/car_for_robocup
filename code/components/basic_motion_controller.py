@@ -11,7 +11,7 @@ from core.frames import normalize_angle_rad
 from core.types import Pose2D, Twist2D
 
 from .differential_navigation import DifferentialNavigator, NavigationOutput, NavigationState
-from .navigation_common import NavigationGoal, NavigationGrid
+from .navigation_common import NavigationGoal
 
 
 SEGMENT_STRONG_ENTER_M = 0.10
@@ -189,7 +189,7 @@ class BasicMotionController:
         self._diagnostics = {"reason": str(reason)}
         self.last_navigation_output = None
 
-    def step(self, pose: Pose2D | None, grid: NavigationGrid | None, *, now_s: float, pose_state: object = "ok") -> MotionOutput:
+    def step(self, pose: Pose2D | None, *, now_s: float, pose_state: object = "ok") -> MotionOutput:
         _finite(now_s)
         action = self._active
         if action is None:
@@ -202,7 +202,7 @@ class BasicMotionController:
             return self._output(_ZERO, {"reason": "pose_unavailable", "pose_state": str(state_name)})
         self._state = MotionActionState.RUNNING
         if action.kind in {MotionActionType.NAVIGATE_TO, MotionActionType.NAVIGATE_TO_POSE}:
-            return self._step_navigation(pose, grid, now_s, pose_state)
+            return self._step_navigation(pose, now_s, pose_state)
         if not action.initialized:
             action.start = (pose.x_m, pose.y_m)
             action.start_yaw = pose.yaw_rad
@@ -233,8 +233,8 @@ class BasicMotionController:
             command = Twist2D(command.linear_x_m_s * scale, command.angular_z_rad_s * scale)
         return self._output(command, diagnostics)
 
-    def _step_navigation(self, pose, grid, now_s, pose_state):
-        result = self.navigator.step(pose, grid, now_s=now_s, pose_state=pose_state)
+    def _step_navigation(self, pose, now_s, pose_state):
+        result = self.navigator.step(pose, now_s=now_s, pose_state=pose_state)
         self.last_navigation_output = result
         self._phase = {
             NavigationState.ROTATING_TO_PATH: MotionPhase.ALIGNING,

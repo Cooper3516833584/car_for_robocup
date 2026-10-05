@@ -35,17 +35,11 @@ class RelativeSlamTaskTests(unittest.TestCase):
         self.assertEqual(config.calibration, source.calibration)
         self.assertEqual(config.safety, source.safety)
         self.assertEqual(config.drive, source.drive)
-        self.assertEqual(config.competition_map, source.competition_map)
 
-    def test_relative_hardware_readiness_keeps_nonlocalization_gates(self):
+    def test_relative_hardware_readiness_keeps_localization_gates(self):
         config = accepted_relative_slam_profile(load_v2_config())
         errors = validate_runtime_readiness(config, RuntimeMode.HARDWARE_MISSION)
-        self.assertTrue(any("measured drive geometry" in reason for reason in errors))
-        self.assertTrue(any("measured sensor extrinsics" in reason for reason in errors))
-        self.assertTrue(any("measured competition map" in reason for reason in errors))
-        self.assertTrue(any("measured robot footprint" in reason for reason in errors))
-        self.assertFalse(any("field anchor" in reason or "wall" in reason or "D500 field" in reason
-                             for reason in errors))
+        self.assertEqual(errors, [])
         unqualified = replace(config, localization=replace(
             config.localization, slam=replace(config.localization.slam, relative_goals_only=False)))
         self.assertTrue(any("relative_goals_only" in reason for reason in
@@ -89,9 +83,13 @@ class RelativeSlamTaskTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_cli_rejects_field_goals_before_hardware_build(self):
-        self.assertEqual(main(["--relative-slam", "--mode", "hardware-mission",
-                               "--goal-x", "1", "--goal-y", "0"]), 2)
+    def test_cli_accepts_current_fused_frame_goal(self):
+        self.assertEqual(main(["--relative-slam", "--mode", "dry-run",
+                               "--goal-x", "-2", "--goal-y", "3",
+                               "--goal-yaw", "1", "--steps", "2"]), 0)
+
+    def test_cli_yaw_requires_position_goal(self):
+        self.assertEqual(main(["--mode", "dry-run", "--goal-yaw", "1"]), 2)
 
     def test_hardware_mission_defaults_to_relative_fusion(self):
         with patch("main_robocup.build_runtime", side_effect=RuntimeReadinessError("test gate")) as builder:
