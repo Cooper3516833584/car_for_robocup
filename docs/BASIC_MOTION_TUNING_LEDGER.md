@@ -860,3 +860,51 @@ python3 tools/closed_loop_analyze.py $RUN/s1_drive_fwd_20cm
 | 后退 −50 cm ×3 | **3/3 达标**（−0.07 / +0.18 / −0.12 cm） |
 | 左转 +90° ×3 | 0/3（4 条样本中 2 条在 1° 内；受 T265 偏航估计限制） |
 | 右转 −90° ×3 | 0/3（3 条样本中 1 条在 1° 内；受 T265 偏航估计限制） |
+
+## 附录六：`drive_to` / `follow_segment` 末段修复（代码轮次 2）
+
+对应提交 `9293d50 Close the drive_to and follow_segment endgames without pivoting`（本地改 → push → 板端 pull）。
+日志根目录：`/home/radxa/car_test_logs/closed_loop_motion_20261005_05/`。
+
+### 改动
+
+| 位置 | 旧行为 | 新行为 |
+| --- | --- | --- |
+| `_step_drive_to` 越过终点分支 | `target_yaw = atan2(end - pose)` + `_line_command`（|角差| 大时原地转） | 复用 `_approach_goal`（按方位选车体方向、边转边走） |
+| `_step_follow_segment` 越过线段终点 | 进入恢复；而恢复的退出条件是 `cross ≤ 0.15 且 remaining > 0`，**越过终点后永远不成立** → 一直转到超时 | 越过终点即移交 `_segment_endpoint_approach`（= `_approach_goal`） |
+| `_step_follow_segment` 跟踪/强修正分支 | `_line_command` 未传最低速度下限 | 补 `min_speed_m_s=LINE_MINIMUM_SPEED_M_S`（死区仿真里曾停在 0.0299 m/s、差 7.5 cm 不动） |
+| `_approach_goal` | 下限写在曲率上限**之后**，把曲率上限顶掉 | 改为"先抬到下限、再由曲率上限封顶"（否则 3 cm 处转弯半径 0.15 m，只能绕圈） |
+
+无硬件回归 3 项：`drive_to` 末段保持平移而不原地转、`follow_segment` 在死区被控对象下完成且总转角 <60°、
+越过终点移交端点接近。**3 项在修复前代码上全部失败，修复后通过**；全套 **618 tests OK**。
+
+### 现场验证
+
+| 动作 | 修复前（附录三） | 修复后 | 终点距离 | 横向 | 用时 |
+| --- | --- | --- | --- | --- | --- |
+| `drive-to (30, 30)` | 相对偏航 **+177.30°**，18.0 s | 相对偏航 **+44.21°**（T265 +44.00°；目标方位角本就是 45°） | **7.4 mm** | +30.74 cm | 8.3 s |
+| `follow-segment (50, 0)` | 相对偏航 **−137.67°**，22.2 s，需绕完 `recovery_align/return` | 相对偏航 **−0.030°**（T265 −0.245°），相位 `tracking → done` | **6.3 mm** | −6.1 mm | 7.7 s |
+
+即两个动作的终点自转从 177°/−138° 降到几何上应有的 44°/0°，位置精度同时保持在毫米级。
+
+### 本轮的作废样本
+
+| 样本 | 原因 |
+| --- | --- |
+| `e1_driveto` | `healthy fused pose lost during action`：SLAM 锚点新息 0.1028 m，刚过 0.10 m 门限（问题 #4，第 5 次同类中止） |
+| `f1_fwd50` | **场地空间不足**（操作者判定），30 s 超时；不计入数据 |
+
+### 修复 1 的六条达标样本在 `9293d50` 上依然有效的依据
+
+- `git diff 5f13498 9293d50` 的改动范围只有 `_step_drive_to`、`_step_follow_segment`
+  （含新增 `_segment_endpoint_approach`）与 `_approach_goal` 四处，**未触及 `_step_drive_distance` 与 `_line_command`**。
+- 六条样本（`a3` / `a4` / `a7` / `b1` / `b2` / `b3`）的相位集合均为 `['done', 'initializing']`，
+  **没有出现 `aligning`**，说明它们全程只走了 `_step_drive_distance` 的跟踪分支，从未进入 `_approach_goal`。
+- 因此这六条在 `9293d50` 上的代码路径与 `5f13498` 完全相同，成绩仍然成立；后续若现场空间允许，可再取一条作为抽样确认。
+
+### 未完成
+
+1. 左转 +90° ×3、右转 −90° ×3：受 T265 偏航估计限制（附录五），不是运动控制问题。
+2. 问题 #4（SLAM 锚点 0.10–0.33 m 离群导致入口提前中止）：本轮又发生 1 次（`e1_driveto`），累计 5 次；
+   迁移需要 3 帧共识 + 0.5 s，而入口约 0.16 s 就判定"融合位姿失效"。
+3. 阶段 4 未全部按三次补齐，未写"内部闭环验收通过"。
