@@ -88,41 +88,104 @@ class TaskBoardStartupTests(unittest.TestCase):
         self.assertEqual(events[0]["votes"], 3)
         self.assertGreater(events[0]["turn_time_ms"], 0)
 
-    def test_invalid_ocr_stops_and_never_assigns_counts(self):
-        self.reader.recognize_camera.side_effect = lambda camera: TaskBoardResult(None, 0, reason="empty OCR")
-        result = self.acquire()
-        self.assertIsNone(result.task)
+    def assert_fallback(self, result, reason):
+        self.assertTrue(result.valid, result.reason)
+        self.assertEqual(result.counts, TaskCounts(1, 2, 1))
+        self.assertEqual(self.runtime.mission.task_counts, TaskCounts(1, 2, 1))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.READY)
+        self.assertEqual(result.source, "fallback_1_2_1")
+        self.assertEqual((result.confidence, result.votes), (0.0, 0))
+        self.assertIn(reason, result.reason)
+        twist = self.runtime.drive.last_limited_twist
+        self.assertEqual((twist.linear_x_m_s, twist.angular_z_rad_s), (0, 0))
+        events = [event for event in self.events if event["type"] == "task_board_recognition_fallback"]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["fallback"])
+        self.assertEqual((events[0]["red"], events[0]["blue"], events[0]["green"]), (1, 2, 1))
+        self.assertFalse(any(event["type"] in {"task_board_startup_fatal", "task_board_recognition"}
+                             for event in self.events))
+        return events[0]
+
+    def assert_fatal(self, result):
+        self.assertFalse(result.valid)
         self.assertIsNone(self.runtime.mission.task_counts)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist.angular_z_rad_s, 0)
-        self.assertTrue(any(event["type"] == "task_board_recognition_failed" for event in self.events))
+        self.assertTrue(any(event["type"] == "task_board_startup_fatal" for event in self.events))
+        self.assertFalse(any(event["type"] == "task_board_recognition_fallback" for event in self.events))
 
-    def test_ocr_exception_stops(self):
+    def test_invalid_ocr_uses_fallback_and_continues(self):
+        self.reader.recognize_camera.side_effect = lambda camera: TaskBoardResult(
+            None, 0.37, ("original OCR",), board_quad=((1, 2), (3, 2), (3, 4), (1, 4)),
+            source="rectified", reason="empty OCR", votes=2,
+        )
+        result = self.acquire()
+        event = self.assert_fallback(result, "empty OCR")
+        self.assertEqual(result.raw_lines, ("original OCR",))
+        self.assertIsNotNone(result.board_quad)
+        self.assertEqual(event["original_confidence"], 0.37)
+        self.assertEqual(event["original_votes"], 2)
+        self.assertEqual(event["original_raw_lines"], ("original OCR",))
+
+    def test_ocr_exception_uses_fallback(self):
         self.reader.recognize_camera.side_effect = OSError("camera disconnected")
         result = self.acquire()
-        self.assertIn("camera disconnected", result.reason)
-        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        event = self.assert_fallback(result, "OSError: camera disconnected")
+        self.assertIsNone(event["original_confidence"])
+        self.assertEqual(event["original_votes"], 0)
 
-    def test_only_one_vote_is_rejected(self):
+    def test_only_one_vote_uses_fallback(self):
         self.reader.recognize_camera.side_effect = lambda camera: TaskBoardResult(TaskCounts(2, 1, 1), 0.99, votes=1)
-        self.assertFalse(self.acquire().valid)
-        self.assertIsNone(self.runtime.mission.task_counts)
+        event = self.assert_fallback(self.acquire(), "1/3")
+        self.assertEqual(event["original_votes"], 1)
+
+    def test_two_votes_use_fallback(self):
+        self.reader.recognize_camera.side_effect = lambda camera: TaskBoardResult(TaskCounts(0, 3, 1), 0.99, votes=2)
+        self.assert_fallback(self.acquire(), "2/3")
+
+    def test_perception_failure_reasons_use_fallback(self):
+        reasons = ("no board", "no usable OCR text", "camera cannot open", "no frames supplied",
+                   "missing color counts", "ambiguous count", "conflicting OCR values", "consensus not reached")
+        for index, reason in enumerate(reasons):
+            with self.subTest(reason=reason):
+                if index:
+                    self.doCleanups()
+                    self.setUp()
+                self.reader.recognize_camera.side_effect = lambda camera: TaskBoardResult(None, 0, reason=reason, votes=0)
+                self.assert_fallback(self.acquire(), reason)
+
+    def test_valid_result_never_uses_fallback(self):
+        result = self.acquire()
+        self.assertEqual(result.counts, TaskCounts(0, 3, 1))
+        self.assertNotEqual(result.source, "fallback_1_2_1")
+        self.assertFalse(any(event["type"] == "task_board_recognition_fallback" for event in self.events))
+
+    def test_valid_synthetic_counts_are_real_recognition(self):
+        self.reader.recognize_camera.side_effect = lambda camera: TaskBoardResult(
+            TaskCounts(2, 1, 1), 0.95, source="rectified", votes=3,
+        )
+        result = self.acquire()
+        self.assertEqual(result.counts, TaskCounts(2, 1, 1))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.READY)
+        self.assertEqual(result.source, "rectified")
+        self.assertFalse(any(event["type"] == "task_board_recognition_fallback" for event in self.events))
 
     def test_localization_timeout_does_not_open_camera(self):
         self.never_ready = True
         result = self.acquire(timeout_s=0.2)
+        self.assert_fatal(result)
         self.assertIn("timed out", result.reason)
         self.reader.recognize_camera.assert_not_called()
 
     def test_turn_timeout_does_not_open_camera(self):
         self.never_turn = True
-        self.assertFalse(self.acquire(timeout_s=0.25).valid)
+        self.assert_fatal(self.acquire(timeout_s=0.25))
         self.reader.recognize_camera.assert_not_called()
         self.assertEqual(self.runtime.drive.last_limited_twist.angular_z_rad_s, 0)
 
     def test_blocked_rotation_does_not_open_camera(self):
         self.runtime.motion.drive = replace(self.runtime.motion.drive, allow_in_place_rotation=False)
-        self.assertFalse(self.acquire().valid)
+        self.assert_fatal(self.acquire())
         self.reader.recognize_camera.assert_not_called()
 
     def test_keyboard_interrupt_stops_before_propagating(self):
@@ -138,13 +201,82 @@ class TaskBoardStartupTests(unittest.TestCase):
             self.lose_pose = True
             return result
         self.reader.recognize_camera.side_effect = read_and_lose
-        self.assertFalse(self.acquire().valid)
+        self.assert_fatal(self.acquire())
         self.assertIsNone(self.runtime.mission.task_counts)
+
+    def test_localization_loss_after_invalid_ocr_is_fatal(self):
+        def read_and_lose(camera):
+            self.lose_pose = True
+            return TaskBoardResult(None, 0, reason="empty OCR")
+        self.reader.recognize_camera.side_effect = read_and_lose
+        self.assert_fatal(self.acquire())
+
+    def test_localization_loss_after_ocr_exception_is_fatal(self):
+        def read_and_lose(camera):
+            self.lose_pose = True
+            raise RuntimeError("model failed")
+        self.reader.recognize_camera.side_effect = read_and_lose
+        self.assert_fatal(self.acquire())
+
+    def test_runtime_error_during_ocr_is_not_masked_by_fallback(self):
+        def read_and_fail(camera):
+            self.runtime.mission.request_error("backend failed")
+            return TaskBoardResult(None, 0, reason="empty OCR")
+        self.reader.recognize_camera.side_effect = read_and_fail
+        self.assert_fatal(self.acquire())
+
+    def test_localization_loss_during_rotation_does_not_open_camera(self):
+        original_estimate = self.estimate
+        def estimate_and_lose(now):
+            if self.turn_steps >= 1:
+                self.lose_pose = True
+            return original_estimate(now)
+        self.runtime.fusion.estimate.side_effect = estimate_and_lose
+        self.assert_fatal(self.acquire(timeout_s=1.0))
+        self.reader.recognize_camera.assert_not_called()
+
+    def test_system_exit_stops_before_propagating(self):
+        self.reader.recognize_camera.side_effect = SystemExit(3)
+        with self.assertRaises(SystemExit):
+            self.acquire()
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist.angular_z_rad_s, 0)
+
+    def test_invalid_parameters_are_fatal(self):
+        self.assert_fatal(self.acquire(timeout_s=-1))
+        self.reader.recognize_camera.assert_not_called()
 
     def test_existing_motion_is_not_replaced(self):
         self.runtime.motion.drive_distance(1)
-        self.assertFalse(self.acquire().valid)
+        self.assert_fatal(self.acquire())
         self.reader.recognize_camera.assert_not_called()
+
+    def test_refresh_failure_after_ocr_exception_is_fatal(self):
+        with patch.object(self.runtime, "step", wraps=self.runtime.step) as stepper:
+            def read_and_break_backend(camera):
+                stepper.side_effect = RuntimeError("backend step failed")
+                raise OSError("camera failed")
+            self.reader.recognize_camera.side_effect = read_and_break_backend
+            result = self.acquire()
+        self.assert_fatal(result)
+        self.assertIn("backend step failed", result.reason)
+
+    def test_cli_fallback_warns_and_runs_the_remaining_mission(self):
+        self.reader.recognize_camera.side_effect = OSError("camera disconnected")
+        def startup(runtime, reader, **kwargs):
+            return acquire_task_board(runtime, reader, sleep=self.sleep, **kwargs)
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch("main_robocup.JsonlEventLogger", return_value=self.runtime.event_logger), \
+             patch("components.task_board_reader.TaskBoardReader", return_value=self.reader), \
+             patch("task_board_startup.acquire_task_board", side_effect=startup), \
+             patch.object(self.runtime, "run") as run, self.assertLogs(level="WARNING") as logged:
+            code = main(["--mode", "hardware-mission", "--task-board-camera", "/dev/v4l/by-id/task-camera",
+                         "--task-board-turn-deg", "90"])
+        self.assertEqual(code, 0)
+        run.assert_called_once()
+        self.assertEqual(self.runtime.mission.task_counts, TaskCounts(1, 2, 1))
+        self.assertTrue(any("using fallback" in line for line in logged.output))
+        self.assertFalse(any("ERROR" in line for line in logged.output))
 
     def test_counts_can_only_be_set_once(self):
         self.runtime.mission.set_task_counts(TaskCounts(1, 3, 0))

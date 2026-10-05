@@ -6,8 +6,9 @@
 ```text
 等待定位 READY → 按实测角转向 → TARGET_OPERATION 停车
 → 持续 step() 检查定位并停稳 0.3 s → 相机预热 6 帧
-→ 最多识别 10 帧，3 票一致接受 → 再检查定位
-→ 保存 mission.task_counts 和识别日志 → READY，继续原任务流程
+→ 相机/OCR 识别（普通视觉异常也保留原因）→ 再 step() 检查定位及底盘安全
+→ 3 票一致使用真实结果；纯视觉失败使用 1/2/1
+→ 保存 mission.task_counts 和来源日志 → READY，继续原任务流程
 ```
 
 启动此命令就是操作员在裁判开始后的触发动作；代码不监听裁判信号，也不自动判断遮板是否揭开。
@@ -19,19 +20,36 @@
 `TaskCounts(red, blue, green)` 只接受整数 0..4，且总和必须为 4。
 OCR 支持阿拉伯数字、零/〇/一/二/两/三/四、繁体颜色及同一行多个 OCR box。
 数量不能越过下一颜色锚点；多位数、负数、小数、越界数字和同颜色冲突会明确失败。
+颜色 span 内优先按投入/投放/需投、物资数量/数量、N 个或件（救援）物资等语义找数量，
+不再限制颜色后 16 个字符，也不取第一个区域编号。没有数量语义时，所有合法数量
+必须只有一个唯一值；多个不同值直接报歧义，不能用总数补全掩盖。
+跨 OCR 行先组完整颜色 span，避免上一行的“1号地块”覆盖下一行的“投入2个物资”。
 
 只缺一个颜色时，可根据总和唯一补全，降低 confidence 并记录 inferred_colors；
-两个颜色缺失不能补全。业务流程只接受默认 3 票一致结果；单张图片工具只做
-单帧检查，不能将其 votes=1 的结果直接当作比赛开局验收。
+两个颜色缺失不能补全。真实识别要求默认 3 票一致；单张图片工具只做单帧检查，
+不能将其 votes=1 的结果直接当作比赛开局验收。TaskBoardReader 和离线工具的失败
+始终是 invalid，没有固定默认任务。正式 startup 才采用下面的比赛兜底策略。
 
-定位/转向默认超时 30 s；无法转向、相机/OCR 异常、票数不足或识别后定位丢失均
-请求 SAFE_STOP，不赋值任务。KeyboardInterrupt 先停车再交给主入口清理。
+正常识别永远使用真实数量，包括 0/3/1、2/1/1 及其他合法组合。
+只有任务板视觉失败（无板、无 OCR 文本、模型/相机普通 Exception、相机无法打开或
+没有有效帧、解析失败/版式歧义、无一致结果或只有 1–2 票）使用 TaskCounts(1, 2, 1)。
+车辆转向完成且已停稳后，无论 OCR 成功、invalid 或普通 Exception，都重新 runtime.step()；
+确认定位有效、runtime 非 ERROR/SAFE_STOP、motion 已成功且输出为零，才能接受真实任务
+或使用兜底，再通过 on_payload_action_done() 回到 READY。
+
+定位/转向默认超时 30 s。定位 READY 超时、转向失败/超时/被底盘阻止、转向或识别期间
+定位丢失、runtime ERROR/SAFE_STOP、已有 motion、重复赋任务及非法参数，仍然请求
+SAFE_STOP，不赋新任务。KeyboardInterrupt 和 SystemExit 先停车再传播，绝不转兜底。
 相机在识别或异常后释放，后续视觉可再占用。OCR 的相机 read 和模型执行是阻塞调用，
 30 s 超时只约束定位、转向和停稳阶段；识别阶段底盘已停车。
 
-成功事件 `task_board_recognition` 含 red/blue/green、confidence、votes、
-inferred_colors、raw_lines、转向角及各阶段耗时；失败事件
-`task_board_recognition_failed` 含 reason。启用后如未设置 `--log-dir`，
+成功事件 `task_board_recognition` 含真实数量、source、fallback=false、confidence、votes、
+inferred_colors、raw_lines、转向角及各阶段耗时。视觉兜底单独记录
+`task_board_recognition_fallback`，source 固定为 `fallback_1_2_1`，fallback=true，
+保留失败 reason、original_confidence、original_votes、original_raw_lines、original_source
+及耗时。返回结果 valid=true、confidence=0.0、votes=0，保留原始文字/板面边框，
+不会把默认任务伪装成 OCR 成功。主入口打印 warning 后继续比赛。
+安全失败事件为 `task_board_startup_fatal`，返回 invalid。启用后如未设置 `--log-dir`，
 识别日志默认在 `logs/task-board/events.jsonl`。任务分配策略仍由后续任务模块
 单独记录 `task_allocation`，本组件不决定小车/无人机分工。
 
@@ -109,7 +127,22 @@ cd /home/radxa/car
 `main_robocup` 目前的默认硬件定位采用 relative SLAM；`--goal-*` 按当前融合
 位姿坐标系解释。该直线导航不使用静态地图，也不提供障碍避让。
 
-## 2026-10-05 验收记录
+## 视觉失败兜底修复验收（2026-10-05）
+
+- 本次基于最新主分支 `9293d5047e194cda43990b69ed7e954075074363`，
+  保留该分支已有导航、定位和底盘改动；仅修改本链路的六个文件。
+- reader 专项 34 项、startup 专项 24 项、全仓 637 项测试全部通过；
+  compileall 与 git diff --check 通过。全部 15 种合法数量组合测试仍在。
+- 新增语义数量、长颜色 span、编号歧义、跨行 OCR、完整非法数值等解析回归；
+  startup 覆盖真实 0/3/1 和 2/1/1、视觉失败/普通异常/1–2 票兜底、
+  OCR 异常后安全刷新、转向及 OCR 定位丢失、runtime 故障和中断停车。
+- 对原始 synthetic 数据用真实 RapidOCR 复测：12/12 标注视角均为 2/1/1，
+  source 均为 rectified，无颜色推断；几何检测 12/12 通过。
+  测试图片、验证工具 expected、TaskCounts 约束和模型/依赖版本未修改。
+- 后续部署遵循根目录 AGENTS.md：PC 提交并推送 GitHub，板端干净 main
+  仅执行 git pull --ff-only，在实际任务环境进行无硬件单测和静态图片 OCR。
+
+## 初次实现验收记录（2026-10-05，本次兜底修复前）
 
 - 任务包调研基线：`792d9090161a0f401250fa38a31228d015f92642`。
 - 本地实际基线/当前 HEAD：`81d67fb470b0bde6e90a3a796f497ae3f8bff087`；已审查后续差异并适配，未回退。

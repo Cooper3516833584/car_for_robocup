@@ -51,6 +51,59 @@ def token(text: str, score: float = 0.95, y: float = 0.0) -> OCRToken:
 
 
 class ParserTests(unittest.TestCase):
+    def test_count_is_bound_to_quantity_semantics_not_first_number(self):
+        result = parse_task_tokens([OCRToken(
+            "红色1号地块需要投入2个物资 蓝色2号地块需要投入1个物资 绿色3号地块需要投入1个物资"
+        )])
+        self.assertEqual(result.counts, TaskCounts(2, 1, 1), result.reason)
+
+    def test_quantity_layouts_and_long_color_spans(self):
+        red_spans = (
+            "自由投放区域需要投入2个救援物资", "区域物资数量：2", "区域 2 个物资",
+            "区域 2 件救援物资", "区域数量：2", "区域需投：二个物资",
+            "区域需投入：两件物资", "区域需投放，兩个物资", "区域投放（2）个物资",
+            "区域需要投放2个物资", "1号区域投入2", "区域2", "2号区域2号位置",
+            "自由投放区域这是长度超过原先十六字符限制的任务板说明需要投入2个救援物资",
+            "自由区域这是长度远远超过原先字符距离限制的任务板说明2",
+            "12号区域物资数量：2",
+        )
+        for span in red_spans:
+            with self.subTest(span=span):
+                result = parse_task_tokens([OCRToken(f"红色{span}蓝色数量1绿色数量1")])
+                self.assertEqual(result.counts, TaskCounts(2, 1, 1), result.reason)
+
+    def test_ambiguous_span_is_rejected_even_when_missing_color_inference_is_enabled(self):
+        result = parse_task_tokens([OCRToken("红色1号区域2号位置蓝色1绿色1")])
+        self.assertFalse(result.valid)
+        self.assertIn("ambiguous", result.reason)
+
+    def test_conflicting_quantity_semantics_are_not_guessed(self):
+        result = parse_task_tokens([OCRToken("红色投入2个物资，物资数量3蓝色1绿色1")])
+        self.assertFalse(result.valid)
+        self.assertIn("ambiguous", result.reason)
+
+    def test_semantic_count_does_not_truncate_invalid_values_or_use_region_number(self):
+        for count in ("12", "5", "一二", "十", "-1", "1.5"):
+            with self.subTest(count=count):
+                result = parse_task_tokens([OCRToken(f"红色1号区域投入{count}个物资蓝色1绿色1")])
+                self.assertFalse(result.valid)
+                self.assertIn("invalid count", result.reason)
+
+    def test_quantity_semantics_never_cross_the_next_color(self):
+        result = parse_task_tokens([OCRToken("红色区域需要投入蓝色2个物资绿色2个物资")],
+                                   allow_missing_color_inference=False)
+        self.assertFalse(result.valid)
+        self.assertIn("red", result.reason)
+
+    def test_region_identifiers_split_from_quantity_text_do_not_override_semantics(self):
+        for region in ("1号区域", "12号区域"):
+            with self.subTest(region=region):
+                result = parse_task_tokens([OCRToken(text) for text in (
+                    "红色" + region, "需要投入2个物资", "蓝色2号区域", "需要投入1个物资",
+                    "绿色3号区域", "需要投入1个物资",
+                )])
+                self.assertEqual(result.counts, TaskCounts(2, 1, 1), result.reason)
+
     def test_all_fifteen_legal_combinations(self):
         for red in range(5):
             for blue in range(5 - red):

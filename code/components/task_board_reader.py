@@ -404,6 +404,16 @@ _SAFE_REPLACEMENTS = {
 _COLOR_PATTERN = re.compile("[红紅蓝藍绿綠緑]色?")
 _COLOR_NAMES = dict(zip("红紅蓝藍绿綠緑", ("red", "red", "blue", "blue", "green", "green", "green")))
 _NUMBER_PATTERN = re.compile(r"[-−]?[0-9零〇一二两兩三四五六七八九十百]+(?:[.点][0-9]+)?")
+_COUNT_GAP = r"[\s:：,，;；、|()（）\[\]【】=。．]{0,8}"
+# Capture whole numeric tokens (including invalid ones), never the first digit
+# of e.g. 12 or -1. Region identifiers are ignored only when quantity semantics
+# supply explicit evidence inside the same color span.
+_STRONG_COUNT_PATTERNS = (
+    re.compile(r"(?:需要|需)?(?:投入|投放|投)" + _COUNT_GAP + "(" + _NUMBER_PATTERN.pattern + ")"),
+    re.compile(r"(?:物资)?数量" + _COUNT_GAP + "(" + _NUMBER_PATTERN.pattern + ")"),
+    re.compile("(" + _NUMBER_PATTERN.pattern + ")" + _COUNT_GAP
+               + r"(?:个|件)" + _COUNT_GAP + r"(?:救援)?物资"),
+)
 
 
 def normalize_ocr_text(text: str) -> str:
@@ -463,6 +473,25 @@ def ocr_lines(tokens: Sequence[OCRToken], *, minimum_score: float = 0.0) -> tupl
     return tuple(lines)
 
 
+def _extract_count_from_color_span(span: str) -> int | None:
+    """Prefer explicit quantities; otherwise require one unambiguous value.
+
+    Ambiguity and malformed numeric evidence raise instead of returning None,
+    so the parser cannot silently fill an uncertain color from the total of 4.
+    """
+    strong = [match.group(1) for pattern in _STRONG_COUNT_PATTERNS for match in pattern.finditer(span)]
+    candidates = strong or [match.group() for match in _NUMBER_PATTERN.finditer(span)]
+    values = set()
+    for raw in candidates:
+        value = _digit_value(raw) if len(raw) == 1 else None
+        if value is None:
+            raise ValueError(f"invalid count: {raw!r}")
+        values.add(value)
+    if len(values) > 1:
+        raise ValueError(f"ambiguous count: {sorted(values)}")
+    return next(iter(values)) if values else None
+
+
 def _extract_counts(text: str) -> list[tuple[ColorName, int]]:
     """Keep each quantity inside its own color span; reject malformed counts."""
     anchors = list(_COLOR_PATTERN.finditer(text))
@@ -471,13 +500,12 @@ def _extract_counts(text: str) -> list[tuple[ColorName, int]]:
         color = _COLOR_NAMES[anchor.group()[0]]
         end = anchors[index + 1].start() if index + 1 < len(anchors) else len(text)
         span = text[anchor.end():end]
-        number = _NUMBER_PATTERN.search(span)
-        if number is None or number.start() > 16:
-            continue
-        raw = number.group()
-        value = _digit_value(raw) if len(raw) == 1 else None
+        try:
+            value = _extract_count_from_color_span(span)
+        except ValueError as exc:
+            raise ValueError(f"{color}: {exc}") from exc
         if value is None:
-            raise ValueError(f"invalid count for {color}: {raw!r}")
+            continue
         observations.append((color, value))
     return observations
 
@@ -493,29 +521,28 @@ def parse_task_tokens(
     if not lines:
         return ParsedTask(None, 0.0, lines=(), reason="no usable OCR text")
 
-    observations: dict[ColorName, list[tuple[int, float]]] = defaultdict(list)
-    try:
-        for text, score in lines_with_score:
-            for color, value in _extract_counts(text):
-                observations[color].append((value, score))
-    except ValueError as exc:
-        return ParsedTask(None, 0.0, lines=lines, reason=str(exc))
-
-    # OCR sometimes splits one sentence into adjacent boxes/lines.  A compact
-    # concatenation is a safe second pass because color names uniquely anchor
-    # the only three quantities we care about.
+    # Resolve complete color spans first: a separate OCR line containing a
+    # region identifier must not override quantity semantics on the next line.
+    # Color anchors still bound every span, including across OCR line breaks.
     joined = "|".join(lines)
     joined_score = sum(score for _, score in lines_with_score) / len(lines_with_score)
     try:
         joined_observations = _extract_counts(joined)
     except ValueError as exc:
         return ParsedTask(None, 0.0, lines=lines, reason=str(exc))
-    for color in _COLOR_ALIASES:
-        if not observations[color]:
-            observations[color].extend(
-                (value, joined_score * 0.92)
-                for seen_color, value in joined_observations if seen_color == color
-            )
+    line_evidence: dict[ColorName, list[tuple[int, float]]] = defaultdict(list)
+    for text, score in lines_with_score:
+        try:
+            for color, value in _extract_counts(text):
+                line_evidence[color].append((value, score))
+        except ValueError:
+            # An incomplete OCR line can hold a non-quantity region number.
+            # The full spans above have already validated the actual counts.
+            continue
+    observations: dict[ColorName, list[tuple[int, float]]] = defaultdict(list)
+    for color, value in dict.fromkeys(joined_observations):
+        scores = [score for seen_value, score in line_evidence[color] if seen_value == value]
+        observations[color].extend((value, score) for score in (scores or [joined_score * 0.92]))
 
     resolved: dict[ColorName, int] = {}
     evidence_scores: list[float] = []

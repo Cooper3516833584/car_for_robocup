@@ -119,7 +119,13 @@ def main(argv: list[str] | None = None) -> int:
             if not result.valid:
                 logging.error("task-board acquisition failed: %s", result.reason)
                 return 1
-            logging.info("task-board task=%s confidence=%.3f votes=%d", result.task, result.confidence, result.votes)
+            if result.source == "fallback_1_2_1":
+                logging.warning(
+                    "task-board recognition failed; using fallback task=%s reason=%s",
+                    result.task, result.reason,
+                )
+            else:
+                logging.info("task-board task=%s confidence=%.3f votes=%d", result.task, result.confidence, result.votes)
         if args.goal_x is not None:
             runtime.mission.set_navigation_goal(
                 NavigationGoal(args.goal_x, args.goal_y, args.goal_yaw)
