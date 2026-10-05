@@ -26,6 +26,8 @@ def _positive(name: str, value: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class CalibrationStatusConfig:
+    geometry_measured: bool
+    sensor_extrinsics_measured: bool
     c10b_diff_firmware_verified: bool
 
 
@@ -224,6 +226,7 @@ class NavigationConfig:
     lookahead_m: float
     rotate_in_place_threshold_rad: float
     slowdown_distance_m: float
+    safety_margin_m: float = 0.05
     path_yaw_gain: float = 1.5
     final_yaw_gain: float = 1.5
     degraded_speed_scale: float = 0.4
@@ -231,7 +234,7 @@ class NavigationConfig:
     def __post_init__(self) -> None:
         for name in (
             "position_tolerance_m", "yaw_tolerance_rad", "lookahead_m",
-            "rotate_in_place_threshold_rad", "slowdown_distance_m",
+            "rotate_in_place_threshold_rad", "slowdown_distance_m", "safety_margin_m",
             "path_yaw_gain", "final_yaw_gain",
         ):
             _positive(name, getattr(self, name))
@@ -241,11 +244,43 @@ class NavigationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CompetitionMapConfig:
+    width_m: float
+    height_m: float
+    resolution_m: float
+    origin_x_m: float
+    origin_y_m: float
+    measured: bool
+    static_obstacles: tuple[tuple[float, float, float, float], ...] = ()
+    allowed_regions: tuple[tuple[float, float, float, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("width_m", "height_m", "resolution_m"):
+            _positive(f"navigation.map.{name}", getattr(self, name))
+        for name in ("origin_x_m", "origin_y_m"):
+            _finite(f"navigation.map.{name}", getattr(self, name))
+        for field_name in ("static_obstacles", "allowed_regions"):
+            rectangles = tuple(tuple(float(value) for value in rect) for rect in getattr(self, field_name))
+            if any(len(rect) != 4 or not all(math.isfinite(value) for value in rect) or rect[2] <= rect[0] or rect[3] <= rect[1] for rect in rectangles):
+                raise ConfigV2Error(f"navigation.map.{field_name} must contain valid x_min,y_min,x_max,y_max rectangles")
+            object.__setattr__(self, field_name, rectangles)
+
+
+@dataclass(frozen=True, slots=True)
+class FootprintConfig:
+    measured: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SafetyConfig:
+    require_measured_geometry_for_hardware_mission: bool
     require_verified_c10b_diff_firmware_for_curved_motion: bool
     stop_if_pose_lost_s: float
     hardware_probe_max_linear_speed_m_s: float = 0.10
     hardware_probe_max_angular_speed_rad_s: float = 0.35
+    require_measured_extrinsics_for_hardware_mission: bool = True
+    require_measured_map_for_hardware_mission: bool = True
+    require_measured_footprint_for_hardware_mission: bool = True
     require_measured_d500_reference_for_hardware_mission: bool = True
 
     def __post_init__(self) -> None:
@@ -269,6 +304,8 @@ class DifferentialRobotConfig:
     t265_mount: SensorMount3DConfig
     fusion: FusionConfig
     navigation: NavigationConfig
+    competition_map: CompetitionMapConfig
+    footprint: FootprintConfig
     safety: SafetyConfig
     relay: RelayConfig = RelayConfig()
     localization: LocalizationConfig = LocalizationConfig()

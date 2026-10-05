@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.c10b_diff_backend import FakeDriveBackend
-from components.navigation_common import NavigationGoal
+from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import PoseFusionState
 from components.t265_driver import T265RawPose
 from config.v2_loader import load_v2_config
@@ -30,6 +30,7 @@ class RobocupRuntimeTests(unittest.TestCase):
             mode,
             clock=self.clock,
             fake_sample_count=count,
+            world=NavigationGrid(100, 100, 0.1, origin_x_m=-5.0, origin_y_m=-5.0),
         )
 
     def test_dry_run_builds_full_fake_runtime_and_closes(self) -> None:
@@ -68,8 +69,8 @@ class RobocupRuntimeTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_legacy_absolute_hardware_mission_still_requires_d500_reference(self) -> None:
-        with self.assertRaisesRegex(RuntimeReadinessError, "measured D500 field reference"):
+    def test_unmeasured_hardware_mission_is_rejected_before_devices(self) -> None:
+        with self.assertRaisesRegex(RuntimeReadinessError, "measured drive geometry"):
             self.make_runtime(mode=RuntimeMode.HARDWARE_MISSION)
 
     def test_live_step_uses_clock_after_blocking_t265_read(self) -> None:

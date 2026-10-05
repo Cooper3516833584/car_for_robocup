@@ -8,6 +8,10 @@ Wants=dev-ttyACM0.device
 Type=simple
 User=root
 WorkingDirectory=/home/radxa/car/code
+# ExecStop invokes the component script directly, which imports `hal` from the
+# checkout root and therefore needs it on PYTHONPATH.  ExecStart's `-c` form
+# would work from WorkingDirectory alone; this one setting covers both.
+Environment=PYTHONPATH=/home/radxa/car/code
 ExecStart=/usr/bin/python3 -c "from components.battery_voltage_monitor import main; raise SystemExit(main())" --device /dev/ttyACM0 --threshold-v 11.0 --period-s 2.0
 ExecStop=/usr/bin/python3 /home/radxa/car/code/components/sound_light_alarm.py --off
 Restart=always

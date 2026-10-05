@@ -4,18 +4,10 @@
 换主控板请参考 `docs/HARDWARE_PORTING.md`；这些信息**不会**再出现在业务代码
 的报错提示里。
 
-## Steering（前轮舵机）
+## 差速底盘
 
-| 项目 | 值 |
-|---|---|
-| 物理 Pin | 23 |
-| 引脚功能 | `PWM0_M2` |
-| 设备树 overlay | `rk3588-pwm0-m2` |
-| PWM 设备 | `fd8b0000.pwm`（`pwmchip0`） |
-| 频率/周期 | 50 Hz / `20,000,000 ns`，极性 normal |
-| 回中脉宽（实测） | `1580 us` |
-
-启用 overlay 后需要重启；`enable_pwm0_m2.sh` 位于 `code/test/`。
+旧前轮转向舵机及 PWM 部署脚本已移除。现行几何和传感器外参见
+`docs/HARDWARE_MEASUREMENTS.md`，由 schema-v2 profile 配置。
 
 ## D500 雷达
 
@@ -29,9 +21,8 @@
 | 设备 | `/dev/ttyS6`，属组 `dialout` |
 | 波特率 | `230400 8N1`，只读 |
 
-`rsetup` 启用 overlay 后重启；当前 `/boot/extlinux/extlinux.conf` 同时保留
-`rk3588-pwm0-m2.dtbo` 与 `rk3588-uart6-m1.dtbo`。修改前备份：
-`/boot/extlinux/extlinux.conf.codex-before-uart6-20260722`。
+`rsetup` 启用 UART overlay 后重启。本次仅修改仓库源码，没有修改板端
+`/boot/extlinux/extlinux.conf`；不要为了软件清理移除 D500 UART overlay。
 
 ## Alarm（声光报警）
 

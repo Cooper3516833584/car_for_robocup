@@ -16,6 +16,20 @@ T265_HISTORY_S = 3.0
 MAX_INTERP_GAP_S = 0.080
 D500_MAX_INNOVATION_M = 0.30
 D500_MAX_INNOVATION_YAW_RAD = math.radians(12.0)
+# The slam_toolbox anchor corrects a transform that is rigidly fixed for a
+# consistent T265/SLAM pair, so a disagreement of tens of centimetres is a
+# scan-matching outlier rather than a real change.  Measured on the car: a
+# 0.297 m anchor innovation (just inside D500_MAX_INNOVATION_M) yanked the fused
+# pose 0.106 m in a single 50 ms sample and made every reverse drive_distance
+# action diverge.  Reject those instead of blending them; the separate
+# loop-closure consensus path above still admits deliberate map migrations.
+SLAM_ANCHOR_MAX_INNOVATION_M = 0.10
+# How many successive, mutually coherent SLAM anchors are needed before a
+# persistent disagreement is treated as a real map/odometry re-solve rather
+# than a scan-matching outlier.  Anchors arrive with the published scan rate
+# (~4.5 Hz on the car), so three samples corroborate in well under a second
+# while still rejecting a single bad transform.
+SLAM_ANCHOR_CONSENSUS_SAMPLES = 3
 ANCHOR_BLEND = 0.35
 SLAM_LOOP_MAX_M = 1.0
 SLAM_LOOP_MAX_YAW_RAD = math.radians(35.0)
@@ -125,6 +139,28 @@ class PoseFusion:
         return None if self._t265_continuity_broken else self._t265_pose
 
     @property
+    def slam_feed_t265_pose(self) -> Pose2D | None:
+        """Continuous T265 odometry for the SLAM bridge, ungated by the nav gate.
+
+        ``continuous_t265_pose`` deliberately returns ``None`` while
+        ``_t265_continuity_broken`` is set so navigation never consumes
+        odometry that may have jumped.  The SLAM bridge must not be starved by
+        that same gate: it is the only producer of ``map_T_t265_odom``, so
+        cutting its input also removes the only mechanism that can clear the
+        gate.  That is the latched ``fusion_source: LOST`` failure seen on
+        2026-10-04 (empty scan window forever, ``scan_publish_count`` 0).
+
+        This accessor always hands over rebased, continuous odometry -- the
+        latest continuous pose, or the raw sample mapped through the active
+        rebase when a newer raw sample has arrived but has not been adopted as
+        a continuous pose yet.  It never changes the navigation gate.
+        """
+        raw = self._t265_raw_pose
+        if raw is not None and (self._t265_pose is None or raw.timestamp_s > self._t265_pose.timestamp_s):
+            return compose_pose2d(self._t265_rebase, raw)
+        return self._t265_pose
+
+    @property
     def field_T_slam_map(self) -> Pose2D | None:
         return self._field_T_slam_map
 
@@ -185,7 +221,7 @@ class PoseFusion:
             else:
                 self._last_d500_rejection = "loop_migration_target_changed"
             return
-        if delta_m <= D500_MAX_INNOVATION_M and abs(delta_yaw) <= D500_MAX_INNOVATION_YAW_RAD:
+        if delta_m <= SLAM_ANCHOR_MAX_INNOVATION_M and abs(delta_yaw) <= D500_MAX_INNOVATION_YAW_RAD:
             self._slam_candidates.clear()
             self._map_T_t265_odom = Pose2D(
                 current.x_m + ANCHOR_BLEND * (anchor.x_m - current.x_m),
@@ -196,11 +232,25 @@ class PoseFusion:
             self._slam_received_s = timestamp_s
             self._last_d500_accepted = True
             return
-        if not loop_closure or delta_m > SLAM_LOOP_MAX_M or abs(delta_yaw) > SLAM_LOOP_MAX_YAW_RAD:
+        if delta_m > SLAM_LOOP_MAX_M or abs(delta_yaw) > SLAM_LOOP_MAX_YAW_RAD:
+            # Far too large to be a map re-solve: treat as a scan-matching
+            # outlier and drop it outright.
             self._slam_candidates.clear()
             self._last_d500_rejection = "slam_innovation_gate"
             return
-        # Three successive, coherent post-closure transforms are required.
+        # A *single* large innovation is still rejected (2026-10-04: a one-shot
+        # 0.297 m anchor step moved the fused pose 0.106 m in one sample and made
+        # every reverse drive_distance action diverge).  A *repeatable*,
+        # coherent disagreement is a different thing: slam_toolbox re-solved the
+        # pose graph and its map->odom transform really moved.  Requiring
+        # `loop_closure` for that path latched fusion into d500_degraded forever
+        # when slam_toolbox announced no closure event -- measured on the car
+        # 2026-10-05: a persistent 0.331 m step at t=46 s never recovered and
+        # needed a process restart.  Corroborate with SLAM_ANCHOR_CONSENSUS_SAMPLES
+        # coherent transforms instead, then ramp to the new anchor over
+        # SLAM_LOOP_MIGRATION_S so the fused pose still never jumps in one
+        # sample.  An isolated outlier is cleared by the next in-gate anchor
+        # above; the loop-closure event is no longer a precondition.
         if self._slam_candidates:
             previous = self._slam_candidates[-1]
             if (math.hypot(anchor.x_m - previous.x_m, anchor.y_m - previous.y_m)
@@ -209,8 +259,12 @@ class PoseFusion:
                     > SLAM_LOOP_CONSISTENCY_YAW_RAD):
                 self._slam_candidates.clear()
         self._slam_candidates.append(anchor)
-        if len(self._slam_candidates) < 3:
-            self._last_d500_rejection = "loop_anchor_waiting_for_consensus"
+        if len(self._slam_candidates) < SLAM_ANCHOR_CONSENSUS_SAMPLES:
+            # Keep the historical reason for an announced loop closure; report a
+            # plain persistent disagreement with the innovation gate so the two
+            # cases stay distinguishable in the field log.
+            self._last_d500_rejection = (
+                "loop_anchor_waiting_for_consensus" if loop_closure else "slam_innovation_gate")
             return
         self._slam_migration_start = current
         self._slam_migration_target = anchor
@@ -293,7 +347,21 @@ class PoseFusion:
                     self._t265_history.clear()
 
         if self._t265_continuity_broken:
-            if self.backend == "slam_toolbox" and self._t265_pose is not None:
+            if self._t265_pose is None:
+                # The gate latched before any continuous odometry existed (the
+                # usual cause is a low-confidence or missing first frame at
+                # start-up).  There is nothing to be discontinuous with, so
+                # adopt this sample as the new odometry origin.  Without this
+                # branch the very first break latched forever: every later
+                # valid sample took the early return below, ``_t265_pose`` was
+                # never set again, ``continuous_t265_pose`` stayed ``None``,
+                # slam_toolbox was never fed and the fused pose stayed LOST
+                # until the process was restarted.
+                self._t265_rebase = Pose2D(0.0, 0.0, 0.0, pose.timestamp_s)
+                self._t265_continuity_broken = False
+                self._t265_history.clear()
+                continuous = pose
+            elif self.backend == "slam_toolbox":
                 # Keep odom continuous after tracker recovery.  Navigation
                 # remains gated until slam_toolbox supplies a fresh correction.
                 self._t265_rebase = compose_pose2d(

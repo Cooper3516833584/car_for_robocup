@@ -8,8 +8,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from components.navigation import NavigationGoal  # noqa: E402
 from components.navigation_protocol import (  # noqa: E402
+    NavigationCommandGoal,
     COMMAND_STOP_MISSION,
     AckStatus,
     GroundNavigationProtocol,
@@ -27,21 +27,21 @@ KEY = bytes.fromhex("00112233445566778899aabbccddeeff")
 
 class NavigationPayloadTests(unittest.TestCase):
     def test_goal_without_heading_round_trip(self) -> None:
-        decoded = decode_navigation_payload(encode_navigation_payload(NavigationGoal(120, -35)))
+        decoded = decode_navigation_payload(encode_navigation_payload(NavigationCommandGoal(120, -35)))
         self.assertEqual(decoded.x_cm, 120)
         self.assertEqual(decoded.y_cm, -35)
         self.assertIsNone(decoded.final_heading_deg)
 
     def test_goal_with_heading_round_trip(self) -> None:
         decoded = decode_navigation_payload(
-            encode_navigation_payload(NavigationGoal(120, -35, 359.25))
+            encode_navigation_payload(NavigationCommandGoal(120, -35, 359.25))
         )
         self.assertEqual(decoded.final_heading_deg, 359.25)
 
     def test_authenticated_frame_rejects_tampering(self) -> None:
         frame = bytearray(
             pack_navigation_command(
-                NavigationGoal(100, 200, 90), session=3, seq=7, key=KEY
+                NavigationCommandGoal(100, 200, 90), session=3, seq=7, key=KEY
             )
         )
         frame[15] ^= 1
@@ -58,7 +58,7 @@ class GroundNavigationProtocolTests(unittest.TestCase):
             on_stop=lambda receipt: None,
         )
         frame = pack_navigation_command(
-            NavigationGoal(300, -100, 45), session=9, seq=11, key=KEY
+            NavigationCommandGoal(300, -100, 45), session=9, seq=11, key=KEY
         )
         first = protocol.handle_frame(frame)
         second = protocol.handle_frame(frame)

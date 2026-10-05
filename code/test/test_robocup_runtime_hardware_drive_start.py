@@ -9,7 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.c10b_diff_backend import FakeDriveBackend
-from components.navigation_common import NavigationGoal
+from components.navigation_common import NavigationGoal, NavigationGrid
 from config.v2_factory import build_differential_drive
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
@@ -31,6 +31,13 @@ class HardwareLazyDriveStartTests(unittest.TestCase):
         source_config = load_v2_config()
         config = replace(
             source_config,
+            calibration=replace(
+                source_config.calibration,
+                geometry_measured=True,
+                sensor_extrinsics_measured=True,
+            ),
+            competition_map=replace(source_config.competition_map, measured=True),
+            footprint=replace(source_config.footprint, measured=True),
             d500=replace(source_config.d500, enabled=False),
             t265=replace(source_config.t265, enabled=False),
         )
@@ -44,6 +51,7 @@ class HardwareLazyDriveStartTests(unittest.TestCase):
                 config,
                 RuntimeMode.HARDWARE_MISSION,
                 clock=clock,
+                world=NavigationGrid(120, 120, 0.1, origin_x_m=-6.0, origin_y_m=-6.0),
             )
 
         self.assertFalse(runtime.drive.is_running)

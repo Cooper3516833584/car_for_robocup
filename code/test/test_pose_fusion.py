@@ -84,6 +84,44 @@ class PoseFusionTests(unittest.TestCase):
         self.assertEqual(estimate.rejection_reason, "position_innovation_gate")
         self.assertEqual(estimate.pose.x_m, before.x_m)
 
+    def _slam_fusion(self) -> PoseFusion:
+        fusion = PoseFusion(self.config, backend="slam_toolbox")
+        fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        return fusion
+
+    def test_slam_anchor_accepts_an_innovation_inside_the_gate(self) -> None:
+        fusion = self._slam_fusion()
+        fusion.update_slam_anchor(Pose2D(0.05, 0.0, 0.0, 1.05), valid=True, timestamp_s=1.05)
+
+        estimate = fusion.estimate(1.05)
+
+        self.assertTrue(estimate.d500_accepted)
+        self.assertAlmostEqual(estimate.last_d500_innovation_m, 0.05)
+        # Blended at ANCHOR_BLEND, not applied in one step.
+        self.assertAlmostEqual(fusion.map_T_t265_odom.x_m, 0.05 * 0.35)
+
+    def test_slam_anchor_rejects_the_measured_outlier_instead_of_jumping(self) -> None:
+        # Regression for the 2026-10-04 reverse-drive divergence: a 0.297 m
+        # anchor innovation used to pass the 0.30 m gate and move the fused pose
+        # 0.106 m in one sample.
+        fusion = self._slam_fusion()
+        before = fusion.estimate(1.0).pose
+
+        fusion.update_slam_anchor(Pose2D(0.297, 0.0, 0.0, 1.05), valid=True, timestamp_s=1.05)
+        estimate = fusion.estimate(1.05)
+
+        self.assertFalse(estimate.d500_accepted)
+        self.assertEqual(estimate.rejection_reason, "slam_innovation_gate")
+        self.assertAlmostEqual(estimate.last_d500_innovation_m, 0.297)
+        self.assertAlmostEqual(fusion.map_T_t265_odom.x_m, before.x_m)
+        self.assertAlmostEqual(estimate.pose.x_m, before.x_m)
+
+    def test_slam_anchor_gate_boundary_is_inclusive(self) -> None:
+        fusion = self._slam_fusion()
+        fusion.update_slam_anchor(Pose2D(0.10, 0.0, 0.0, 1.05), valid=True, timestamp_s=1.05)
+        self.assertTrue(fusion.estimate(1.05).d500_accepted)
+
     def test_t265_stale_does_not_reuse_old_absolute_as_propagated_fallback(self) -> None:
         self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
         self.fusion.update_d500(Pose2D(1.0, 2.0, 0.3, 1.0), quality("d500"))
@@ -306,6 +344,94 @@ class PoseFusionTests(unittest.TestCase):
 
         fusion = build_pose_fusion(load_v2_config())
         self.assertIsInstance(fusion, PoseFusion)
+
+    # ------------------------------------------------------------------
+    # Continuity gate vs. the SLAM feed (2026-10-04 latched-lost failure)
+    # ------------------------------------------------------------------
+
+    def test_slam_feed_is_empty_until_the_first_t265_sample(self) -> None:
+        self.assertIsNone(self.fusion.continuous_t265_pose)
+        self.assertIsNone(self.fusion.slam_feed_t265_pose)
+
+    def test_continuity_break_gates_navigation_but_not_the_slam_feed(self) -> None:
+        # The continuity gate must not cut the only pose stream that can
+        # rebuild map_T_t265_odom: doing so made the gate impossible to clear.
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        self.fusion.update_d500_absolute(Pose2D(3.0, 2.0, 0.0, 1.0), quality("d500"))
+        self.fusion.update_t265(None, PoseQuality("t265", False, True))
+
+        self.assertIsNone(self.fusion.continuous_t265_pose)
+        feed = self.fusion.slam_feed_t265_pose
+        self.assertIsNotNone(feed)
+        self.assertEqual(feed.x_m, 0.0)
+
+        estimate = self.fusion.estimate(1.0)
+        self.assertTrue(estimate.t265_continuity_broken)
+        self.assertIsNot(estimate.state, PoseFusionState.OK)
+        self.assertIsNone(estimate.pose)
+
+    def test_slam_feed_advances_while_navigation_stays_gated(self) -> None:
+        self.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        self.fusion.update_d500_absolute(Pose2D(3.0, 2.0, 0.0, 1.0), quality("d500"))
+        self.fusion.update_t265(None, PoseQuality("t265", False, True))
+        # The legacy backend keeps the gate set across the break but the raw
+        # samples keep arriving, and the bridge must see them move.
+        self.fusion.update_t265(Pose2D(0.2, 0.0, 0.0, 1.1), quality("t265"))
+        self.fusion.update_t265(Pose2D(0.4, 0.0, 0.0, 1.2), quality("t265"))
+
+        self.assertTrue(self.fusion.estimate(1.2).t265_continuity_broken)
+        self.assertIsNone(self.fusion.continuous_t265_pose)
+        feed = self.fusion.slam_feed_t265_pose
+        self.assertIsNotNone(feed)
+        self.assertEqual(feed.timestamp_s, 1.2)
+        self.assertAlmostEqual(feed.x_m, 0.4)
+        self.assertIsNone(self.fusion.estimate(1.2).pose)
+
+    def test_first_break_before_any_pose_does_not_latch_the_gate_forever(self) -> None:
+        # The first frames after start-up are routinely below the confidence
+        # gate.  That used to set _t265_continuity_broken while _t265_pose was
+        # still None; every later valid sample then took the early return, so
+        # neither the fused pose nor the SLAM feed ever recovered until restart.
+        fusion = PoseFusion(self.config, backend="slam_toolbox")
+        fusion.update_t265(None, PoseQuality("t265", False, True))
+        self.assertIsNone(fusion.slam_feed_t265_pose)
+
+        fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+
+        self.assertIsNotNone(fusion.slam_feed_t265_pose)
+        self.assertIsNotNone(fusion.continuous_t265_pose)
+        estimate = fusion.estimate(1.0)
+        self.assertFalse(estimate.t265_continuity_broken)
+        # Navigation is still gated by the missing anchor, not by the flag.
+        self.assertIs(estimate.state, PoseFusionState.UNANCHORED)
+        self.assertIsNone(estimate.pose)
+
+    def test_slam_anchor_rebuilds_after_a_startup_break_and_reaches_ok(self) -> None:
+        fusion = PoseFusion(self.config, backend="slam_toolbox")
+        fusion.update_t265(None, PoseQuality("t265", False, True))
+        fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        fusion.update_slam_anchor(Pose2D(1.0, 2.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+
+        estimate = fusion.estimate(1.05)
+
+        self.assertIs(estimate.state, PoseFusionState.OK)
+        self.assertEqual(estimate.source_flags, ("t265", "slam", "fused"))
+        self.assertAlmostEqual(estimate.pose.x_m, 1.0)
+        self.assertAlmostEqual(estimate.pose.y_m, 2.0)
+
+    def test_navigation_stays_gated_during_the_slam_backend_break(self) -> None:
+        fusion = PoseFusion(self.config, backend="slam_toolbox")
+        fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.0), quality("t265"))
+        fusion.update_slam_anchor(Pose2D(1.0, 2.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        self.assertIs(fusion.estimate(1.0).state, PoseFusionState.OK)
+
+        fusion.update_t265(None, PoseQuality("t265", False, True))
+
+        gated = fusion.estimate(1.0)
+        self.assertTrue(gated.t265_continuity_broken)
+        self.assertIsNone(gated.pose)
+        self.assertIsNot(gated.state, PoseFusionState.OK)
+        self.assertIsNotNone(fusion.slam_feed_t265_pose)
 
 
 if __name__ == "__main__":

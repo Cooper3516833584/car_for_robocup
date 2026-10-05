@@ -29,6 +29,15 @@ Copy-Item configs\robocup_diffdrive.example.toml configs\robocup_diffdrive.toml
 
 Production entry point: [code/main_robocup.py](code/main_robocup.py). Composition, startup, event loop, and safe shutdown live in [code/robocup_runtime.py](code/robocup_runtime.py). This path uses `DifferentialDrive` and does not import the old competition task runtime.
 
+## Task-board recognition
+
+Task-board startup acquisition is available in `hardware-mission` with
+`--task-board-camera` and an explicitly measured `--task-board-turn-deg`.
+The car turns, stops, then reads a short camera burst using OpenCV and RapidOCR;
+only three agreeing frames with red + blue + green = 4 are accepted. See
+[docs/TASK_BOARD_RECOGNITION.md](docs/TASK_BOARD_RECOGNITION.md) for installation,
+offline validation, launch arguments, and outstanding physical acceptance.
+
 ## Coordinate contract
 
 | Convention | Meaning |
@@ -59,6 +68,6 @@ The differential module boundaries follow common linorobot2 interface ideas but 
 
 The example profile contains software-test placeholders only. Record actual wheel geometry, body footprint, sensor extrinsics, motor signs, and C10B protocol behavior in [docs/HARDWARE_MEASUREMENTS.md](docs/HARDWARE_MEASUREMENTS.md), then follow [docs/CALIBRATION.md](docs/CALIBRATION.md). Do not set measured flags based on the example values. T265 SDK import remains optional and is needed only when starting a real T265 source.
 
-## Legacy Ackermann stack
+## Removed legacy stack
 
-`code/main_task1.py`, `code/main_task2.py`, their camera/black-line runtime, steering servo, and Ackermann navigation are retained for the older vehicle. They are not dependencies of `main_robocup.py`. Stable legacy import paths remain in place because existing launchers and regression tests use them; see [code/legacy/README.md](code/legacy/README.md) and [docs/legacy/ACKERMANN_README.md](docs/legacy/ACKERMANN_README.md).
+The old Task 1/Task 2, steering, Ackermann navigation, v1 configuration, serial-screen launcher and ROS2 actuation paths have been removed. The optional ROS2 packages retain D500 sensor and measured-field map utilities only. C10B firmware compatibility remains part of the differential backend until a new firmware protocol is verified. See [docs/LEGACY_CLEANUP.md](docs/LEGACY_CLEANUP.md) for the removal inventory and deployment transition.

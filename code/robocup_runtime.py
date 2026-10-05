@@ -8,13 +8,16 @@ import logging
 import math
 import queue
 import time
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
+
+if TYPE_CHECKING:
+    from components.task_board_reader import TaskCounts
 
 from components.differential_drive import DifferentialDrive
 from components.basic_motion_controller import BasicMotionController, MotionActionState, MotionOutput
 from components.differential_navigation import DifferentialNavigator, NavigationOutput
 from components.diagnostics_log import JsonlEventLogger
-from components.navigation_common import NavigationGoal
+from components.navigation_common import NavigationGoal, NavigationGrid
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
 from components.pose_log_replay import PoseLogEvent, read_pose_events
 from components.radar_driver import D500_TIMESTAMP_MODULUS_MS
@@ -24,6 +27,7 @@ from components.t265_driver import FakeT265PoseSource, RealSenseT265PoseSource, 
 from components.t265_pose_adapter import T265PoseAdapter
 from config.v2_factory import (
     build_basic_motion_controller,
+    build_competition_world,
     build_differential_drive,
     build_differential_navigator,
     build_pose_fusion,
@@ -146,6 +150,18 @@ class RobocupMission:
         self.state = RobocupMissionState.INIT
         self._goal_pending = False
         self.last_error: str | None = None
+        self.task_counts: TaskCounts | None = None
+
+    def set_task_counts(self, counts: TaskCounts) -> None:
+        from components.task_board_reader import TaskCounts
+
+        if not isinstance(counts, TaskCounts):
+            raise TypeError("counts must be validated TaskCounts")
+        if self.task_counts is not None:
+            raise RuntimeError("task board result already set")
+        if self.state in {RobocupMissionState.FINISHED, RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
+            raise RuntimeError(f"cannot set task counts while mission is {self.state.value}")
+        self.task_counts = counts
 
     def set_navigation_goal(self, goal: NavigationGoal) -> None:
         if self.state in {RobocupMissionState.FINISHED, RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
@@ -233,6 +249,7 @@ class RobocupRuntime:
         clock: Callable[[], float],
         mission_profile: str = "default",
         constraints: RuntimeConstraints | None = None,
+        world: NavigationGrid | None = None,
         event_logger: JsonlEventLogger | None = None,
         replay_events: tuple[PoseLogEvent, ...] = (),
         relay=None,
@@ -257,6 +274,7 @@ class RobocupRuntime:
         self.mission = RobocupMission(navigator, mission_profile, self.motion)
         self.clock = clock
         self.constraints = constraints or runtime_constraints(config, mode)
+        self.world = world
         self.event_logger = event_logger
         self._replay_events = replay_events
         self._replay_index = 0
@@ -393,6 +411,7 @@ class RobocupRuntime:
             }:
                 motion_output = self.motion.step(
                     estimate.pose,
+                    self.world,
                     now_s=now,
                     pose_state=estimate.state,
                 )
@@ -573,7 +592,11 @@ class RobocupRuntime:
         if update.pose is not None and update.quality.valid:
             self.fusion.update_t265(update.pose, update.quality)
             if self.slam_bridge is not None:
-                continuous = self.fusion.continuous_t265_pose
+                # Feed the bridge through the SLAM-specific accessor, not the
+                # navigation gate: a continuity break must keep navigation
+                # gated but must never starve the only producer of a SLAM
+                # anchor (see PoseFusion.slam_feed_t265_pose).
+                continuous = self.fusion.slam_feed_t265_pose
                 if continuous is not None:
                     try:
                         self.slam_bridge.push_t265(continuous, update.quality)
@@ -909,6 +932,11 @@ class RobocupRuntime:
                 )
             self._replay_index += 1
 
+    def record_event(self, event_type: str, **fields) -> None:
+        """Record an upper-level mission event using the runtime's safe sink."""
+        self._current_step_s = float(self.clock())
+        self._emit(event_type, priority=True, **fields)
+
     def _emit(self, event_type: str, *, priority: bool = False, **fields) -> None:
         if self.event_logger is None:
             return
@@ -1066,6 +1094,7 @@ def build_runtime(
     mission_profile: str = "default",
     clock: Callable[[], float] = time.monotonic,
     fake_sample_count: int = 32,
+    world: NavigationGrid | None = None,
     event_logger: JsonlEventLogger | None = None,
     sensor_only: bool = False,
 ) -> RobocupRuntime:
@@ -1169,6 +1198,13 @@ def build_runtime(
         d500_fake = False
 
     constraints = runtime_constraints(config, mode)
+    # Dry-run uses a clearly synthetic open field so the full planner can be
+    # exercised without implying that hardware has a surveyed competition map.
+    if world is None:
+        if mode is RuntimeMode.DRY_RUN:
+            world = NavigationGrid(120, 120, 0.1, origin_x_m=-6.0, origin_y_m=-6.0)
+        elif mode in {RuntimeMode.HARDWARE_MISSION, RuntimeMode.REPLAY}:
+            world = build_competition_world(config)
     runtime = RobocupRuntime(
         config,
         mode,
@@ -1184,6 +1220,7 @@ def build_runtime(
         clock=clock,
         mission_profile=mission_profile,
         constraints=constraints,
+        world=world,
         event_logger=event_logger,
         replay_events=tuple(replay_events),
         relay=relay,

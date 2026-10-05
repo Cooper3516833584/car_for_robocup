@@ -10,8 +10,8 @@ from .v2_models import DifferentialRobotConfig, LocalizationConfig, SlamLocaliza
 def accepted_relative_slam_profile(config: DifferentialRobotConfig) -> DifferentialRobotConfig:
     """Select the accepted 2/3 T265 + D500/SLAM path for relative task actions.
 
-    This changes localization settings only. Drive and firmware readiness checks
-    remain governed by the board profile.
+    This changes localization settings only. Geometry, motor, map, footprint and
+    sensor-extrinsic readiness checks remain governed by the board profile.
     """
     if not config.t265.enabled or not config.d500.enabled:
         raise ValueError("relative SLAM task requires enabled T265 and D500")

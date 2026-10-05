@@ -4,7 +4,7 @@
 
 This repository now contains a RoboCup differential ground robot path: two center driven wheels, passive front/rear supports, C10B motor controller, D500 lidar, and optional Intel RealSense T265. The active production entry is `code/main_robocup.py`; runtime composition and safe shutdown are in `code/robocup_runtime.py`.
 
-Old Ackermann task entries and modules remain available for the older vehicle and are legacy-only. Do not add them to the RoboCup dependency path. Established module locations stay in place because old launchers, ROS bridge code, and regression tests import them. See `code/legacy/README.md` and `docs/legacy/`.
+The old Ackermann task, steering, navigation, v1 config, serial-screen launcher and ROS2 actuation stacks have been removed. Do not reintroduce them. Optional ROS2 sensor/map utilities remain; active differential motion is owned by `main_robocup.py`. Keep the C10B `ackermann_firmware_compat` protocol adapter until differential firmware is physically verified. See `docs/LEGACY_CLEANUP.md`.
 
 ## Development and board deployment
 
@@ -44,7 +44,7 @@ The canonical robot frame is `base_link` at the midpoint of the two driven wheel
 
 ## Calibration and hardware safety
 
-- Treat values in `configs/robocup_diffdrive.example.toml` as software-test placeholders. Record geometry and mount checks in `docs/HARDWARE_MEASUREMENTS.md`; the former measurement-status flags are no longer runtime gates.
+- Treat values in `configs/robocup_diffdrive.example.toml` as software-test placeholders. Keep geometry/extrinsics flags false until measurements and validation are recorded in `docs/HARDWARE_MEASUREMENTS.md`.
 - `hardware-mission` must fail closed when readiness requirements are not met. Do not add a routine `--force` bypass. The CLI should clearly warn when the example measurements remain unverified.
 - `hardware-probe` is sensor-only and does not run autonomous navigation. Any motor smoke test must be separately operator-triggered, low-speed, supervised, and have an immediately accessible emergency stop.
 - Startup failure, sensor loss during motion, backend error, SIGINT, and normal mission completion must leave the base stopped. Stop drive output before joining sensor workers or closing logs.

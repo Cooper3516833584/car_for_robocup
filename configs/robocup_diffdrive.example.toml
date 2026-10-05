@@ -1,11 +1,13 @@
 # WARNING: This is not a deployable car profile. The physical track and left
 # shell dimensions below are reported measurements; the effective track and
-# T265 optical-origin offset remain provisional. Check geometry and mounts
-# on the actual car before motion testing.
+# T265 optical-origin offset remain provisional. Keep measured flags false
+# until the complete geometry and mount have been checked on the actual car.
 schema_version = 2
 robot_name = "robocup_diffdrive"
 
 [calibration]
+geometry_measured = false
+sensor_extrinsics_measured = false
 c10b_diff_firmware_verified = false
 
 [vehicle.geometry]
@@ -115,12 +117,32 @@ yaw_tolerance_rad = 0.0523598776
 lookahead_m = 0.30
 rotate_in_place_threshold_rad = 0.70
 slowdown_distance_m = 0.50
+safety_margin_m = 0.05
 path_yaw_gain = 1.5
 final_yaw_gain = 1.5
 degraded_speed_scale = 0.4
 
+[navigation.map]
+# Survey these values before hardware mission use. They are a software placeholder.
+width_m = 10.0
+height_m = 10.0
+resolution_m = 0.05
+origin_x_m = 0.0
+origin_y_m = 0.0
+measured = false
+static_obstacles = []
+allowed_regions = []
+
+[navigation.footprint]
+# Provisional placeholder only; keep measured=false until the robot is measured.
+measured = false
+
 [safety]
+require_measured_geometry_for_hardware_mission = true
 require_verified_c10b_diff_firmware_for_curved_motion = true
+require_measured_extrinsics_for_hardware_mission = true
+require_measured_map_for_hardware_mission = true
+require_measured_footprint_for_hardware_mission = true
 require_measured_d500_reference_for_hardware_mission = true
 stop_if_pose_lost_s = 0.30
 hardware_probe_max_linear_speed_m_s = 0.10

@@ -30,6 +30,9 @@ def ready_config():
     source = load_v2_config()
     return replace(
         source,
+        calibration=replace(source.calibration, geometry_measured=True, sensor_extrinsics_measured=True),
+        competition_map=replace(source.competition_map, measured=True),
+        footprint=replace(source.footprint, measured=True),
         d500_localization=replace(source.d500_localization, reference_measured=True),
         t265=replace(source.t265, enabled=False),
     )

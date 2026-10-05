@@ -45,6 +45,66 @@ class SlamAnchorTests(unittest.TestCase):
         self.assertEqual(self.fusion.estimate(1.11).rejection_reason, "slam_innovation_gate")
         self.assertAlmostEqual(self.fusion._slam_received_s, 1.0)
 
+    def test_persistent_anchor_disagreement_migrates_instead_of_latching(self) -> None:
+        # Regression for the 2026-10-05 on-car latch: slam_toolbox re-solved its
+        # pose graph and stepped map->odom by 0.331 m, then stayed there.  The
+        # single-sample innovation gate rejected it forever, so fusion sat in
+        # d500_degraded for the rest of the run and only a process restart could
+        # recover.  A repeatable, coherent disagreement is a real re-solve and
+        # must be ramped in instead.
+        self.add_t265(1.0)
+        self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        self.assertIs(self.fusion.estimate(1.0).state, PoseFusionState.OK)
+
+        for stamp in (1.05, 1.10):
+            self.add_t265(stamp)
+            self.fusion.update_slam_anchor(Pose2D(0.331, 0.0, 0.0, stamp),
+                                           valid=True, timestamp_s=stamp)
+            self.assertEqual(self.fusion.estimate(stamp).rejection_reason, "slam_innovation_gate")
+            self.assertAlmostEqual(self.fusion.map_T_t265_odom.x_m, 0.0)
+
+        # The third coherent sample starts a bounded ramp, never a jump.
+        observed: list[float] = []
+        for step in range(0, 12):
+            stamp = 1.15 + step * 0.05
+            self.add_t265(stamp)
+            self.fusion.update_slam_anchor(Pose2D(0.331, 0.0, 0.0, stamp),
+                                           valid=True, timestamp_s=stamp)
+            estimate = self.fusion.estimate(stamp)
+            self.assertIs(estimate.state, PoseFusionState.OK)
+            observed.append(estimate.pose.x_m)
+
+        self.assertAlmostEqual(observed[-1], 0.331, places=3)
+        steps = [abs(b - a) for a, b in zip([0.0, *observed], observed)]
+        self.assertLess(max(steps), 0.10)
+
+    def test_isolated_large_anchor_outlier_does_not_start_a_migration(self) -> None:
+        self.add_t265(1.0)
+        self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        self.add_t265(1.05)
+        self.fusion.update_slam_anchor(Pose2D(0.297, 0.0, 0.0, 1.05), valid=True, timestamp_s=1.05)
+        self.assertEqual(self.fusion.estimate(1.05).rejection_reason, "slam_innovation_gate")
+
+        for stamp in (1.10, 1.15, 1.20):
+            self.add_t265(stamp)
+            self.fusion.update_slam_anchor(Pose2D(0.01, 0.0, 0.0, stamp),
+                                           valid=True, timestamp_s=stamp)
+
+        self.assertIsNone(self.fusion._slam_migration_target)
+        self.assertLess(self.fusion.map_T_t265_odom.x_m, 0.02)
+
+    def test_anchor_far_beyond_the_migration_bound_stays_gated(self) -> None:
+        self.add_t265(1.0)
+        self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        for stamp in (1.05, 1.10, 1.15, 1.20):
+            self.add_t265(stamp)
+            self.fusion.update_slam_anchor(Pose2D(3.0, 0.0, 0.0, stamp),
+                                           valid=True, timestamp_s=stamp)
+
+        self.assertIsNone(self.fusion._slam_migration_target)
+        self.assertAlmostEqual(self.fusion.map_T_t265_odom.x_m, 0.0)
+        self.assertEqual(self.fusion.estimate(1.20).rejection_reason, "slam_innovation_gate")
+
     def test_loop_closure_requires_three_consistent_anchors_and_blends(self) -> None:
         self.add_t265(1.0)
         self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)

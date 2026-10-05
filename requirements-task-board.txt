@@ -1,0 +1,6 @@
+# CPU OCR; kept separate from the chassis dependencies.
+rapidocr==3.9.2
+onnxruntime>=1.23,<2
+numpy>=1.24,<3
+# RapidOCR depends on opencv-python. Reuse system OpenCV on ROCK 5A where
+# possible; do not install both opencv-python and opencv-python-headless.

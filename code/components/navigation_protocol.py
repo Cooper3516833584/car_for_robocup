@@ -12,13 +12,34 @@ from dataclasses import dataclass
 from enum import IntEnum
 import hashlib
 import hmac
+import math
 import os
 import secrets
 import struct
 import threading
 from typing import Callable, Final
 
-from .navigation import NavigationGoal, normalize_heading_deg
+@dataclass(frozen=True, slots=True)
+class NavigationCommandGoal:
+    """Transport goal in wire units (cm and CCW degrees), independent of drive."""
+
+    x_cm: float
+    y_cm: float
+    final_heading_deg: float | None = None
+
+    def __post_init__(self) -> None:
+        if not all(math.isfinite(float(value)) for value in (self.x_cm, self.y_cm)):
+            raise ValueError("goal coordinates must be finite")
+        if self.final_heading_deg is not None:
+            object.__setattr__(self, "final_heading_deg", normalize_heading_deg(self.final_heading_deg))
+
+
+def normalize_heading_deg(angle_deg: float) -> float:
+    value = float(angle_deg)
+    if not math.isfinite(value):
+        raise ValueError("heading must be finite")
+    normalized = value % 360.0
+    return 0.0 if abs(normalized) < 1e-12 else normalized
 
 
 MAGIC: Final[bytes] = b"\xAA\x22"
@@ -146,7 +167,7 @@ def unpack_authenticated_frame(data: bytes, *, key: bytes) -> AuthenticatedFrame
     return AuthenticatedFrame(msg_type, flags, session, seq, frame[payload_start:tag_offset])
 
 
-def encode_navigation_payload(goal: NavigationGoal) -> bytes:
+def encode_navigation_payload(goal: NavigationCommandGoal) -> bytes:
     flags = FLAG_HAS_HEADING if goal.final_heading_deg is not None else 0
     payload = NAVIGATION_BASE.pack(
         COMMAND_NAVIGATE_TO,
@@ -159,7 +180,7 @@ def encode_navigation_payload(goal: NavigationGoal) -> bytes:
     return payload
 
 
-def decode_navigation_payload(payload: bytes) -> NavigationGoal:
+def decode_navigation_payload(payload: bytes) -> NavigationCommandGoal:
     if len(payload) not in (NAVIGATION_BASE.size, NAVIGATION_BASE.size + HEADING.size):
         raise NavigationProtocolError("NAVIGATE_TO payload has invalid length")
     command_id, flags, x_cm, y_cm = NAVIGATION_BASE.unpack_from(payload)
@@ -176,11 +197,11 @@ def decode_navigation_payload(payload: bytes) -> NavigationGoal:
         if heading_raw >= 36000:
             raise NavigationProtocolError("NAVIGATE_TO heading is outside [0, 360)")
         heading = heading_raw / 100.0
-    return NavigationGoal(float(x_cm), float(y_cm), heading)
+    return NavigationCommandGoal(float(x_cm), float(y_cm), heading)
 
 
 def pack_navigation_command(
-    goal: NavigationGoal,
+    goal: NavigationCommandGoal,
     *,
     session: int,
     seq: int,
@@ -202,7 +223,7 @@ class GroundNavigationProtocol:
         self,
         *,
         key: bytes,
-        on_goal: Callable[[NavigationGoal, NavigationCommandReceipt], None],
+        on_goal: Callable[[NavigationCommandGoal, NavigationCommandReceipt], None],
         on_stop: Callable[[NavigationCommandReceipt], None],
         cache_size: int = 256,
     ) -> None:

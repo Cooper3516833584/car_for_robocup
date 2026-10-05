@@ -1,14 +1,10 @@
-# Legacy Ackermann modules
+# Removed legacy application stack
 
-The differential RoboCup runtime is the active production path. Ackermann files remain at their established import locations under `code/components/`, `code/config/`, and the root `code/main_task*.py` entries because current old task launchers, ROS bridge consumers, and regression tests import those names directly.
+The old Ackermann task, steering, navigation, v1 profile and serial-screen
+launcher implementations have been removed at the user's request.
+Recover historical source through Git history if needed.
 
-Legacy-only modules include:
-
-- `components/ackermann_drive.py` and `components/steering_servo.py`;
-- `components/navigation.py`, `components/competition_track.py`, and old mission/runtime modules;
-- `main_task1.py`, `main_task2.py`, `main_radar_camera_line_following.py`, and `competition_task_runtime.py`.
-- v1 vehicle profiles such as `configs/car.example.toml` and `configs/cooper_rock5a_l150.toml`, which remain at stable paths for the old loader and task defaults.
-
-Do not add these imports to `main_robocup.py`, `robocup_runtime.py`, the schema-v2 differential factory, differential navigation, or pose fusion. The active path uses `DifferentialDrive`, `DifferentialNavigator`, schema-v2 config, and C10B/D500/T265 adapters. The shared low-level C10B `rear_motor.py` and D500 `radar_driver.py` remain shared validated assets.
-
-`components` and `config` package convenience exports resolve lazily so importing a new differential submodule does not load the steering/Ackermann stack. Import-level regression coverage protects this boundary.
+The differential production entry remains `code/main_robocup.py`.
+The C10B firmware compatibility backend and shared motor/sensor/safety drivers
+remain in use. Optional ROS2 packages retain sensor and map utilities only.
+See `docs/LEGACY_CLEANUP.md` for the inventory and deployment transition.

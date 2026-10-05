@@ -4,6 +4,12 @@
 Start the repository's SLAM ROS launch separately, then run this tool with the
 board TOML. Hold the vehicle still at P0 until the ten-second preflight passes.
 No drive or relay port is opened; all output files stay outside the checkout.
+
+``--seconds`` is a hard wall-clock budget for the whole process, including the
+stationary preflight and the shutdown path.  A broken localization chain blocks
+``pipeline.stop()`` on the T265 and can hold the accuracy sampler's sample lock,
+so neither the preflight poll nor the close runs on the main thread's critical
+path: a wedged call must cost a warning, never the operator's time budget.
 """
 
 from __future__ import annotations
@@ -12,10 +18,13 @@ import argparse
 import math
 from pathlib import Path
 import sys
+import threading
 import time
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "code"))
+sys.path.insert(0, str(TOOLS_DIR))
 
 from components.diagnostics_log import JsonlEventLogger  # noqa: E402
 from config.v2_loader import load_v2_config  # noqa: E402
@@ -27,6 +36,89 @@ from slam_manual_accuracy import (  # noqa: E402
 )
 
 PRINT_PERIOD_S = 0.5
+PREFLIGHT_POLL_S = 0.25
+PREFLIGHT_STALE_S = 2.0
+DEFAULT_SHUTDOWN_TIMEOUT_S = 15.0
+
+
+class BoundedPreflight:
+    """Poll ``session.preflight()`` off the main loop.
+
+    ``preflight()`` only reads the sample buffer, but the accuracy sampler holds
+    the sample lock while it works and a stalled sensor read used to stall the
+    whole diagnostic.  The probe thread keeps the last result; a stale result
+    means the probe itself is wedged and the caller is told so instead of
+    blocking.
+    """
+
+    def __init__(self, session, *, period_s: float = PREFLIGHT_POLL_S,
+                 stale_after_s: float = PREFLIGHT_STALE_S) -> None:
+        self._session = session
+        self._period_s = period_s
+        self._stale_after_s = stale_after_s
+        self._lock = threading.Lock()
+        self._result: tuple[bool, list[str]] = (False, ["preflight pending"])
+        self._updated_s: float | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="bounded-preflight", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                result = self._session.preflight()
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                result = (False, ["preflight failed: %s: %s" % (type(exc).__name__, exc)])
+            with self._lock:
+                self._result = result
+                self._updated_s = time.monotonic()
+            self._stop.wait(self._period_s)
+
+    def latest(self) -> tuple[bool, list[str]]:
+        with self._lock:
+            result, updated = self._result, self._updated_s
+        if updated is None or time.monotonic() - updated > self._stale_after_s:
+            return False, ["preflight did not return within %.1f s" % self._stale_after_s]
+        return result
+
+
+def run_bounded(call, timeout_s: float) -> tuple[bool, object]:
+    """Run ``call`` on a daemon thread; return (finished, value).
+
+    A call that outlives the budget is abandoned (the thread is a daemon, so it
+    cannot keep the interpreter alive) and the caller learns it did not finish.
+    """
+    box: dict = {}
+
+    def worker() -> None:
+        try:
+            box["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - re-raised to the caller
+            box["error"] = exc
+
+    thread = threading.Thread(target=worker, name="bounded-call", daemon=True)
+    thread.start()
+    thread.join(timeout=max(0.0, float(timeout_s)))
+    if thread.is_alive():
+        return False, None
+    if "error" in box:
+        raise box["error"]
+    return True, box.get("value")
+
+
+def close_session(session, runtime, logger) -> None:
+    try:
+        if session is not None:
+            session.close()
+        elif runtime is not None:
+            runtime.close()
+    finally:
+        logger.close()
 
 
 def live_pose(session: AccuracySession, origin, now_s: float) -> str:
@@ -65,10 +157,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", required=True, help="existing board TOML; read only")
     parser.add_argument("--output", help="new log directory outside the Git checkout")
-    parser.add_argument("--seconds", type=float, help="optional positive run duration")
+    parser.add_argument("--seconds", type=float,
+                        help="hard total run duration, including preflight and shutdown")
+    parser.add_argument("--shutdown-timeout", type=float, default=DEFAULT_SHUTDOWN_TIMEOUT_S,
+                        help="maximum seconds spent closing sensors and logs")
     args = parser.parse_args(argv)
     if args.seconds is not None and (not math.isfinite(args.seconds) or args.seconds <= 0):
         parser.error("--seconds must be finite and positive")
+    if not math.isfinite(args.shutdown_timeout) or args.shutdown_timeout <= 0:
+        parser.error("--shutdown-timeout must be finite and positive")
+    started_s = time.monotonic()
+    hard_deadline = None if args.seconds is None else started_s + args.seconds
     output = (Path(args.output) if args.output else
               Path.home() / "car_test_logs" / time.strftime("live_relative_pose_%Y%m%d_%H%M%S"))
     output = output.resolve()
@@ -81,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     logger = JsonlEventLogger(output / "events.jsonl")
     runtime = None
     session = None
+    preflight = None
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE,
                                 event_logger=logger, sensor_only=True)
@@ -90,11 +190,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         session = AccuracySession(runtime, logger, output)
         session.start()
+        preflight = BoundedPreflight(session)
+        preflight.start()
         print("SENSOR-ONLY 2 Hz: hold at P0 until ORIGIN is set; Ctrl+C stops.", flush=True)
         origin = None
         next_tick = time.monotonic()
-        deadline = None if args.seconds is None else next_tick + args.seconds
-        while deadline is None or time.monotonic() < deadline:
+        while hard_deadline is None or time.monotonic() < hard_deadline:
             now = time.monotonic()
             if now < next_tick:
                 time.sleep(next_tick - now)
@@ -103,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             if session.error is not None:
                 raise RuntimeError("sampler failed: " + session.error)
             if origin is None:
-                ready, reasons = session.preflight()
+                ready, reasons = preflight.latest()
                 if not ready:
                     print("WAIT_ORIGIN " + "; ".join(reasons[:3]), flush=True)
                     continue
@@ -115,14 +216,20 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        if preflight is not None:
+            preflight.stop()
+        remaining = args.shutdown_timeout
+        if hard_deadline is not None:
+            remaining = min(remaining, max(1.0, hard_deadline - time.monotonic()))
         try:
-            if session is not None:
-                session.close()
-            elif runtime is not None:
-                runtime.close()
-        finally:
-            logger.close()
-            print("Logs: %s" % output, flush=True)
+            finished, _ = run_bounded(lambda: close_session(session, runtime, logger), remaining)
+        except Exception as exc:  # noqa: BLE001 - shutdown must not mask the result
+            finished = True
+            print("WARNING: shutdown reported %s: %s" % (type(exc).__name__, exc), flush=True)
+        if not finished:
+            print("WARNING: shutdown did not finish within %.1f s; exiting anyway" % remaining,
+                  flush=True)
+        print("Logs: %s" % output, flush=True)
 
 
 if __name__ == "__main__":

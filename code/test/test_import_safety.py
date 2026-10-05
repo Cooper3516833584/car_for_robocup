@@ -11,9 +11,11 @@ class ImportSafetyTests(unittest.TestCase):
         script = (
             "import threading;"
             "before=tuple(t.name for t in threading.enumerate());"
-            "import components.competition_track;"
-            "import components.fixed_track_runtime;"
-            "import components.radar_camera_line_following;"
+            "import main_robocup;"
+            "import components.differential_drive;"
+            "import components.basic_motion_controller;"
+            "import components.task_board_reader;"
+            "import task_board_startup;"
             "after=tuple(t.name for t in threading.enumerate());"
             "assert before == after == ('MainThread',), (before, after)"
         )

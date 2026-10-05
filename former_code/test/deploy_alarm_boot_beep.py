@@ -6,6 +6,7 @@ Usage (from Windows PowerShell, after the board is reachable at 192.168.31.224):
     python code/test/deploy_alarm_boot_beep.py
 """
 
+import getpass
 import os
 import sys
 import time
@@ -13,7 +14,6 @@ from pathlib import Path
 
 BOARD_HOST = os.environ.get("ROCK5A_HOST", "192.168.31.224")
 BOARD_USER = os.environ.get("ROCK5A_USER", "radxa")
-BOARD_PASS = os.environ.get("ROCK5A_PASS", "11223344")
 
 _PROJECT = Path(__file__).resolve().parent.parent.parent  # car/
 
@@ -39,7 +39,7 @@ def main() -> int:
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        c.connect(BOARD_HOST, username=BOARD_USER, password=BOARD_PASS, timeout=15)
+        c.connect(BOARD_HOST, username=BOARD_USER, password=getpass.getpass("ROCK5A password: "), timeout=15)
     except Exception as exc:
         print(f"FAILED to connect: {exc}", file=sys.stderr)
         return 1

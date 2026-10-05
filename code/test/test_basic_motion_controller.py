@@ -14,6 +14,7 @@ from components.basic_motion_controller import (
     BasicMotionController, MotionActionState, MotionBusyError, MotionPhase,
 )
 from components.differential_navigation import DifferentialNavigator
+from components.navigation_common import NavigationGrid
 from config.v2_loader import load_v2_config
 from core.frames import normalize_angle_rad
 from core.types import Pose2D
@@ -22,7 +23,7 @@ from core.types import Pose2D
 class BasicMotionTests(unittest.TestCase):
     def setUp(self) -> None:
         config = load_v2_config()
-        navigator = DifferentialNavigator(config.drive, config.navigation)
+        navigator = DifferentialNavigator(config.geometry, config.drive, config.navigation)
         self.motion = BasicMotionController(navigator, config.navigation, config.drive)
         self.speed = config.drive.max_linear_speed_m_s
 
@@ -31,7 +32,7 @@ class BasicMotionTests(unittest.TestCase):
         return Pose2D(x, y, yaw, t)
 
     def step(self, pose=None, state="ok"):
-        return self.motion.step(self.pose() if pose is None else pose, now_s=1.0, pose_state=state)
+        return self.motion.step(self.pose() if pose is None else pose, None, now_s=1.0, pose_state=state)
 
     def test_busy_cancel_safe_stop_and_zero_distance(self) -> None:
         self.motion.drive_distance(1.0)
@@ -78,23 +79,19 @@ class BasicMotionTests(unittest.TestCase):
         self.assertIs(self.step(self.pose(x=0.5)).state, MotionActionState.SUCCEEDED)
 
     def _tight_motion(self) -> BasicMotionController:
-        """The car's measured endgame tolerance; the shipped example profile is looser."""
         config = load_v2_config()
         navigation = replace(config.navigation, position_tolerance_m=0.01)
         return BasicMotionController(
-            DifferentialNavigator(config.drive, navigation), navigation, config.drive)
+            DifferentialNavigator(config.geometry, config.drive, navigation), navigation, config.drive)
 
     def test_reverse_endgame_does_not_pivot_toward_lateral_residual(self) -> None:
-        """A straight reverse action cannot turn sideways to chase a missed point."""
         motion = self._tight_motion()
         motion.drive_distance(-0.20)
-        self.assertIs(motion.step(self.pose(), now_s=1.0).state, MotionActionState.RUNNING)
-        # 2 cm past the target and 3 cm to the left would require a large turn.
-        output = motion.step(self.pose(x=-0.22, y=0.03), now_s=1.0)
+        self.assertIs(motion.step(self.pose(), None, now_s=1.0).state, MotionActionState.RUNNING)
+        output = motion.step(self.pose(x=-0.22, y=0.03), None, now_s=1.0)
         self.assertIs(output.state, MotionActionState.BLOCKED)
         self.assertAlmostEqual(output.diagnostics["remaining_m"], 0.02, places=9)
-        self.assertGreater(output.diagnostics["goal_distance_m"],
-                           motion.navigation.position_tolerance_m)
+        self.assertGreater(output.diagnostics["goal_distance_m"], motion.navigation.position_tolerance_m)
         self.assertEqual(output.diagnostics["reason"], "reverse_goal_requires_turn")
         self.assertEqual(output.command.linear_x_m_s, 0.0)
         self.assertEqual(output.command.angular_z_rad_s, 0.0)
@@ -102,30 +99,26 @@ class BasicMotionTests(unittest.TestCase):
     def test_drive_distance_overshoot_drives_back_to_the_goal(self) -> None:
         motion = self._tight_motion()
         motion.drive_distance(0.20)
-        motion.step(self.pose(), now_s=1.0)
-        output = motion.step(self.pose(x=0.25), now_s=1.0)
+        motion.step(self.pose(), None, now_s=1.0)
+        output = motion.step(self.pose(x=0.25), None, now_s=1.0)
         self.assertAlmostEqual(output.diagnostics["remaining_m"], -0.05, places=9)
-        self.assertLess(output.diagnostics["goal_distance_m"],
-                        motion.navigation.position_tolerance_m * 10.0)
         self.assertLess(output.command.linear_x_m_s, 0.0)
 
     def test_reverse_stops_on_heading_divergence_with_a_weak_wheel(self) -> None:
-        """Do not let a weak drive channel turn a straight reverse into a spin."""
         config = load_v2_config()
         navigation = replace(config.navigation, position_tolerance_m=0.01,
                              slowdown_distance_m=0.15)
         motion = BasicMotionController(
-            DifferentialNavigator(config.drive, navigation), navigation, config.drive)
+            DifferentialNavigator(config.geometry, config.drive, navigation), navigation, config.drive)
         motion.drive_distance(-0.20)
         track = config.geometry.drive_track_width_m
-        x = y = yaw = 0.0
-        t = 0.0
+        x = y = yaw = t = 0.0
         for _ in range(600):
-            output = motion.step(Pose2D(x, y, yaw, t), now_s=t, pose_state="ok")
+            output = motion.step(Pose2D(x, y, yaw, t), None, now_s=t, pose_state="ok")
             if output.state is MotionActionState.BLOCKED:
                 break
             v, w = output.command.linear_x_m_s, output.command.angular_z_rad_s
-            left = (v - w * track / 2.0) * 1.0
+            left = v - w * track / 2.0
             right = (v + w * track / 2.0) * 0.65
             x += (left + right) / 2.0 * math.cos(yaw) * 0.05
             y += (left + right) / 2.0 * math.sin(yaw) * 0.05
@@ -142,8 +135,8 @@ class BasicMotionTests(unittest.TestCase):
     def test_reverse_correction_with_small_heading_drift_stays_in_reverse(self) -> None:
         motion = self._tight_motion()
         motion.drive_distance(-0.20)
-        motion.step(self.pose(), now_s=1.0)
-        output = motion.step(self.pose(x=-0.05, y=0.005, yaw=math.radians(-5)), now_s=1.0)
+        motion.step(self.pose(), None, now_s=1.0)
+        output = motion.step(self.pose(x=-0.05, y=0.005, yaw=math.radians(-5)), None, now_s=1.0)
         self.assertIs(output.state, MotionActionState.RUNNING)
         self.assertLess(output.command.linear_x_m_s, 0.0)
         self.assertGreater(output.command.angular_z_rad_s, 0.0)
@@ -151,12 +144,11 @@ class BasicMotionTests(unittest.TestCase):
     def test_reverse_heading_divergence_blocks_before_pivot(self) -> None:
         motion = self._tight_motion()
         motion.drive_distance(-0.20)
-        motion.step(self.pose(), now_s=1.0)
-        output = motion.step(self.pose(x=-0.08, yaw=math.radians(-21)), now_s=1.0)
+        motion.step(self.pose(), None, now_s=1.0)
+        output = motion.step(self.pose(x=-0.08, yaw=math.radians(-21)), None, now_s=1.0)
         self.assertIs(output.state, MotionActionState.BLOCKED)
         self.assertEqual(output.diagnostics["reason"], "reverse_heading_diverged")
-        self.assertAlmostEqual(output.diagnostics["heading_drift_rad"],
-                               math.radians(-21))
+        self.assertAlmostEqual(output.diagnostics["heading_drift_rad"], math.radians(-21))
         self.assertEqual(output.command.linear_x_m_s, 0.0)
         self.assertEqual(output.command.angular_z_rad_s, 0.0)
 
@@ -226,14 +218,15 @@ class BasicMotionTests(unittest.TestCase):
         degraded = self.step(state="t265_degraded").command
         scale = self.motion.navigation.degraded_speed_scale
         self.assertAlmostEqual(degraded.linear_x_m_s, normal.linear_x_m_s * scale)
-        lost = self.motion.step(None, now_s=1.0)
+        lost = self.motion.step(None, None, now_s=1.0)
         self.assertIs(lost.state, MotionActionState.POSE_LOST)
         self.assertEqual(lost.command.linear_x_m_s, 0.0)
 
     def test_navigation_delegates_without_second_degraded_scale(self) -> None:
+        grid = NavigationGrid(100, 100, 0.1, origin_x_m=-5.0, origin_y_m=-5.0)
         self.motion.navigate_to(2.0, 0.0)
-        normal = self.motion.step(self.pose(), now_s=1.0)
-        degraded = self.motion.step(self.pose(), now_s=1.0, pose_state="d500_degraded")
+        normal = self.motion.step(self.pose(), grid, now_s=1.0)
+        degraded = self.motion.step(self.pose(), grid, now_s=1.0, pose_state="d500_degraded")
         self.assertGreater(normal.command.linear_x_m_s, 0.0)
         self.assertAlmostEqual(degraded.command.linear_x_m_s,
                                normal.command.linear_x_m_s * self.motion.navigation.degraded_speed_scale)

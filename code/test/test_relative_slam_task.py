@@ -35,11 +35,17 @@ class RelativeSlamTaskTests(unittest.TestCase):
         self.assertEqual(config.calibration, source.calibration)
         self.assertEqual(config.safety, source.safety)
         self.assertEqual(config.drive, source.drive)
+        self.assertEqual(config.competition_map, source.competition_map)
 
-    def test_relative_hardware_readiness_keeps_localization_gates(self):
+    def test_relative_hardware_readiness_keeps_nonlocalization_gates(self):
         config = accepted_relative_slam_profile(load_v2_config())
         errors = validate_runtime_readiness(config, RuntimeMode.HARDWARE_MISSION)
-        self.assertEqual(errors, [])
+        self.assertTrue(any("measured drive geometry" in reason for reason in errors))
+        self.assertTrue(any("measured sensor extrinsics" in reason for reason in errors))
+        self.assertTrue(any("measured competition map" in reason for reason in errors))
+        self.assertTrue(any("measured robot footprint" in reason for reason in errors))
+        self.assertFalse(any("field anchor" in reason or "wall" in reason or "D500 field" in reason
+                             for reason in errors))
         unqualified = replace(config, localization=replace(
             config.localization, slam=replace(config.localization.slam, relative_goals_only=False)))
         self.assertTrue(any("relative_goals_only" in reason for reason in
@@ -83,13 +89,9 @@ class RelativeSlamTaskTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_cli_accepts_current_fused_frame_goal(self):
-        self.assertEqual(main(["--relative-slam", "--mode", "dry-run",
-                               "--goal-x", "-2", "--goal-y", "3",
-                               "--goal-yaw", "1", "--steps", "2"]), 0)
-
-    def test_cli_yaw_requires_position_goal(self):
-        self.assertEqual(main(["--mode", "dry-run", "--goal-yaw", "1"]), 2)
+    def test_cli_rejects_field_goals_before_hardware_build(self):
+        self.assertEqual(main(["--relative-slam", "--mode", "hardware-mission",
+                               "--goal-x", "1", "--goal-y", "0"]), 2)
 
     def test_hardware_mission_defaults_to_relative_fusion(self):
         with patch("main_robocup.build_runtime", side_effect=RuntimeReadinessError("test gate")) as builder:
@@ -108,6 +110,49 @@ class RelativeSlamTaskTests(unittest.TestCase):
         with patch("main_robocup.build_runtime", side_effect=RuntimeReadinessError("test gate")) as builder:
             self.assertEqual(main(["--mode", "dry-run"]), 2)
         self.assertEqual(builder.call_args.args[0].localization.backend, "legacy")
+
+    @staticmethod
+    def _raw_t265(stamp_s: float, tracker_confidence: int) -> T265RawPose:
+        return T265RawPose(
+            translation_xyz=(0.0, 0.0, 0.0),
+            quaternion_xyzw=(0.0, 0.0, 0.0, 1.0),
+            velocity_xyz=None, angular_velocity_xyz=None,
+            tracker_confidence=tracker_confidence, mapper_confidence=0,
+            device_timestamp_ms=stamp_s * 1000.0,
+            received_monotonic_s=stamp_s,
+            measurement_monotonic_s=stamp_s,
+        )
+
+    def test_slam_bridge_is_fed_across_a_startup_continuity_break(self):
+        # End-to-end wiring guard for the 2026-10-04 latched-lost failure: a
+        # low-confidence first frame broke continuity before any continuous pose
+        # existed, and the runtime then stopped feeding the bridge entirely, so
+        # slam_toolbox could never bootstrap and fusion stayed lost until restart.
+        config = accepted_relative_slam_profile(load_v2_config())
+        clock = {"now": 10.0}
+        runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE, sensor_only=True,
+                                clock=lambda: clock["now"])
+        runtime.t265_source = FakeT265PoseSource([
+            self._raw_t265(10.0, tracker_confidence=0),
+            self._raw_t265(10.05, tracker_confidence=2),
+        ])
+        runtime.t265_source.start()
+        try:
+            self.assertIsNotNone(runtime.slam_bridge)
+            runtime._consume_t265(10.0, live_time=True)
+            self.assertIsNone(runtime.fusion.continuous_t265_pose)
+            self.assertIsNone(runtime.slam_bridge._pending_t265)
+
+            clock["now"] = 10.05
+            runtime._consume_t265(10.05, live_time=True)
+
+            pending = runtime.slam_bridge._pending_t265
+            self.assertIsNotNone(pending, "slam_bridge was starved after a continuity break")
+            self.assertEqual(pending[0].timestamp_s, 10.05)
+            self.assertIsNotNone(runtime.fusion.slam_feed_t265_pose)
+            self.assertIsNotNone(runtime.fusion.continuous_t265_pose)
+        finally:
+            runtime.close()
 
 
 if __name__ == "__main__":

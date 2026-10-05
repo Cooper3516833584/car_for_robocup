@@ -44,6 +44,14 @@ def validate_runtime_readiness(config: DifferentialRobotConfig, mode: RuntimeMod
             and config.safety.require_measured_d500_reference_for_hardware_mission
             and not config.d500_localization.reference_measured):
         errors.append("SLAM hardware mission requires a measured fixed-wall reference")
+    if config.safety.require_measured_geometry_for_hardware_mission and not config.calibration.geometry_measured:
+        errors.append("hardware mission requires measured drive geometry")
+    if config.safety.require_measured_extrinsics_for_hardware_mission and not config.calibration.sensor_extrinsics_measured:
+        errors.append("hardware mission requires measured sensor extrinsics")
+    if config.safety.require_measured_map_for_hardware_mission and not config.competition_map.measured:
+        errors.append("hardware mission requires a measured competition map")
+    if config.safety.require_measured_footprint_for_hardware_mission and not config.footprint.measured:
+        errors.append("hardware mission requires a measured robot footprint")
     if (
         config.d500.enabled
         and config.d500_localization.require_global_for_hardware

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 logging.getLogger("robocup-runtime").setLevel(logging.CRITICAL)
 logging.getLogger("components.relay_lcus").setLevel(logging.CRITICAL)
 
+from components.navigation_common import NavigationGrid
 from components.relay_lcus import FakeLCUSRelay, LCUSRelay
 from config.v2_factory import build_relay
 from config.v2_loader import load_v2_config
@@ -109,6 +110,7 @@ class RelayRuntimeTests(unittest.TestCase):
             RuntimeMode.DRY_RUN,
             clock=self.clock,
             fake_sample_count=2,
+            world=NavigationGrid(100, 100, 0.1, origin_x_m=-5.0, origin_y_m=-5.0),
         )
 
     def test_dry_run_uses_the_in_memory_relay_and_releases_it_on_close(self) -> None:
