@@ -23,7 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "code"))
 
-from components.pose_fusion import PoseFusionState  # noqa: E402
+from components.pose_fusion import (  # noqa: E402
+    PoseFusionState, SLAM_CONSENSUS_GRACE_S, SLAM_CANDIDATE_MAX_AGE_S,
+)
 from config.relative_slam_profile import accepted_relative_slam_profile  # noqa: E402
 from config.v2_factory import build_differential_drive  # noqa: E402
 from config.v2_loader import DEFAULT_V2_CONFIG, load_v2_config  # noqa: E402
@@ -65,9 +67,18 @@ class PulseResult:
     elapsed_s: float
 
 
-def accepted_fused_sample(estimate, config, now_s: float) -> PoseSample | None:
+def accepted_fused_sample(estimate, config, now_s: float, *,
+                          allow_pending: bool = False) -> PoseSample | None:
     """Require the same fresh T265+SLAM chain used by relative task actions."""
 
+    pending_age = estimate.slam_observation_age_s
+    slam_fresh = (estimate.d500_age_s is not None and estimate.d500_age_s <= 0.5)
+    if (allow_pending and estimate.slam_consensus_pending
+            and estimate.d500_age_s is not None
+            and 0.0 <= estimate.d500_age_s <= SLAM_CONSENSUS_GRACE_S
+            and pending_age is not None and math.isfinite(pending_age)
+            and 0.0 <= pending_age <= SLAM_CANDIDATE_MAX_AGE_S):
+        slam_fresh = True
     if (estimate.pose is None or estimate.state is not PoseFusionState.OK
             or not {"t265", "slam", "fused"}.issubset(estimate.source_flags)
             or not estimate.anchor_initialized
@@ -79,7 +90,7 @@ def accepted_fused_sample(estimate, config, now_s: float) -> PoseSample | None:
             ))
             or estimate.t265_age_s < 0.0 or estimate.d500_age_s < 0.0
             or estimate.t265_age_s > config.fusion.t265_max_age_s
-            or estimate.d500_age_s > 0.5
+            or not slam_fresh
             or estimate.t265_confidence < config.fusion.t265_min_tracker_confidence / 3.0):
         return None
     pose = estimate.pose

@@ -72,6 +72,13 @@ class DriveCalibrationTests(unittest.TestCase):
         self.assertIsNone(accepted_fused_sample(replace(valid, state=PoseFusionState.D500_DEGRADED), config, 1.0))
         self.assertIsNone(accepted_fused_sample(replace(valid, anchor_initialized=False), config, 1.0))
         self.assertIsNone(accepted_fused_sample(replace(valid, d500_age_s=0.6), config, 1.0))
+        pending = replace(valid, d500_age_s=0.6, slam_consensus_pending=True,
+                          slam_observation_age_s=0.15)
+        self.assertIsNone(accepted_fused_sample(pending, config, 1.0))
+        self.assertIsNotNone(accepted_fused_sample(pending, config, 1.0, allow_pending=True))
+        self.assertIsNone(accepted_fused_sample(
+            replace(pending, slam_observation_age_s=0.51), config, 1.0,
+            allow_pending=True))
         self.assertIsNone(accepted_fused_sample(replace(valid, source_flags=("t265",)), config, 1.0))
 
     def test_linear_pulse_exposes_scale_error_and_stops(self):

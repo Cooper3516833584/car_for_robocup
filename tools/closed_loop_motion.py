@@ -163,11 +163,12 @@ def measurements(start, action_end, settled, samples, request: ActionRequest, ta
     return result
 
 
-def _checked_step(runtime, config):
+def _checked_step(runtime, config, *, allow_pending=False):
     step = runtime.step()
     if step.error or step.mission_state in {RobocupMissionState.ERROR, RobocupMissionState.SAFE_STOP}:
         raise RuntimeError(step.error or "mission entered %s" % step.mission_state.value)
-    sample = accepted_fused_sample(step.estimate, config, step.now_s)
+    sample = accepted_fused_sample(step.estimate, config, step.now_s,
+                                   allow_pending=allow_pending)
     return step, sample
 
 
@@ -208,7 +209,7 @@ def run_one(runtime, config, request: ActionRequest, *, abort, max_s: float,
     while clock() < deadline:
         if abort():
             raise RuntimeError("operator aborted during action")
-        step, sample = _checked_step(runtime, config)
+        step, sample = _checked_step(runtime, config, allow_pending=True)
         if sample is None:
             raise RuntimeError("healthy fused pose lost during action")
         _check_step(samples[-1] if samples else None, sample, samples[0] if samples else sample)

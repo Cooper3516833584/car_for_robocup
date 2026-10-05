@@ -30,6 +30,8 @@ SLAM_ANCHOR_MAX_INNOVATION_M = 0.10
 # (~4.5 Hz on the car), so three samples corroborate in well under a second
 # while still rejecting a single bad transform.
 SLAM_ANCHOR_CONSENSUS_SAMPLES = 3
+SLAM_CONSENSUS_GRACE_S = 1.0
+SLAM_CANDIDATE_MAX_AGE_S = 0.5
 ANCHOR_BLEND = 0.35
 SLAM_LOOP_MAX_M = 1.0
 SLAM_LOOP_MAX_YAW_RAD = math.radians(35.0)
@@ -66,6 +68,8 @@ class FusedPoseEstimate:
     t265_confidence: float | None = None
     t265_time_alignment_ms: float | None = None
     t265_continuity_broken: bool = False
+    slam_consensus_pending: bool = False
+    slam_observation_age_s: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +123,7 @@ class PoseFusion:
         self._field_T_slam_map: Pose2D | None = None
         self._slam_received_s: float | None = None
         self._slam_candidates: deque[Pose2D] = deque(maxlen=3)
+        self._slam_candidate_source_s: float | None = None
         self._slam_migration_start: Pose2D | None = None
         self._slam_migration_target: Pose2D | None = None
         self._slam_migration_started_s: float | None = None
@@ -169,6 +174,17 @@ class PoseFusion:
             return None
         return max(0.0, now_s - self._slam_received_s)
 
+    def slam_consensus_pending(self, now_s: float) -> bool:
+        """A bounded confirmation window, not an accepted map correction."""
+        if (self.backend != "slam_toolbox" or self._map_T_t265_odom is None
+                or self._slam_received_s is None or not self._slam_candidates
+                or self._slam_candidate_source_s is None):
+            return False
+        accepted_age = now_s - self._slam_received_s
+        source_age = now_s - self._slam_candidate_source_s
+        return (0.0 <= accepted_age <= SLAM_CONSENSUS_GRACE_S
+                and 0.0 <= source_age <= SLAM_CANDIDATE_MAX_AGE_S)
+
     @property
     def global_anchor_established(self) -> bool:
         return self._map_T_t265_odom is not None and (
@@ -177,7 +193,8 @@ class PoseFusion:
         )
 
     def update_slam_anchor(self, anchor: Pose2D, *, valid: bool, timestamp_s: float,
-                           loop_closure: bool = False) -> None:
+                           loop_closure: bool = False,
+                           source_timestamp_s: float | None = None) -> None:
         """Accept a measured slam_map_T_t265_odom without changing T265 odometry."""
         self._last_d500_accepted = False
         self._last_d500_rejection = None
@@ -186,6 +203,10 @@ class PoseFusion:
             return
         if (not valid or not all(math.isfinite(value) for value in
                                  (anchor.x_m, anchor.y_m, anchor.yaw_rad, timestamp_s))):
+            self._last_d500_rejection = "invalid_slam_anchor"
+            return
+        source_s = timestamp_s if source_timestamp_s is None else float(source_timestamp_s)
+        if not math.isfinite(source_s):
             self._last_d500_rejection = "invalid_slam_anchor"
             return
         if self._slam_received_s is not None and timestamp_s <= self._slam_received_s:
@@ -223,6 +244,7 @@ class PoseFusion:
             return
         if delta_m <= SLAM_ANCHOR_MAX_INNOVATION_M and abs(delta_yaw) <= D500_MAX_INNOVATION_YAW_RAD:
             self._slam_candidates.clear()
+            self._slam_candidate_source_s = None
             self._map_T_t265_odom = Pose2D(
                 current.x_m + ANCHOR_BLEND * (anchor.x_m - current.x_m),
                 current.y_m + ANCHOR_BLEND * (anchor.y_m - current.y_m),
@@ -236,6 +258,7 @@ class PoseFusion:
             # Far too large to be a map re-solve: treat as a scan-matching
             # outlier and drop it outright.
             self._slam_candidates.clear()
+            self._slam_candidate_source_s = None
             self._last_d500_rejection = "slam_innovation_gate"
             return
         # A *single* large innovation is still rejected (2026-10-04: a one-shot
@@ -259,6 +282,7 @@ class PoseFusion:
                     > SLAM_LOOP_CONSISTENCY_YAW_RAD):
                 self._slam_candidates.clear()
         self._slam_candidates.append(anchor)
+        self._slam_candidate_source_s = source_s
         if len(self._slam_candidates) < SLAM_ANCHOR_CONSENSUS_SAMPLES:
             # Keep the historical reason for an announced loop closure; report a
             # plain persistent disagreement with the innovation gate so the two
@@ -270,6 +294,7 @@ class PoseFusion:
         self._slam_migration_target = anchor
         self._slam_migration_started_s = timestamp_s
         self._slam_candidates.clear()
+        self._slam_candidate_source_s = None
         self._slam_received_s = timestamp_s
         self._last_d500_accepted = True
 
@@ -536,7 +561,11 @@ class PoseFusion:
         )
         if self._t265_pose is not None and not t265_fresh:
             self._break_t265_continuity()
-        d500_fresh = (self.backend == "slam_toolbox" and d500_age is not None and d500_age <= 0.5) or (
+        consensus_pending = self.slam_consensus_pending(now)
+        observation_age = (None if self._slam_candidate_source_s is None
+                           else now - self._slam_candidate_source_s)
+        d500_fresh = (self.backend == "slam_toolbox" and
+                      ((d500_age is not None and d500_age <= 0.5) or consensus_pending)) or (
             self.backend != "slam_toolbox" and
             d500_age is not None and d500_age <= self.config.d500_max_age_s
             and self._d500_quality is not None and self._d500_quality.valid
@@ -579,6 +608,8 @@ class PoseFusion:
             None if self._t265_quality is None else _confidence(self._t265_quality),
             self._last_t265_alignment_ms,
             self._t265_continuity_broken,
+            consensus_pending,
+            observation_age,
         )
 
     def _accept_d500(self, pose: Pose2D, quality: PoseQuality) -> None:

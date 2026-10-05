@@ -85,3 +85,23 @@ readiness still checks localization and the C10B firmware mode. At run time,
 motion waits for a fresh accepted SLAM anchor and stops on localization loss.
 Start the ROS launch separately and verify its topics before a supervised
 mission run in a cleared area.
+
+## Localization sessions and bounded anchor confirmation
+
+Each new robot process sets its own T265 local origin. A `slam_toolbox` sidecar
+left running across separate one-action processes may still hold the previous
+map/odom session. Re-establish the sidecar and T265 session together while the
+robot is stationary, before the next preflight; do not restart the sidecar
+during an action. This is a session precaution, not a proven explanation for
+every observed map correction.
+
+The bridge publishes about five scans per second. Fusion rejects a large
+single-anchor correction and waits for three mutually consistent anchors.
+During that confirmation, a running action can continue on the last accepted
+map transform and fresh T265 pose for at most one second from the accepted
+anchor, provided the latest candidate and bridge TF stay fresh. Preflight
+still requires a recently accepted anchor. A far outlier, stale SLAM source,
+expired confirmation window, or lost T265 continues to stop motion. The
+`slam_anchor` event records the source TF time, receipt time, acceptance and
+rejection reason; `fused_pose` records the accepted-anchor age and whether
+confirmation is pending.

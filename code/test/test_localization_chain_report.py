@@ -64,6 +64,14 @@ class LocalizationChainReportTests(unittest.TestCase):
         self.assertEqual(result["verdict"]["stationary_preflight_ok"], True)
         self.assertEqual(result["verdict"]["watchdog_fired"], False)
 
+    def test_design_rate_of_five_scans_per_second_is_healthy(self) -> None:
+        events = [_slam(float(t), first_tf=100.0, last_tf=100.0 + t,
+                        publish=t * 5, inputs=t * 10) for t in range(21)]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = report.summarize(_write_run(Path(tmp), events))
+        self.assertEqual(result["scan_publish_hz"], 5.0)
+        self.assertTrue(result["verdict"]["scan_publish_hz_ok"])
+
     def test_latched_lost_run_is_flagged(self) -> None:
         # Reproduces the verify01 signature: first_tf_stamp_s null forever and
         # scan_publish_count flat at zero.

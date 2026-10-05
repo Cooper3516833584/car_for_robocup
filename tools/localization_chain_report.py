@@ -34,7 +34,7 @@ COUNTER_FIELDS = (
     "bridge_queue_overwrite_count",
 )
 STAMP_FIELDS = ("first_tf_stamp_s", "last_tf_stamp_s", "no_window_measurement_s")
-MIN_SCAN_PUBLISH_HZ = 8.0
+MIN_SCAN_PUBLISH_HZ = 3.5
 STATIONARY_OK_WINDOW_S = 10.0
 
 

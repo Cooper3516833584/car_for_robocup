@@ -45,6 +45,60 @@ class SlamAnchorTests(unittest.TestCase):
         self.assertEqual(self.fusion.estimate(1.11).rejection_reason, "slam_innovation_gate")
         self.assertAlmostEqual(self.fusion._slam_received_s, 1.0)
 
+    def test_five_hz_consensus_keeps_pose_live_without_accepting_outliers(self) -> None:
+        self.add_t265(1.0)
+        self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        for stamp in (1.2, 1.4):
+            self.add_t265(stamp)
+            self.fusion.update_slam_anchor(Pose2D(0.30, 0.0, 0.0, stamp),
+                                           valid=True, timestamp_s=stamp)
+            self.assertAlmostEqual(self.fusion.map_T_t265_odom.x_m, 0.0)
+        self.add_t265(1.55)
+        waiting = self.fusion.estimate(1.55)
+        self.assertIs(waiting.state, PoseFusionState.OK)
+        self.assertTrue(waiting.slam_consensus_pending)
+        self.assertFalse(waiting.d500_accepted)
+        self.assertAlmostEqual(waiting.d500_age_s, 0.55)
+        self.assertAlmostEqual(waiting.pose.x_m, 0.0)
+
+        self.add_t265(1.6)
+        self.fusion.update_slam_anchor(Pose2D(0.30, 0.0, 0.0, 1.6),
+                                       valid=True, timestamp_s=1.6)
+        confirmed = self.fusion.estimate(1.6)
+        self.assertIs(confirmed.state, PoseFusionState.OK)
+        self.assertFalse(confirmed.slam_consensus_pending)
+        self.assertTrue(confirmed.d500_accepted)
+        self.assertAlmostEqual(confirmed.pose.x_m, 0.0)
+
+    def test_consensus_grace_ends_on_source_timeout_or_far_outlier(self) -> None:
+        self.add_t265(1.0)
+        self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        self.add_t265(1.2)
+        self.fusion.update_slam_anchor(Pose2D(0.30, 0.0, 0.0, 1.2),
+                                       valid=True, timestamp_s=1.2)
+        self.add_t265(1.71)
+        self.assertIs(self.fusion.estimate(1.71).state, PoseFusionState.D500_DEGRADED)
+        self.fusion.update_slam_anchor(Pose2D(3.0, 0.0, 0.0, 1.71),
+                                       valid=True, timestamp_s=1.71)
+        self.assertFalse(self.fusion.slam_consensus_pending(1.71))
+        self.assertIs(self.fusion.estimate(1.71).state, PoseFusionState.D500_DEGRADED)
+
+    def test_consensus_grace_uses_source_tf_time_and_has_absolute_limit(self) -> None:
+        self.add_t265(1.0)
+        self.fusion.update_slam_anchor(Pose2D(0.0, 0.0, 0.0, 1.0), valid=True, timestamp_s=1.0)
+        self.add_t265(1.4)
+        self.fusion.update_slam_anchor(Pose2D(0.30, 0.0, 0.0, 1.4),
+                                       valid=True, timestamp_s=1.4,
+                                       source_timestamp_s=1.0)
+        self.add_t265(1.55)
+        self.assertFalse(self.fusion.slam_consensus_pending(1.55))
+        for stamp, x_m in ((1.6, -0.30), (1.8, 0.30), (2.01, -0.30)):
+            self.add_t265(stamp)
+            self.fusion.update_slam_anchor(Pose2D(x_m, 0.0, 0.0, stamp),
+                                           valid=True, timestamp_s=stamp)
+        self.assertFalse(self.fusion.slam_consensus_pending(2.01))
+        self.assertIs(self.fusion.estimate(2.01).state, PoseFusionState.D500_DEGRADED)
+
     def test_persistent_anchor_disagreement_migrates_instead_of_latching(self) -> None:
         # Regression for the 2026-10-05 on-car latch: slam_toolbox re-solved its
         # pose graph and stepped map->odom by 0.331 m, then stayed there.  The

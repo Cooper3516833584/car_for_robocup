@@ -149,7 +149,7 @@ class ClosedLoopMotionTests(unittest.TestCase):
         def sleep(seconds):
             now[0] += seconds
 
-        with patch.object(tool, "accepted_fused_sample", side_effect=lambda estimate, *_args: estimate):
+        with patch.object(tool, "accepted_fused_sample", side_effect=lambda estimate, *_args, **_kwargs: estimate):
             result = tool.run_one(runtime, object(), tool.ActionRequest("drive-distance", distance_m=0.05),
                                   abort=lambda: False, max_s=2.0, preflight_s=1.0, settle_s=1.0,
                                   preflight_stable_s=0.1,
@@ -171,7 +171,7 @@ class ClosedLoopMotionTests(unittest.TestCase):
         def sleep(seconds):
             now[0] += seconds
 
-        with patch.object(tool, "accepted_fused_sample", side_effect=lambda estimate, *_args: estimate):
+        with patch.object(tool, "accepted_fused_sample", side_effect=lambda estimate, *_args, **_kwargs: estimate):
             with self.assertRaisesRegex(TimeoutError, "did not stay healthy"):
                 tool.run_one(runtime, object(), tool.ActionRequest("drive-distance", distance_m=0.05),
                              abort=lambda: False, max_s=1.0, preflight_s=0.2, settle_s=1.0,
@@ -194,7 +194,7 @@ def _clock_and_sleep():
 def _run_one(runtime, request, *, max_s=2.0, preflight_s=1.0, settle_s=1.0,
              preflight_stable_s=0.1, abort=lambda: False):
     clock, sleep = _clock_and_sleep()
-    with patch.object(tool, "accepted_fused_sample", side_effect=lambda estimate, *_args: estimate):
+    with patch.object(tool, "accepted_fused_sample", side_effect=lambda estimate, *_args, **_kwargs: estimate):
         return tool.run_one(runtime, object(), request, abort=abort, max_s=max_s,
                             preflight_s=preflight_s, settle_s=settle_s,
                             preflight_stable_s=preflight_stable_s, sleep=sleep, clock=clock)

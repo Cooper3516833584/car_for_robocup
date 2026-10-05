@@ -15,6 +15,7 @@ class SlamAnchor:
     valid: bool = True
     loop_closure: bool = False
     source: str = "slam_toolbox"
+    source_timestamp_s: float | None = None
 
     def age_s(self, now_s: float) -> float:
         return max(0.0, now_s - self.timestamp_s)
@@ -23,4 +24,5 @@ class SlamAnchor:
         return self.valid and all(math.isfinite(value) for value in (
             self.pose.x_m, self.pose.y_m, self.pose.yaw_rad,
             self.pose.timestamp_s, self.timestamp_s,
+            self.timestamp_s if self.source_timestamp_s is None else self.source_timestamp_s,
         ))

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -17,8 +18,9 @@ from config.relative_slam_profile import accepted_relative_slam_profile
 from config.v2_loader import load_v2_config
 from config.v2_models import ConfigV2Error, LocalizationConfig, SlamLocalizationConfig
 from config.v2_runtime import RuntimeMode, validate_runtime_readiness
+from core.types import Pose2D, PoseQuality
 from main_robocup import main
-from robocup_runtime import RuntimeReadinessError, build_runtime
+from robocup_runtime import RobocupMissionState, RuntimeReadinessError, build_runtime
 
 
 class RelativeSlamTaskTests(unittest.TestCase):
@@ -80,6 +82,49 @@ class RelativeSlamTaskTests(unittest.TestCase):
         try:
             runtime._consume_t265(10.0, live_time=True)
             self.assertEqual(runtime.fusion.continuous_t265_pose.timestamp_s, 10.0)
+        finally:
+            runtime.close()
+
+    def test_running_action_continues_during_consensus_then_stops_on_source_loss(self):
+        config = accepted_relative_slam_profile(load_v2_config())
+        now = [1.4]
+        runtime = build_runtime(config, RuntimeMode.DRY_RUN, clock=lambda: now[0])
+        runtime.start()  # Fake sensors and fake drive only.
+        try:
+            runtime.mode = RuntimeMode.HARDWARE_MISSION
+            runtime._consume_t265 = lambda *_args, **_kwargs: None
+            runtime._consume_d500 = lambda *_args, **_kwargs: None
+            runtime._consume_slam = lambda *_args, **_kwargs: None
+            bridge_state = ["SLAM_OK"]
+            runtime.slam_bridge = SimpleNamespace(
+                state=lambda _now: bridge_state[0],
+                healthy=lambda _now: bridge_state[0] == "SLAM_OK",
+            )
+            good = PoseQuality("t265", True, False, 1.0, 1.0)
+            for stamp, anchor_x in ((1.0, 0.0), (1.2, 0.30), (1.4, 0.30)):
+                runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, stamp), good)
+                runtime.fusion.update_slam_anchor(
+                    Pose2D(anchor_x, 0.0, 0.0, stamp), valid=True, timestamp_s=stamp)
+            self.assertFalse(runtime._hardware_global_localization_ready(1.55),
+                             "pending candidates cannot pass startup readiness")
+            runtime.mission.state = RobocupMissionState.READY
+            runtime.motion.drive_distance(0.5)
+            starting = runtime.step(now_s=1.4)
+            self.assertGreater(starting.command.linear_x_m_s, 0.0)
+
+            now[0] = 1.55
+            runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.55), good)
+            moving = runtime.step(now_s=1.55)
+            self.assertTrue(moving.estimate.slam_consensus_pending)
+            self.assertGreater(moving.command.linear_x_m_s, 0.0)
+            self.assertTrue(runtime.drive.is_running)
+
+            now[0] = 1.71
+            runtime.fusion.update_t265(Pose2D(0.0, 0.0, 0.0, 1.71), good)
+            bridge_state[0] = "SLAM_STALE"
+            stopped = runtime.step(now_s=1.71)
+            self.assertEqual(stopped.command.linear_x_m_s, 0.0)
+            self.assertTrue(runtime.drive.backend.stopped)
         finally:
             runtime.close()
 

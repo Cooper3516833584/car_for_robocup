@@ -315,6 +315,8 @@ python3 tools/localization_chain_report.py --compare \
 | 6 | 无回归 | `compileall` 通过、≥781 tests OK、`git diff --check` 干净 | ✅ 本机与板端均 **825 tests, OK (skipped=8)**；两边 `git diff --check` 干净 |
 | 7 | 安全门未放宽 | 未改 readiness、未提限速、未改 C10B 协议、未禁用看门狗 | ✅ 仅改 `PoseFusion` 的连续性与 anchor 语义、`SlamBridge` 的放行/看门狗/启动状态、运行时取用哪个 T265 访问器；`estimate()` 的 state 判定、readiness、驱动限速、C10B 编码、驱动看门狗均未触碰 |
 
+2026-10-05 后续修正：链路报告的扫描发布健康下限改为 3.5/s，与桥接层 5/s 限速和既有预检口径一致；上表保留最初 8/s 验收项及当时发现的设计矛盾。
+
 端到端动作（额外验证，不在 7 条验收项内）：
 
 - **前进 20 cm 成功**（run08，`closed_loop_motion.py drive-distance --cm 20`，操作者监护 + 急停就位）：

@@ -424,7 +424,8 @@ class SlamBridge:
                     continue
                 with self._lock:
                     self._anchor = SlamAnchor(
-                        pose, now_s, loop_closure=now_s <= self._loop_pending_until_s
+                        pose, now_s, loop_closure=now_s <= self._loop_pending_until_s,
+                        source_timestamp_s=mapper.to_monotonic_s(transform_ns),
                     )
                     self._anchor_count += 1
                     self._tf_lookup_success = True

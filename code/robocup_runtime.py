@@ -293,6 +293,7 @@ class RobocupRuntime:
             modulus_ms=D500_TIMESTAMP_MODULUS_MS
         )
         self._d500_global_pending = False
+        self._slam_action_started_with_fresh_anchor = False
         self._started = False
         self._closed = False
         self._error: str | None = None
@@ -391,6 +392,9 @@ class RobocupRuntime:
                 t265_confidence=estimate.t265_confidence,
                 t265_time_alignment_ms=estimate.t265_time_alignment_ms,
                 t265_continuity_broken=estimate.t265_continuity_broken,
+                slam_consensus_pending=estimate.slam_consensus_pending,
+                slam_observation_age_s=estimate.slam_observation_age_s,
+                slam_accepted_age_s=estimate.d500_age_s if self.config.localization.backend == "slam_toolbox" else None,
             )
             localization_loss_pending = self._handle_localization(estimate, now)
             d500_global_pending = not self._hardware_global_localization_ready(now)
@@ -414,9 +418,11 @@ class RobocupRuntime:
                 navigation_output = self.motion.last_navigation_output
                 command = motion_output.command
                 if motion_output.state is MotionActionState.SUCCEEDED:
+                    self._slam_action_started_with_fresh_anchor = False
                     self.mission.on_motion_done()
                     command = Twist2D(0.0, 0.0)
                 elif motion_output.state in {MotionActionState.BLOCKED, MotionActionState.POSE_LOST, MotionActionState.SAFE_STOPPED, MotionActionState.ERROR}:
+                    self._slam_action_started_with_fresh_anchor = False
                     self.mission.request_safe_stop(
                         str(motion_output.diagnostics.get("reason", motion_output.state.value))
                     )
@@ -881,6 +887,20 @@ class RobocupRuntime:
                 self.fusion.update_slam_anchor(
                     anchor.pose, valid=True, timestamp_s=anchor.timestamp_s,
                     loop_closure=anchor.loop_closure,
+                    source_timestamp_s=anchor.source_timestamp_s,
+                )
+                anchor_estimate = self.fusion.estimate(now_s)
+                self._emit(
+                    "slam_anchor",
+                    x_m=anchor.pose.x_m, y_m=anchor.pose.y_m,
+                    yaw_rad=anchor.pose.yaw_rad,
+                    source_timestamp_s=anchor.source_timestamp_s,
+                    received_timestamp_s=anchor.timestamp_s,
+                    source_age_s=(None if anchor.source_timestamp_s is None
+                                  else now_s - anchor.source_timestamp_s),
+                    accepted=anchor_estimate.d500_accepted,
+                    rejection_reason=anchor_estimate.rejection_reason,
+                    consensus_pending=anchor_estimate.slam_consensus_pending,
                 )
         if self._last_slam_metrics_s is None or now_s - self._last_slam_metrics_s >= 1.0:
             metrics = bridge.metrics()
@@ -1045,8 +1065,15 @@ class RobocupRuntime:
             if self.mode is not RuntimeMode.HARDWARE_MISSION:
                 return True
             accepted_age = self.fusion.slam_anchor_age_s(now_s)
-            if (self.slam_bridge is None or self.slam_bridge.state(now_s) != "SLAM_OK"
-                    or accepted_age is None or accepted_age > 0.5):
+            bridge_ok = self.slam_bridge is not None and self.slam_bridge.state(now_s) == "SLAM_OK"
+            if self.motion.state is not MotionActionState.RUNNING:
+                self._slam_action_started_with_fresh_anchor = False
+            elif bridge_ok and accepted_age is not None and accepted_age <= 0.5:
+                self._slam_action_started_with_fresh_anchor = True
+            if (not bridge_ok or accepted_age is None or
+                    (accepted_age > 0.5 and not (
+                        self._slam_action_started_with_fresh_anchor
+                        and self.fusion.slam_consensus_pending(now_s)))):
                 return False
             if self.config.localization.slam.require_field_anchor:
                 return (
