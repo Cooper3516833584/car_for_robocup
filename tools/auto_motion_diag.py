@@ -637,6 +637,12 @@ def analyze_speed_sweep(events, segments, telemetry, track):
     first_command = min((e['command_call_host_s'] for e in events if e['type']=='diag_drive_command'),default=math.inf)
     baseline = [r for r in telemetry if r['t_mono'] < first_command]
     med = lambda values:statistics.median(values) if values else None
+    def correlation(pairs):
+        if len(pairs)<6:
+            return None
+        xm,ym=statistics.mean(x for x,y in pairs),statistics.mean(y for x,y in pairs)
+        denominator=math.sqrt(sum((x-xm)**2 for x,y in pairs)*sum((y-ym)**2 for x,y in pairs))
+        return sum((x-xm)*(y-ym) for x,y in pairs)/denominator if denominator else None
     center = [med([r['int16_be_fields'][i] for r in baseline]) for i in range(9)]
     noise = [med([abs(r['int16_be_fields'][i]-center[i]) for r in baseline]) if baseline else None for i in range(9)]
     rows = []
@@ -668,8 +674,12 @@ def analyze_speed_sweep(events, segments, telemetry, track):
             still = None
             for e in after:
                 t = e['t265_received_time']
-                window = [a for a in after if t-.30 <= a['t265_received_time'] <= t]
-                if len(window)>=6 and window[-1]['t265_received_time']-window[0]['t265_received_time']>=.28 and max((b['t265_received_time']-a['t265_received_time'] for a,b in zip(window,window[1:])),default=1)<.12 and med([norm(a) for a in window])<math.radians(2):
+                # Include the sample bracketing the left boundary. Requiring
+                # samples strictly inside the window to span .30 s incorrectly
+                # rejects a healthy ~18 Hz stream whose timestamps are offset.
+                before=[a for a in after if a['t265_received_time']<=t-.30]
+                window=before[-1:]+[a for a in after if t-.30<a['t265_received_time']<=t]
+                if before and len(window)>=6 and max((b['t265_received_time']-a['t265_received_time'] for a,b in zip(window,window[1:])),default=1)<.12 and med([norm(a) for a in window])<math.radians(2):
                     still = t
                     break
             post_still = [e for e in after if still is not None and e['t265_received_time']>=still]
@@ -705,18 +715,25 @@ def analyze_speed_sweep(events, segments, telemetry, track):
     # Firmware field semantics are not assumed. Identify command-correlated
     # int16 patterns across the sweep, then compare with the stationary pattern.
     correlations=[]
+    aligned=[]; raw_index=0
+    for frame in sorted(telemetry,key=lambda r:r['t_mono']):
+        if not raw:
+            break
+        while raw_index+1<len(raw) and abs(raw[raw_index+1]['t265_received_time']-frame['t_mono'])<=abs(raw[raw_index]['t265_received_time']-frame['t_mono']):
+            raw_index+=1
+        if abs(raw[raw_index]['t265_received_time']-frame['t_mono'])<=.12:
+            aligned.append((frame,raw[raw_index]['raw_angular_velocity_xyz'][1]))
     for i in range(9):
         pairs=[(r['requested_omega_rad_s'],r['telemetry_steady_fields'][i]) for r in rows if r.get('telemetry_steady_samples',0)>=3]
-        corr=None
-        if len(pairs)>=6:
-            xm,ym=statistics.mean(x for x,y in pairs),statistics.mean(y for x,y in pairs)
-            numerator=sum((x-xm)*(y-ym) for x,y in pairs)
-            denominator=math.sqrt(sum((x-xm)**2 for x,y in pairs)*sum((y-ym)**2 for x,y in pairs))
-            corr=numerator/denominator if denominator else None
-        signal=med([abs(y-center[i]) for x,y in pairs]) if pairs and baseline else None
-        selected=corr is not None and abs(corr)>=.80 and signal is not None and signal>max(20,6*noise[i])
+        corr=correlation(pairs)
+        sensor_corr=correlation([(vertical,frame['int16_be_fields'][i]) for frame,vertical in aligned])
+        signal=med([abs(frame['int16_be_fields'][i]-center[i]) for frame,vertical in aligned if abs(vertical)>math.radians(5)]) if baseline else None
+        # Slow starts can leave the prescribed steady window almost stationary.
+        # Also validate the full time-aligned movement pattern against T265;
+        # this identifies a field without inventing its units or semantics.
+        selected=((corr is not None and abs(corr)>=.80) or (sensor_corr is not None and abs(sensor_corr)>=.80)) and signal is not None and signal>max(20,6*noise[i])
         correlations.append({'byte_offset':2+2*i,'correlation_with_requested_omega':corr,'stationary_median':center[i],
-                             'stationary_mad':noise[i],'median_motion_deviation':signal,'selected':selected})
+                             'correlation_with_t265_vertical':sensor_corr,'stationary_mad':noise[i],'median_motion_deviation':signal,'selected':selected})
     selected=[i for i,c in enumerate(correlations) if c['selected']]
     for row in rows:
         if 't_stop_cmd' not in row:
@@ -724,8 +741,9 @@ def analyze_speed_sweep(events, segments, telemetry, track):
         stop=row['t_stop_cmd']
         after=[r for r in telemetry if stop<=r['t_mono']<=stop+2]
         thresholds={i:max(5,3*noise[i],.10*correlations[i]['median_motion_deviation']) for i in selected}
-        distinguishable=bool(selected) and any(row['telemetry_steady_fields'][i] is not None and abs(row['telemetry_steady_fields'][i]-center[i])>thresholds[i] for i in selected)
-        zero,confirm=sustained(after,lambda r:all(abs(r['int16_be_fields'][i]-center[i])<=thresholds[i] for i in selected),.10,time_key='t_mono',max_gap=.15) if distinguishable else (None,None)
+        before=[r for r in telemetry if row['t_command_start']<=r['t_mono']<=stop]
+        distinguishable=bool(selected) and any(abs(r['int16_be_fields'][i]-center[i])>thresholds[i] for r in before for i in selected)
+        zero,confirm=sustained(after,lambda r:all(abs(r['int16_be_fields'][i]-center[i])<=thresholds[i] for i in selected),.10,time_key='t_mono',max_gap=.15) if selected else (None,None)
         row.update(t_c10b_zero=zero,t_c10b_zero_confirmed=confirm,c10b_stop_delay_s=None if zero is None else zero-stop,
                    telemetry_stop_samples=len(after),telemetry_stop_pattern_observable=distinguishable)
         # Require valid, dense evidence through the end before flagging a
@@ -733,7 +751,9 @@ def analyze_speed_sweep(events, segments, telemetry, track):
         coverage=len(after)>=10 and after[-1]['t_mono']>=stop+1.8 and max((b['t_mono']-a['t_mono'] for a,b in zip(after,after[1:])),default=2)<=.20
         delay=row['c10b_stop_delay_s']
         row['stop_class']='UNKNOWN_TELEMETRY_PATTERN'
-        if distinguishable and zero is None and coverage:
+        if selected and not distinguishable and zero is not None:
+            row['stop_class']='ALREADY_STATIONARY_PATTERN'
+        elif distinguishable and zero is None and coverage:
             row['stop_class']='C10B_STOP_RESPONSE_ABNORMAL'
         elif zero is not None:
             yaw=row['yaw_after_t265_still_deg']
@@ -801,6 +821,8 @@ def render_speed_sweep(report,manifest):
             '- post-still yaw: '+fmt(summary['max_post_still_yaw_deg'])+'°','',
             '## Direction symmetry','', '- result: '+json.dumps(summary['direction_asymmetry'],ensure_ascii=False),'',
             '## Diagnosis','', '- verdict: '+report['verdict'], '- evidence: '+sweep['measurement_note'],
+            '- worst start delay: '+fmt(summary['worst_start_delay_s'])+' s',
+            '- STOP classes: '+json.dumps(dict(Counter(r.get('stop_class','NOT_RUN') for r in sweep['rows'])),ensure_ascii=False),
             '- error: '+str(report.get('error')),'', '## Changes','', '- code: existing auto_motion_diag.py rotation_speed_sweep only',
             '- config: unchanged; no controller or protocol changes','', '## Next recommended change','',
             ('下一轮仅评估旋转最小有效角速度 '+fmt(summary['minimum_reliable_rotation_omega'])+' rad/s。' if report['verdict']=='DRIVE_ROTATION_DEADZONE_CONFIRMED' else '下一轮仅同步核对 C10B 遥测与两侧电机实际响应。')]
@@ -894,6 +916,7 @@ def rotation_speed_sweep(config, output, manifest, path):
         if not report['error']:
             report['verdict']=report['rotation_speed_sweep']['verdict']
         report.update(dropped_events=capture.dropped_events,log_write_error=capture.write_error,telemetry_error=telemetry_error,
+                      watchdog_stop_count=runner.drive.watchdog_stop_count if runner.drive is not None else None,
                       active_config_unchanged=hashlib.sha256(path.read_bytes()).hexdigest()==manifest['config_sha256'])
         if capture.dropped_events or capture.write_error:
             report['verdict']='FAILED_LOCALIZATION'
