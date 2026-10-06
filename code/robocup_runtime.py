@@ -480,6 +480,12 @@ class RobocupRuntime:
 
             limited = self.drive.last_limited_twist
             wheels = self.drive.kinematics.twist_to_wheels(limited)
+            encoded_wheels = (getattr(self.drive.backend, "last_encoded_wheel_speeds_m_s", None)
+                              if self.drive.is_running else None)
+            c10b_command = (getattr(self.drive.backend, "last_c10b_chassis_command", None)
+                            if self.drive.is_running else None)
+            encoded_left = None if encoded_wheels is None else encoded_wheels[0]
+            encoded_right = None if encoded_wheels is None else encoded_wheels[1]
             self._emit(
                 "drive_command",
                 requested_v_m_s=command.linear_x_m_s,
@@ -488,6 +494,15 @@ class RobocupRuntime:
                 limited_omega_rad_s=limited.angular_z_rad_s,
                 left_target_m_s=wheels.left_m_s,
                 right_target_m_s=wheels.right_m_s,
+                c10b_encoded_left_m_s=encoded_left,
+                c10b_encoded_right_m_s=encoded_right,
+                c10b_vx_mm_s=None if c10b_command is None else c10b_command.linear_mm_s,
+                c10b_vz_mrad_s=None if c10b_command is None else c10b_command.angular_mrad_s,
+                c10b_reverse_compensation_applied=(
+                    self.config.drive.protocol_mode == "differential_vx_vz"
+                    and limited.linear_x_m_s < 0.0
+                    and encoded_wheels is not None
+                ),
                 protocol_mode=self.config.drive.protocol_mode,
                 actuation_enabled=self.drive.is_running,
             )
@@ -581,9 +596,11 @@ class RobocupRuntime:
         raw = self.t265_source.read()
         if raw is None:
             return
-        if (live_time and self.config.localization.backend == "slam_toolbox"
+        mapped_measurement_time = raw.measurement_monotonic_s
+        time_clamped = (live_time and self.config.localization.backend == "slam_toolbox"
                 and raw.measurement_monotonic_s is not None
-                and raw.measurement_monotonic_s > raw.received_monotonic_s):
+                and raw.measurement_monotonic_s > raw.received_monotonic_s)
+        if time_clamped:
             # The device-clock fit can lead the host receipt by a few ms.
             # Keep the production SLAM path causal, as in the manual probe.
             raw = replace(raw, measurement_monotonic_s=raw.received_monotonic_s)
@@ -616,6 +633,14 @@ class RobocupRuntime:
                 t265_device_timestamp_ms=raw.device_timestamp_ms,
                 raw_translation_xyz=raw.translation_xyz,
                 raw_quaternion_xyzw=raw.quaternion_xyzw,
+                raw_velocity_xyz=raw.velocity_xyz,
+                raw_angular_velocity_xyz=raw.angular_velocity_xyz,
+                t265_mapped_measurement_time_before_causal_clamp=mapped_measurement_time,
+                t265_measurement_time_used=raw.measurement_monotonic_s,
+                t265_received_time_monotonic=raw.received_monotonic_s,
+                measurement_to_receive_ms=(None if mapped_measurement_time is None else
+                                           (raw.received_monotonic_s - mapped_measurement_time) * 1000.0),
+                measurement_time_clamped_to_receive=bool(time_clamped),
                 tracker_confidence=raw.tracker_confidence,
                 mapper_confidence=raw.mapper_confidence,
             )
@@ -631,6 +656,14 @@ class RobocupRuntime:
                 t265_device_timestamp_ms=raw.device_timestamp_ms,
                 raw_translation_xyz=raw.translation_xyz,
                 raw_quaternion_xyzw=raw.quaternion_xyzw,
+                raw_velocity_xyz=raw.velocity_xyz,
+                raw_angular_velocity_xyz=raw.angular_velocity_xyz,
+                t265_mapped_measurement_time_before_causal_clamp=mapped_measurement_time,
+                t265_measurement_time_used=raw.measurement_monotonic_s,
+                t265_received_time_monotonic=raw.received_monotonic_s,
+                measurement_to_receive_ms=(None if mapped_measurement_time is None else
+                                           (raw.received_monotonic_s - mapped_measurement_time) * 1000.0),
+                measurement_time_clamped_to_receive=bool(time_clamped),
                 mapper_confidence=raw.mapper_confidence,
             )
 
@@ -890,6 +923,7 @@ class RobocupRuntime:
                     source_timestamp_s=anchor.source_timestamp_s,
                 )
                 anchor_estimate = self.fusion.estimate(now_s)
+                anchor_diagnostics = self.fusion.slam_anchor_diagnostics(now_s)
                 self._emit(
                     "slam_anchor",
                     x_m=anchor.pose.x_m, y_m=anchor.pose.y_m,
@@ -901,6 +935,7 @@ class RobocupRuntime:
                     accepted=anchor_estimate.d500_accepted,
                     rejection_reason=anchor_estimate.rejection_reason,
                     consensus_pending=anchor_estimate.slam_consensus_pending,
+                    **anchor_diagnostics,
                 )
         if self._last_slam_metrics_s is None or now_s - self._last_slam_metrics_s >= 1.0:
             metrics = bridge.metrics()

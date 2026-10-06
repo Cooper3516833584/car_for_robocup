@@ -80,7 +80,8 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         self.assertAlmostEqual(result["fused"]["longitudinal_m"], 0.495, places=3)
         self.assertAlmostEqual(result["fused"]["lateral_m"], 0.0, places=3)
         self.assertEqual(result["fused_jumps"]["steps_over_5cm"], 0)
-        self.assertEqual(result["slam_innovation"]["nonzero_updates"], 0)
+        self.assertEqual(result["slam_innovation"]["fused_samples_with_nonzero_last_innovation"], 0)
+        self.assertEqual(result["slam_anchor_events"]["total"], 0)
         self.assertTrue(result["validity"]["action_valid"])
         self.assertEqual(result["validity"]["invalid_reasons"], [])
 
@@ -90,11 +91,35 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         self.assertGreater(result["fused_jumps"]["max_step_m"], 0.02)
         self.assertAlmostEqual(result["fused_jumps"]["max_step_at_s"], 12.0, places=1)
         self.assertAlmostEqual(result["slam_innovation"]["max_m"], 0.21, places=3)
-        self.assertEqual(result["slam_innovation"]["nonzero_updates"], 1)
+        self.assertEqual(result["slam_innovation"]["fused_samples_with_nonzero_last_innovation"], 1)
         # A 3.5 cm step is a warning at the 1 cm acceptance scale, not yet the
         # tool's own 10 cm abort bound.
         self.assertTrue(result["validity"]["action_valid"])
         self.assertTrue(any("innovation" in item for item in result["validity"]["warnings"]))
+
+    def test_counts_unique_slam_anchor_events_and_relabels_t265_adapter(self) -> None:
+        def mutate(events: list[dict]) -> None:
+            events.extend([
+                {"t": 12.0, "type": "slam_anchor", "accepted": True,
+                 "innovation_m": 0.01, "innovation_yaw_rad": 0.02},
+                {"t": 12.1, "type": "slam_anchor", "accepted": False,
+                 "consensus_pending": True, "rejection_reason": "slam_innovation_gate",
+                 "innovation_m": 0.21, "innovation_yaw_rad": -0.03},
+                {"t": 12.0, "type": "t265_pose", "x_m": 0.0, "y_m": 0.0,
+                 "yaw_rad": 3.13, "tracker_confidence": 3},
+                {"t": 12.1, "type": "t265_pose", "x_m": 0.0, "y_m": 0.0,
+                 "yaw_rad": -3.13, "tracker_confidence": 2},
+            ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = analyze.summarize(_write_run(Path(tmp), mutate=mutate))
+        self.assertEqual(result["slam_anchor_events"]["total"], 2)
+        self.assertEqual(result["slam_anchor_events"]["accepted"], 1)
+        self.assertEqual(result["slam_anchor_events"]["rejected"], 1)
+        self.assertEqual(result["slam_anchor_events"]["consensus_pending"], 1)
+        self.assertEqual(result["slam_anchor_events"]["rejection_reasons"]["slam_innovation_gate"], 1)
+        self.assertNotIn("t265_raw", result)
+        self.assertAlmostEqual(result["t265_adapter"]["yaw_change_deg"], 1.328, places=2)
 
     def test_jump_beyond_the_tool_abort_bound_is_invalid(self) -> None:
         def mutate(events: list[dict]) -> None:

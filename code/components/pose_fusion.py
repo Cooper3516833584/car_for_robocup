@@ -174,6 +174,19 @@ class PoseFusion:
             return None
         return max(0.0, now_s - self._slam_received_s)
 
+    def slam_anchor_diagnostics(self, now_s: float) -> dict[str, float | int | bool | None]:
+        """Return a read-only snapshot of anchor state for diagnostics."""
+        candidate_age = (None if self._slam_candidate_source_s is None else
+                         max(0.0, now_s - self._slam_candidate_source_s))
+        return {
+            "innovation_m": self._last_d500_innovation_m,
+            "innovation_yaw_rad": self._last_d500_innovation_yaw_rad,
+            "candidate_count": len(self._slam_candidates),
+            "candidate_age_s": candidate_age,
+            "accepted_anchor_age_s": self.slam_anchor_age_s(now_s),
+            "migration_active": self._slam_migration_started_s is not None,
+        }
+
     def slam_consensus_pending(self, now_s: float) -> bool:
         """A bounded confirmation window, not an accepted map correction."""
         if (self.backend != "slam_toolbox" or self._map_T_t265_odom is None

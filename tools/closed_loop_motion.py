@@ -8,11 +8,12 @@ Start the repository's SLAM sidecar separately and verify the physical stop.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
 from pathlib import Path
+import platform
 import signal
 import subprocess
 import sys
@@ -155,11 +156,13 @@ def measurements(start, action_end, settled, samples, request: ActionRequest, ta
     if request.name == "rotate":
         result["rotation_error_rad"] = accumulated_yaw - request.angle_rad
     if request.name == "drive-distance" and math.isclose(abs(request.distance_m), 0.50, abs_tol=1e-9):
-        result["precision_met"] = abs(result["distance_error_m"]) <= 0.01 + 1e-9
+        result["fused_precision_met"] = abs(result["distance_error_m"]) <= 0.01 + 1e-9
     elif request.name == "rotate" and math.isclose(abs(request.angle_rad), math.pi / 2, abs_tol=1e-9):
-        result["precision_met"] = abs(result["rotation_error_rad"]) <= math.radians(1.0) + 1e-9
+        result["fused_precision_met"] = abs(result["rotation_error_rad"]) <= math.radians(1.0) + 1e-9
     else:
-        result["precision_met"] = None
+        result["fused_precision_met"] = None
+    result["precision_source"] = "fused_pose"
+    result["precision_met"] = result["fused_precision_met"]  # Deprecated compatibility alias.
     return result
 
 
@@ -174,8 +177,10 @@ def _checked_step(runtime, config, *, allow_pending=False):
 
 def run_one(runtime, config, request: ActionRequest, *, abort, max_s: float,
             preflight_s: float, settle_s: float, preflight_stable_s: float = PREFLIGHT_STABLE_S,
-            sleep=time.sleep, clock=time.monotonic) -> dict:
+            sleep=time.sleep, clock=time.monotonic, on_started=None) -> dict:
     runtime.start()
+    if on_started is not None:
+        on_started(runtime)
     deadline = clock() + preflight_s
     ready = None
     origin = None
@@ -279,6 +284,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+CRITICAL_SOURCE_FILES = (
+    "code/robocup_runtime.py",
+    "code/components/basic_motion_controller.py",
+    "code/components/differential_drive.py",
+    "code/components/differential_kinematics.py",
+    "code/components/c10b_diff_backend.py",
+    "code/components/rear_motor.py",
+    "code/components/t265_driver.py",
+    "code/components/t265_pose_adapter.py",
+    "code/components/pose_fusion.py",
+    "code/components/slam_bridge.py",
+    "code/components/slam_scan_source.py",
+    "tools/closed_loop_motion.py",
+)
+
+
+def _git_text(*args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True,
+                            text=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def _atomic_manifest_write(path: Path, manifest: dict) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _manifest_source_sha256() -> dict[str, str]:
+    return {relative: hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
+            for relative in CRITICAL_SOURCE_FILES if (ROOT / relative).is_file()}
+
+
+def _runtime_serial(runtime) -> str:
+    source = getattr(runtime, "t265_source", None)
+    serial = getattr(source, "serial", None)
+    return str(serial) if serial else "unknown"
+
+
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -308,15 +352,28 @@ def main(argv=None) -> int:
         max_angular_speed_rad_s=min(config.drive.max_angular_speed_rad_s, limits.max_angular_speed_rad_s),
         max_wheel_speed_m_s=min(config.drive.max_wheel_speed_m_s, limits.max_wheel_speed_m_s)))
     output.mkdir(parents=True, exist_ok=False)
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ROOT), capture_output=True,
-                            text=True, check=False).stdout.strip()
+    commit = _git_text("rev-parse", "HEAD")
+    git_status = _git_text("status", "--porcelain=v1")
     manifest = {"action": request.__dict__, "config_path": str(config_path),
                 "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
-                "commit": commit, "mode": RuntimeMode.HARDWARE_MISSION.value,
+                "commit": commit, "git_status_porcelain": git_status,
+                "git_dirty": bool(git_status),
+                "critical_source_sha256": _manifest_source_sha256(),
+                "mode": RuntimeMode.HARDWARE_MISSION.value,
+                "effective_protocol_mode": config.drive.protocol_mode,
+                "effective_drive_config": asdict(config.drive),
+                "effective_navigation_config": asdict(config.navigation),
+                "effective_t265_mount": asdict(config.t265_mount),
+                "localization_backend": config.localization.backend,
+                "relative_slam_profile_applied": bool(config.localization.slam.relative_goals_only),
+                "t265_serial": "unknown", "slam_session_id": "unknown",
+                "sidecar_identity": "unknown",
+                "python": sys.version, "platform": platform.platform(),
                 "speed_caps": {"linear_m_s": config.drive.max_linear_speed_m_s,
                                "angular_rad_s": config.drive.max_angular_speed_rad_s},
                 "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_path = output / "manifest.json"
+    _atomic_manifest_write(manifest_path, manifest)
     logger = JsonlEventLogger(output / "events.jsonl")
     runtime = None
     aborted = [False]
@@ -326,10 +383,16 @@ def main(argv=None) -> int:
             previous_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, lambda _signum, _frame: aborted.__setitem__(0, True))
     summary = {"valid": False, "action": request.name, "error": None}
+
+    def update_started_runtime(started_runtime) -> None:
+        manifest["t265_serial"] = _runtime_serial(started_runtime)
+        _atomic_manifest_write(manifest_path, manifest)
+
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
         summary.update(run_one(runtime, config, request, abort=lambda: aborted[0], max_s=args.max_seconds,
-                               preflight_s=30.0, settle_s=3.0))
+                               preflight_s=30.0, settle_s=3.0,
+                               on_started=update_started_runtime))
         summary["valid"] = True
     except BaseException as exc:
         summary["error"] = "%s: %s" % (type(exc).__name__, exc)
@@ -347,14 +410,19 @@ def main(argv=None) -> int:
         if logger.dropped_events or logger.write_error:
             summary["valid"] = False
             summary["error"] = summary["error"] or "event log incomplete"
-        summary["precision_met"] = summary.get("metrics", {}).get("precision_met")
+        metrics = summary.get("metrics", {})
+        summary["fused_precision_met"] = metrics.get(
+            "fused_precision_met", metrics.get("precision_met")
+        )
+        summary["precision_source"] = "fused_pose"
+        summary["precision_met"] = summary["fused_precision_met"]  # Deprecated compatibility alias.
         (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("summary: %s" % (output / "summary.json"))
     if summary["error"]:
         print("ERROR: %s" % summary["error"])
-    elif summary["precision_met"] is False:
-        print("PRECISION FAIL: action completed but its settled error exceeded the target")
-    return 0 if summary["valid"] and summary["precision_met"] is not False else (3 if summary["valid"] else 1)
+    elif summary["fused_precision_met"] is False:
+        print("FUSED-POSE PRECISION FAIL: action completed but its fused settled error exceeded the target")
+    return 0 if summary["valid"] and summary["fused_precision_met"] is not False else (3 if summary["valid"] else 1)
 
 
 if __name__ == "__main__":

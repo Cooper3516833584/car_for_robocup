@@ -117,6 +117,19 @@ class PoseFusionTests(unittest.TestCase):
         self.assertAlmostEqual(fusion.map_T_t265_odom.x_m, before.x_m)
         self.assertAlmostEqual(estimate.pose.x_m, before.x_m)
 
+    def test_slam_diagnostics_are_a_snapshot_not_internal_candidate_storage(self) -> None:
+        fusion = self._slam_fusion()
+        fusion.update_slam_anchor(Pose2D(0.20, 0.0, 0.1, 1.1), valid=True,
+                                  timestamp_s=1.1, source_timestamp_s=1.08)
+        diagnostics = fusion.slam_anchor_diagnostics(1.2)
+        self.assertEqual(diagnostics["candidate_count"], 1)
+        self.assertAlmostEqual(diagnostics["innovation_m"], 0.20)
+        self.assertAlmostEqual(diagnostics["candidate_age_s"], 0.12)
+        self.assertAlmostEqual(diagnostics["accepted_anchor_age_s"], 0.20)
+        self.assertFalse(diagnostics["migration_active"])
+        diagnostics["candidate_count"] = 99
+        self.assertEqual(fusion.slam_anchor_diagnostics(1.2)["candidate_count"], 1)
+
     def test_slam_anchor_gate_boundary_is_inclusive(self) -> None:
         fusion = self._slam_fusion()
         fusion.update_slam_anchor(Pose2D(0.10, 0.0, 0.0, 1.05), valid=True, timestamp_s=1.05)
