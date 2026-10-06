@@ -9,7 +9,7 @@ This round records read-only deployment evidence and adds offline diagnostics. I
 | Item | Result |
 | --- | --- |
 | PC repository | main at 45dac0d32ccff553fdf2119965ad9a34af8906f2 |
-| Board repository | Fast-forwarded from 2abbac303ce9aa26ccb9ddd3773e98250551e321 through 45dac0d32ccff553fdf2119965ad9a34af8906f2 to diagnostic commit 0958257c5d98ce01947a45761b6d62a440926ef1; final tracked worktree clean |
+| Board repository | Started at 2abbac303ce9aa26ccb9ddd3773e98250551e321; snapshot captured at diagnostic commit 0958257c5d98ce01947a45761b6d62a440926ef1, then report-only commit 10514a2 was fast-forwarded; final tracked worktree clean |
 | Board active config SHA-256 | 3122d9a2917fe35570a0239df46126b7eacce62aacde9272caf8114d80aed3c3 |
 | Effective protocol | ackermann_firmware_compat |
 | C10B differential firmware verified | false |
