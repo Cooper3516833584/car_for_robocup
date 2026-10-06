@@ -14,9 +14,11 @@ from dataclasses import asdict, replace
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import signal
+import select
 import statistics
 import subprocess
 import sys
@@ -37,6 +39,8 @@ from core.frames import normalize_angle_rad as wrap
 from core.types import Twist2D
 from robocup_runtime import build_runtime
 from tools.drive_calibration import accepted_fused_sample
+from tools.c10b_telemetry_probe import _aligned_frames, telemetry_row
+from components.battery_voltage_monitor import _open_c10b_telemetry_port, decode_stock_c10b_voltage_v
 
 TEST_MAX_LINEAR_M_S = 0.06
 TEST_MAX_ANGULAR_RAD_S = 0.20
@@ -166,12 +170,16 @@ class Runner:
         self.closures = []
         self.phase = "A"
         self.started = time.monotonic()
+        self.test_angular_cap = TEST_MAX_ANGULAR_RAD_S
+        self.telemetry_check = None
 
     def stop(self):
         if self.drive is not None:
             self.drive.stop()
 
     def tick(self, *, strict=True, straight_start=None):
+        if self.telemetry_check is not None:
+            self.telemetry_check()
         if self.aborted:
             raise DiagAbort("signal/SSH session interrupted")
         if time.monotonic()-self.started > 900:
@@ -297,14 +305,16 @@ class Runner:
         self.drive.stop()
 
     def send(self, twist):
-        if abs(twist.linear_x_m_s)>TEST_MAX_LINEAR_M_S+1e-9 or abs(twist.angular_z_rad_s)>TEST_MAX_ANGULAR_RAD_S+1e-9:
+        if abs(twist.linear_x_m_s)>TEST_MAX_LINEAR_M_S+1e-9 or abs(twist.angular_z_rad_s)>self.test_angular_cap+1e-9:
             raise DiagAbort("test speed cap violated", "FAILED_DRIVE_HARDWARE")
-        self.drive.command(twist, now_s=time.monotonic())
+        command_time = time.monotonic()
+        self.drive.command(twist, now_s=command_time)
         limited = self.drive.last_limited_twist
         wheels = self.drive.kinematics.twist_to_wheels(limited)
         encoded = self.drive.backend.last_encoded_wheel_speeds_m_s
         command = self.drive.backend.last_c10b_chassis_command
         self.log.emit({"type":"diag_drive_command", "phase":self.phase,
+            "command_call_host_s":command_time,
             "requested_v_m_s":twist.linear_x_m_s,"requested_omega_rad_s":twist.angular_z_rad_s,
             "limited_v_m_s":limited.linear_x_m_s,"limited_omega_rad_s":limited.angular_z_rad_s,
             "left_target_m_s":wheels.left_m_s,"right_target_m_s":wheels.right_m_s,
@@ -559,6 +569,16 @@ def reanalyze(run):
     manifest = json.loads((run/"manifest.json").read_text(encoding="utf-8"))
     events = sorted([json.loads(line) for line in (run/"events.jsonl").read_text(encoding="utf-8").splitlines()],
                     key=lambda e:e["host_monotonic_s"])
+    if manifest.get('stage')=='rotation_speed_sweep':
+        telemetry=[json.loads(line) for line in (run/'c10b_telemetry.jsonl').read_text(encoding='utf-8').splitlines()]
+        report['rotation_speed_sweep']=analyze_speed_sweep(events,report['segments'],telemetry,manifest['base_config']['geometry']['drive_track_width_m'])
+        if not report.get('error'):
+            report['verdict']=report['rotation_speed_sweep']['verdict']
+        report['analysis_commit']=git('rev-parse','HEAD')
+        write_json(run/'report.json',report)
+        (run/'report.md').write_text(render_speed_sweep(report,manifest),encoding='utf-8')
+        print('REPORT '+str(run/'report.md'))
+        return
     rotations = [s for s in report["segments"] if s["name"].startswith("D_")]
     report["rotation"] = [rotation_cause(events,s) for s in rotations]
     if any(r["cause"]=="physical_or_drive_motion_after_stop" for r in report["rotation"]):
@@ -591,6 +611,299 @@ def render_report(report, manifest):
     return "\n".join(lines)+"\n"
 
 
+SWEEP_SPEEDS = (.15, .20, .25, .30, .35, .40)
+
+
+def sustained(rows, predicate, duration, *, time_key, max_gap=.12):
+    first = previous = None
+    for row in rows:
+        now = row[time_key]
+        if not predicate(row):
+            first = previous = None
+            continue
+        if first is None or now-previous > max_gap:
+            first = now
+        previous = now
+        if now-first >= duration:
+            return first, now
+    return None, None
+
+
+def analyze_speed_sweep(events, segments, telemetry, track):
+    """Internal-device response, with missing samples kept unknown rather than zero."""
+    raw = sorted((e for e in events if e['type']=='t265_pose' and
+                  e.get('raw_angular_velocity_xyz') is not None), key=lambda e:e['t265_received_time'])
+    norm = lambda e:math.sqrt(sum(v*v for v in e['raw_angular_velocity_xyz']))
+    first_command = min((e['command_call_host_s'] for e in events if e['type']=='diag_drive_command'),default=math.inf)
+    baseline = [r for r in telemetry if r['t_mono'] < first_command]
+    med = lambda values:statistics.median(values) if values else None
+    center = [med([r['int16_be_fields'][i] for r in baseline]) for i in range(9)]
+    noise = [med([abs(r['int16_be_fields'][i]-center[i]) for r in baseline]) if baseline else None for i in range(9)]
+    rows = []
+    for speed in SWEEP_SPEEDS:
+        for sign in (1,-1):
+            omega = speed*sign
+            row = {'requested_omega_rad_s':omega,'wheel_mm_s':speed*track*500,
+                   'direction':'CCW' if sign>0 else 'CW','verdict':'NOT_RUN'}
+            segment = next((s for s in segments if s['requested_omega_rad_s']==omega),None)
+            if segment is None:
+                rows.append(row)
+                continue
+            commands = [e for e in events if e['type']=='diag_drive_command' and e.get('phase')==segment['name']]
+            if not commands:
+                rows.append(row)
+                continue
+            start, stop = commands[0]['command_call_host_s'],segment['stop_cmd_host_s']
+            end = min(segment.get('end_host_s',stop+2),stop+2)
+            motion = [e for e in raw if start <= e['t265_received_time'] <= stop]
+            steady = [e for e in motion if 1.25 <= e['t265_received_time']-start <= 1.75]
+            after = [e for e in raw if stop <= e['t265_received_time'] <= end]
+            onset, confirmation = sustained(motion,lambda e:norm(e)>math.radians(5),.10,time_key='t265_received_time')
+            measured = med([norm(e) for e in steady])
+            vertical = med([e['raw_angular_velocity_xyz'][1] for e in steady])
+            signed = math.copysign(measured,vertical) if measured is not None and vertical else None
+            ratio = signed/omega if signed is not None else None
+            intermittent = sum(norm(e)<.25*speed for e in steady)/len(steady) if steady else None
+            steady_coverage = len(steady)>=6 and steady[-1]['t265_received_time']-steady[0]['t265_received_time']>=.35 and max((b['t265_received_time']-a['t265_received_time'] for a,b in zip(steady,steady[1:])),default=1)<.12
+            still = None
+            for e in after:
+                t = e['t265_received_time']
+                window = [a for a in after if t-.30 <= a['t265_received_time'] <= t]
+                if len(window)>=6 and window[-1]['t265_received_time']-window[0]['t265_received_time']>=.28 and max((b['t265_received_time']-a['t265_received_time'] for a,b in zip(window,window[1:])),default=1)<.12 and med([norm(a) for a in window])<math.radians(2):
+                    still = t
+                    break
+            post_still = [e for e in after if still is not None and e['t265_received_time']>=still]
+            native_delta = lambda es:math.degrees(sum(wrap(native_yaw(b)-native_yaw(a)) for a,b in zip(es,es[1:]))) if len(es)>=2 else None
+            zero_set = next((e for e in events if e['type']=='diag_c10b_command_set' and e['host_monotonic_s']>=stop and e['zero']),None)
+            zero_write = next((e for e in events if e['type']=='diag_c10b_frame_write' and e['write_begin_host_s']>=stop and e['zero']),None)
+            tele_steady = [r for r in telemetry if start+1.25<=r['t_mono']<=start+1.75]
+            row.update(t_command_start=start,t_motion_start=onset,t_motion_confirmed=confirmation,t_stop_cmd=stop,
+                movement_duration_s=stop-start,start_delay_s=None if onset is None else onset-start,
+                measured_steady_omega_rad_s=signed,steady_norm_rad_s=measured,response_ratio=ratio,
+                steady_vertical_rad_s=vertical,steady_native_yaw_deg=native_delta(steady),
+                intermittent_fraction=intermittent,steady_coverage=steady_coverage,
+                steady_sample_count=len(steady),t_t265_still=still,
+                t265_stop_delay_s=None if still is None else still-stop,
+                yaw_after_t265_still_deg=native_delta(post_still),
+                software_zero_delay_s=None if zero_set is None else zero_set['host_monotonic_s']-stop,
+                first_zero_write_delay_s=None if zero_write is None else zero_write['write_end_host_s']-stop,
+                commanded_integral_deg=math.degrees(segment['command_integral']),
+                native_yaw_deg=native_delta(motion),adapter_yaw_deg=None,fused_yaw_deg=None,
+                telemetry_steady_fields=[med([r['int16_be_fields'][i] for r in tele_steady]) for i in range(9)],
+                telemetry_steady_samples=len(tele_steady),complete=segment['complete'])
+            subset = [e for e in events if start<=e['host_monotonic_s']<=stop]
+            for kind,key in (('t265_pose','adapter_yaw_deg'),('fused_pose','fused_yaw_deg')):
+                delta=yaw_delta(subset,kind)
+                row[key]=None if delta is None else math.degrees(delta)
+            reject = any(r['motor_disabled'] for r in tele_steady)
+            reliable = (segment['complete'] and onset is not None and onset-start<=.50 and
+                        steady_coverage and ratio is not None and ratio>=.70 and
+                        intermittent is not None and intermittent<=.20 and not reject and len(tele_steady)>=3)
+            row['motor_disabled_in_steady']=reject
+            row['verdict']='RELIABLE' if reliable else 'START_FAILED' if onset is None else 'UNRELIABLE'
+            rows.append(row)
+    # Firmware field semantics are not assumed. Identify command-correlated
+    # int16 patterns across the sweep, then compare with the stationary pattern.
+    correlations=[]
+    for i in range(9):
+        pairs=[(r['requested_omega_rad_s'],r['telemetry_steady_fields'][i]) for r in rows if r.get('telemetry_steady_samples',0)>=3]
+        corr=None
+        if len(pairs)>=6:
+            xm,ym=statistics.mean(x for x,y in pairs),statistics.mean(y for x,y in pairs)
+            numerator=sum((x-xm)*(y-ym) for x,y in pairs)
+            denominator=math.sqrt(sum((x-xm)**2 for x,y in pairs)*sum((y-ym)**2 for x,y in pairs))
+            corr=numerator/denominator if denominator else None
+        signal=med([abs(y-center[i]) for x,y in pairs]) if pairs and baseline else None
+        selected=corr is not None and abs(corr)>=.80 and signal is not None and signal>max(20,6*noise[i])
+        correlations.append({'byte_offset':2+2*i,'correlation_with_requested_omega':corr,'stationary_median':center[i],
+                             'stationary_mad':noise[i],'median_motion_deviation':signal,'selected':selected})
+    selected=[i for i,c in enumerate(correlations) if c['selected']]
+    for row in rows:
+        if 't_stop_cmd' not in row:
+            continue
+        stop=row['t_stop_cmd']
+        after=[r for r in telemetry if stop<=r['t_mono']<=stop+2]
+        thresholds={i:max(5,3*noise[i],.10*correlations[i]['median_motion_deviation']) for i in selected}
+        distinguishable=bool(selected) and any(row['telemetry_steady_fields'][i] is not None and abs(row['telemetry_steady_fields'][i]-center[i])>thresholds[i] for i in selected)
+        zero,confirm=sustained(after,lambda r:all(abs(r['int16_be_fields'][i]-center[i])<=thresholds[i] for i in selected),.10,time_key='t_mono',max_gap=.15) if distinguishable else (None,None)
+        row.update(t_c10b_zero=zero,t_c10b_zero_confirmed=confirm,c10b_stop_delay_s=None if zero is None else zero-stop,
+                   telemetry_stop_samples=len(after),telemetry_stop_pattern_observable=distinguishable)
+        # Require valid, dense evidence through the end before flagging a
+        # persistent motion pattern. Missing telemetry is explicitly unknown.
+        coverage=len(after)>=10 and after[-1]['t_mono']>=stop+1.8 and max((b['t_mono']-a['t_mono'] for a,b in zip(after,after[1:])),default=2)<=.20
+        delay=row['c10b_stop_delay_s']
+        row['stop_class']='UNKNOWN_TELEMETRY_PATTERN'
+        if distinguishable and zero is None and coverage:
+            row['stop_class']='C10B_STOP_RESPONSE_ABNORMAL'
+        elif zero is not None:
+            yaw=row['yaw_after_t265_still_deg']
+            if yaw is not None and abs(yaw)>1:
+                row['stop_class']='T265_POST_STOP_SETTLING'
+            elif delay<=.25 and row['software_zero_delay_s'] is not None and row['software_zero_delay_s']<=.02 and any(e['t265_received_time']>=zero+.10 and norm(e)>math.radians(5) for e in raw if stop<=e['t265_received_time']<=stop+2):
+                row['stop_class']='MECHANICAL_OR_MOTOR_COAST'
+            else:
+                row['stop_class']='STOP_PATTERN_RETURNED'
+    minima={direction:min((abs(r['requested_omega_rad_s']) for r in rows if r['direction']==direction and r['verdict']=='RELIABLE'),default=None) for direction in ('CCW','CW')}
+    asym=[]
+    for i in range(0,12,2):
+        a,b=rows[i:i+2]
+        ds=abs(a['start_delay_s']-b['start_delay_s']) if a.get('start_delay_s') is not None and b.get('start_delay_s') is not None else None
+        dr=abs(a['response_ratio']-b['response_ratio']) if a.get('response_ratio') is not None and b.get('response_ratio') is not None else None
+        if (ds is not None and ds>.30) or (dr is not None and dr>.20):
+            asym.append({'omega_rad_s':abs(a['requested_omega_rad_s']),'start_delay_difference_s':ds,'response_ratio_difference':dr,
+                         'worse_direction':a['direction'] if a.get('response_ratio',0)<b.get('response_ratio',0) else b['direction'],
+                         'ccw_stop_delay_s':a.get('t265_stop_delay_s'),'cw_stop_delay_s':b.get('t265_stop_delay_s')})
+    maximum=lambda key,absolute=False:max((abs(r[key]) if absolute else r[key] for r in rows if r.get(key) is not None),default=None)
+    summary={'minimum_reliable_ccw_omega':minima['CCW'],'minimum_reliable_cw_omega':minima['CW'],
+             'minimum_reliable_rotation_omega':max(minima.values()) if all(v is not None for v in minima.values()) else None,
+             'worst_start_delay_s':maximum('start_delay_s'),'worst_c10b_stop_delay_s':maximum('c10b_stop_delay_s'),
+             'worst_t265_stop_delay_s':maximum('t265_stop_delay_s'),'max_post_still_yaw_deg':maximum('yaw_after_t265_still_deg',True),
+             'worst_software_zero_delay_s':maximum('software_zero_delay_s'),'worst_first_zero_write_delay_s':maximum('first_zero_write_delay_s'),
+             'direction_asymmetry':asym,'telemetry_field_correlations':correlations,'baseline_telemetry_samples':len(baseline)}
+    high=[r for r in rows if abs(r['requested_omega_rad_s'])>=.30]
+    if any(r.get('stop_class')=='C10B_STOP_RESPONSE_ABNORMAL' for r in rows):
+        verdict='C10B_STOP_RESPONSE_ABNORMAL'
+    elif not all(r.get('complete') for r in rows) or all(r['verdict']!='RELIABLE' for r in high):
+        verdict='FAILED_DRIVE_ACTUATION'
+    elif asym:
+        verdict='DRIVE_DIRECTION_ASYMMETRY'
+    elif all(r['verdict']=='RELIABLE' for r in rows):
+        verdict='ROTATION_RESPONSE_HEALTHY'
+    elif summary['minimum_reliable_rotation_omega'] is not None:
+        verdict='DRIVE_ROTATION_DEADZONE_CONFIRMED'
+    else:
+        verdict='FAILED_DRIVE_ACTUATION'
+    return {'rows':rows,'summary':summary,'verdict':verdict,
+            'measurement_note':'T265 pose angular velocity and quaternion are internal device evidence, not independent raw IMU or external chassis truth. C10B fields are empirical patterns, not verified wheel/firmware-speed units. Still timestamp confirms a 0.30 s median window; onset/telemetry timestamps mark the start of a confirmed interval. Serial receive times include buffering and competing battery-service reads.'}
+
+
+def render_speed_sweep(report,manifest):
+    sweep=report['rotation_speed_sweep']; summary=sweep['summary']
+    fmt=lambda x:'未知' if x is None else f'{x:.3f}'
+    base=manifest['base_config']
+    lines=['# Rotation low-speed response report','', '## Baseline','',
+           '- commit: '+manifest['commit'],'- config sha: '+manifest['config_sha256'],
+           '- protocol: '+base['drive']['protocol_mode'],
+           '- track width: '+str(base['geometry']['drive_track_width_m'])+' m; firmware '+str(base['drive']['firmware_track_width_m'])+' m',
+           '- battery: '+fmt(manifest.get('battery_voltage_v'))+' V',
+           '- T265 serial: '+manifest['t265_serial']+'; angular acceleration: '+str(base['drive']['max_angular_accel_rad_s2'])+' rad/s²','',
+           '## Stationary preflight','', 'PASS' if report.get('stationary_health',{}).get('passed') else 'FAIL','',
+           '## Rotation response sweep','',
+           '| requested omega | wheel mm/s | direction | start delay | steady omega | response ratio | stop delay | post-still yaw | verdict |',
+           '|---:|---:|---|---:|---:|---:|---:|---:|---|']
+    for r in sweep['rows']:
+        lines.append('| '+ ' | '.join([fmt(r['requested_omega_rad_s']),fmt(r['wheel_mm_s']),r['direction'],fmt(r.get('start_delay_s')),fmt(r.get('measured_steady_omega_rad_s')),fmt(r.get('response_ratio')),fmt(r.get('t265_stop_delay_s')),fmt(r.get('yaw_after_t265_still_deg')),r['verdict']])+' |')
+    lines+=['','Stop delay column: T265 still confirmation, seconds; angular speed rad/s; yaw degrees.','',
+            '## Minimum reliable speed','', '- CCW: '+fmt(summary['minimum_reliable_ccw_omega']),'- CW: '+fmt(summary['minimum_reliable_cw_omega']),'- selected: '+fmt(summary['minimum_reliable_rotation_omega'])+' rad/s','',
+            '## STOP response','', '- software zero: '+fmt(summary['worst_software_zero_delay_s'])+' s; first zero write '+fmt(summary['worst_first_zero_write_delay_s'])+' s',
+            '- C10B zero delay: '+fmt(summary['worst_c10b_stop_delay_s'])+' s (stationary-pattern return)',
+            '- T265 still delay: '+fmt(summary['worst_t265_stop_delay_s'])+' s',
+            '- post-still yaw: '+fmt(summary['max_post_still_yaw_deg'])+'°','',
+            '## Direction symmetry','', '- result: '+json.dumps(summary['direction_asymmetry'],ensure_ascii=False),'',
+            '## Diagnosis','', '- verdict: '+report['verdict'], '- evidence: '+sweep['measurement_note'],
+            '- error: '+str(report.get('error')),'', '## Changes','', '- code: existing auto_motion_diag.py rotation_speed_sweep only',
+            '- config: unchanged; no controller or protocol changes','', '## Next recommended change','',
+            ('下一轮仅评估旋转最小有效角速度 '+fmt(summary['minimum_reliable_rotation_omega'])+' rad/s。' if report['verdict']=='DRIVE_ROTATION_DEADZONE_CONFIRMED' else '下一轮仅同步核对 C10B 遥测与两侧电机实际响应。')]
+    return '\n'.join(lines)+'\n'
+
+
+def rotation_speed_sweep(config, output, manifest, path):
+    capture=Capture(output/'events.jsonl'); telemetry=[]; done=threading.Event(); telemetry_error=[]
+    runner=Runner(config,capture,output); runner.test_angular_cap=.40
+    report={'verdict':'FAILED_LOCALIZATION','error':None,'segments':[],'changes':['rotation_speed_sweep stage only']}
+    def read_telemetry():
+        fd=None; buffer=bytearray(); started=time.monotonic()
+        try:
+            fd=_open_c10b_telemetry_port(config.c10b.port)
+            with (output/'c10b_telemetry.jsonl').open('w',encoding='utf-8') as trace:
+                while not done.is_set():
+                    readable,_,_=select.select([fd],[],[],.05)
+                    if not readable:
+                        continue
+                    try:
+                        buffer.extend(os.read(fd,1024))
+                    except BlockingIOError:
+                        continue
+                    for frame in _aligned_frames(buffer):
+                        now=time.monotonic()
+                        try:
+                            voltage=decode_stock_c10b_voltage_v((frame[20]<<8)|frame[21])
+                        except Exception:
+                            voltage=None
+                        row=telemetry_row(frame,voltage,t_mono=now,t_s=now-started)
+                        telemetry.append(row); trace.write(json.dumps(row)+'\n')
+        except BaseException as exc:
+            telemetry_error.append(str(exc))
+        finally:
+            if fd is not None:
+                os.close(fd)
+    reader=threading.Thread(target=read_telemetry,name='rotation-telemetry',daemon=True)
+    handlers={}
+    try:
+        def abort(signum,frame):
+            runner.aborted=True; runner.stop()
+        for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):
+            handlers[sig]=signal.signal(sig,abort)
+        reader.start(); runner.runtime.start()
+        manifest['t265_serial']=runner.runtime.t265_source.serial
+        report['stationary_health']=runner.preflight()
+        print('PREFLIGHT PASS '+json.dumps(report['stationary_health']),flush=True)
+        if telemetry_error or len(telemetry)<10:
+            raise DiagAbort('read-only C10B telemetry unavailable: '+str(telemetry_error),'FAILED_DRIVE_ACTUATION')
+        volts=[r['voltage_v'] for r in telemetry if r['voltage_v'] is not None]
+        manifest['battery_voltage_v']=statistics.median(volts) if volts else None
+        write_json(output/'manifest.json',manifest)
+        runner.open_drive(config)
+        def check_telemetry():
+            if telemetry_error or not telemetry or time.monotonic()-telemetry[-1]['t_mono']>1:
+                raise DiagAbort('C10B telemetry stale/failed','FAILED_DRIVE_ACTUATION')
+        runner.telemetry_check=check_telemetry
+        rear=runner.drive.backend.rear_driver
+        original_set,original_write=rear._set_command,rear._write_command
+        def traced_set(command):
+            original_set(command)
+            capture.emit({'type':'diag_c10b_command_set','zero':command.linear_mm_s==command.angular_mrad_s==0})
+        def traced_write(command):
+            begin=time.monotonic(); original_write(command); end=time.monotonic()
+            capture.emit({'type':'diag_c10b_frame_write','write_begin_host_s':begin,'write_end_host_s':end,
+                          'zero':command.linear_mm_s==command.angular_mrad_s==0,
+                          'vx_mm_s':command.linear_mm_s,'vz_mrad_s':command.angular_mrad_s})
+        rear._set_command,rear._write_command=traced_set,traced_write
+        for speed in SWEEP_SPEEDS:
+            for sign in (1,-1):
+                if telemetry_error or time.monotonic()-telemetry[-1]['t_mono']>1:
+                    raise DiagAbort('C10B telemetry stale/failed','FAILED_DRIVE_ACTUATION')
+                runner.motion('rotation_speed_sweep_%+.2f'%(sign*speed),0.,sign*speed,duration=2.,stop_s=2.)
+    except BaseException as exc:
+        report['error']=type(exc).__name__+': '+str(exc)
+        report['verdict']='FAILED_LOCALIZATION' if getattr(exc,'verdict',None)=='FAILED_LOCALIZATION' else 'FAILED_DRIVE_ACTUATION'
+        print('ABORT '+report['error'],flush=True)
+    finally:
+        try:
+            runner.stop()
+        finally:
+            try:
+                if runner.drive is not None:
+                    runner.drive.close()
+            finally:
+                runner.runtime.close(); done.set(); reader.join(2); capture.close()
+        for sig,handler in handlers.items():
+            signal.signal(sig,handler)
+        report['segments']=runner.segments
+        report['rotation_speed_sweep']=analyze_speed_sweep(capture.events,runner.segments,telemetry,config.geometry.drive_track_width_m)
+        if not report['error']:
+            report['verdict']=report['rotation_speed_sweep']['verdict']
+        report.update(dropped_events=capture.dropped_events,log_write_error=capture.write_error,telemetry_error=telemetry_error,
+                      active_config_unchanged=hashlib.sha256(path.read_bytes()).hexdigest()==manifest['config_sha256'])
+        if capture.dropped_events or capture.write_error:
+            report['verdict']='FAILED_LOCALIZATION'
+        write_json(output/'manifest.json',manifest); write_json(output/'segments.json',runner.segments)
+        write_json(output/'report.json',report)
+        (output/'report.md').write_text(render_speed_sweep(report,manifest),encoding='utf-8')
+        print('REPORT '+str(output/'report.md'),flush=True)
+    return 0 if report['error'] is None else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config")
@@ -600,6 +913,7 @@ def main(argv=None):
     parser.add_argument("--confirm-area-clear",action="store_true")
     parser.add_argument("--mount-retest-from",help="prior run with verified protocol and a better left mount")
     parser.add_argument("--rotation-from",help="reuse completed physical mount retest and begin at phase D")
+    parser.add_argument("--stage",choices=('full','rotation-speed-sweep'),default='full')
     args = parser.parse_args(argv)
     if args.analyze_run:
         reanalyze(Path(args.analyze_run).resolve())
@@ -617,7 +931,13 @@ def main(argv=None):
     if base.relay.enabled:
         parser.error("payload relay must be disabled")
     config = accepted_relative_slam_profile(base)
-    config = replace(config,drive=replace(config.drive,
+    if args.stage=='rotation-speed-sweep':
+        if (base.drive.protocol_mode!='differential_vx_vz' or not base.calibration.c10b_diff_firmware_verified
+                or base.t265_mount!=LEFT_MOUNT or base.drive.max_angular_speed_rad_s<.40
+                or args.mount_retest_from or args.rotation_from):
+            parser.error('speed sweep requires the verified active protocol/left mount and existing >=0.40 speed limit')
+    else:
+        config = replace(config,drive=replace(config.drive,
         max_linear_speed_m_s=min(config.drive.max_linear_speed_m_s,TEST_MAX_LINEAR_M_S),
         max_angular_speed_rad_s=min(config.drive.max_angular_speed_rad_s,TEST_MAX_ANGULAR_RAD_S)))
     original = path.read_text(encoding="utf-8")
@@ -660,6 +980,9 @@ def main(argv=None):
             for p in [Path(__file__),ROOT/"code/robocup_runtime.py",ROOT/"code/components/pose_fusion.py",
                       ROOT/"code/components/t265_pose_adapter.py",ROOT/"code/components/differential_drive.py",ROOT/"code/components/c10b_diff_backend.py"]}}
     write_json(output/"manifest.json",manifest)
+    if args.stage=='rotation-speed-sweep':
+        manifest['stage']='rotation_speed_sweep'
+        return rotation_speed_sweep(config,output,manifest,path)
     capture = Capture(output/"events.jsonl")
     runner = None
     handlers = {}
