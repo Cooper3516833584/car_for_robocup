@@ -20,6 +20,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,27 @@ class Runner:
         while time.monotonic()<deadline:
             self.tick(strict=strict)
             time.sleep(PERIOD_S)
+
+    def analyze_while_stopped(self, analyze):
+        """Keep feeding existing localization while a finite offline job runs."""
+        self.stop()
+        result = {}
+        def work():
+            try:
+                result["value"] = analyze()
+            except BaseException as error:
+                result["error"] = error
+        worker = threading.Thread(target=work,name="motion-diag-offline",daemon=True)
+        worker.start()
+        deadline = time.monotonic()+5.
+        while worker.is_alive():
+            if time.monotonic()>deadline:
+                raise DiagAbort("offline calculation exceeded five seconds")
+            self.tick()
+            time.sleep(PERIOD_S)
+        if "error" in result:
+            raise result["error"]
+        return result["value"]
 
     def preflight(self):
         # Startup is bounded and stationary, separate from the ten-second test.
@@ -436,7 +458,9 @@ class Runner:
             "post_settle_error_deg":math.degrees(settled_error),"correction_count":count,
             "final_error_deg":math.degrees(final_error),"time_to_stable_s":waited,
             "corrections_enabled":corrections,"passed":abs(final_error)<=FINAL_YAW_TARGET_RAD,
-            "post_stop":rotation_cause(self.log.events,segment)}
+            "post_stop":None}
+        segment["end_host_s"] = time.monotonic()
+        result["post_stop"] = rotation_cause(list(self.log.events),segment)
         self.log.emit({"type":"diag_precision_rotation",**result},priority=True)
         self.hold(INTER_SEGMENT_STOP_S)
         return result
@@ -547,6 +571,7 @@ def main(argv=None):
     parser.add_argument("--confirm-unattended-low-speed",action="store_true")
     parser.add_argument("--confirm-area-clear",action="store_true")
     parser.add_argument("--mount-retest-from",help="prior run with verified protocol and a better left mount")
+    parser.add_argument("--rotation-from",help="reuse completed physical mount retest and begin at phase D")
     args = parser.parse_args(argv)
     if sys.platform!="linux" or not(args.confirm_unattended_low_speed and args.confirm_area_clear):
         parser.error("Linux and explicit unattended low-speed/clear-area authorization required")
@@ -565,6 +590,7 @@ def main(argv=None):
     original = path.read_text(encoding="utf-8")
     output.mkdir(parents=True)
     prior = None
+    mount_prior = None
     if args.mount_retest_from:
         prior_dir = Path(args.mount_retest_from).resolve()
         prior = json.loads((prior_dir/"report.json").read_text(encoding="utf-8"))
@@ -580,6 +606,17 @@ def main(argv=None):
             "sensors.t265.mount":{k:str(v) for k,v in asdict(LEFT_MOUNT).items()}})
         config = replace(accepted_relative_slam_profile(combined),drive=replace(config.drive,protocol_mode="differential_vx_vz"),t265_mount=LEFT_MOUNT)
         config = replace(config,calibration=combined.calibration)
+        if args.rotation_from:
+            mount_dir = Path(args.rotation_from).resolve()
+            mount_prior = json.loads((mount_dir/"report.json").read_text(encoding="utf-8"))
+            mount_manifest = json.loads((mount_dir/"manifest.json").read_text(encoding="utf-8"))
+            if (mount_manifest["config_sha256"]!=prior_manifest["config_sha256"]
+                    or mount_prior.get("dropped_events") or mount_prior.get("log_write_error")
+                    or mount_prior.get("mount",{}).get("conclusion")!="left_mount_verified_by_ab_and_motion"
+                    or mount_manifest["effective_config"]["t265_mount"]!=asdict(LEFT_MOUNT)):
+                parser.error("prior physical mount retest is not valid evidence")
+    elif args.rotation_from:
+        parser.error("--rotation-from also requires --mount-retest-from")
     manifest = {"commit":git("rev-parse","HEAD"),"git_status":git("status","--short"),
         "config_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"config_path":str(path),
         "base_config":asdict(base),"effective_config":asdict(config),"t265_serial":"unknown",
@@ -630,14 +667,19 @@ def main(argv=None):
         elif arcs and all(sign_verified(s) for s in arcs):
             report["protocol"]["conclusion"] = "current_protocol_signs_consistent"
         cstart = len(runner.segments)
-        runner.pair("C_straight20",.20)
-        runner.pair("C_rotate90",math.pi/2,rotate=True)
+        if mount_prior is None:
+            runner.pair("C_straight20",.20)
+            runner.pair("C_rotate90",math.pi/2,rotate=True)
         csegments = runner.segments[cstart:]
-        a,b = mount_ab(capture.events,csegments,base.t265_mount),mount_ab(capture.events,csegments,LEFT_MOUNT)
+        snapshot = list(capture.events)
+        a,b = ({},{}) if mount_prior else runner.analyze_while_stopped(lambda:(
+            mount_ab(snapshot,csegments,base.t265_mount),mount_ab(snapshot,csegments,LEFT_MOUNT)))
         improves = all(b[s["name"]]["max_center_shift_m"]<=.6*a[s["name"]]["max_center_shift_m"] for s in csegments if "rotate" in s["name"])
         lateral_ok = all(abs(b[s["name"]]["lateral_m"])<=abs(a[s["name"]]["lateral_m"])+.01 for s in csegments if "straight" in s["name"])
-        report["mount"] = {"current":a,"left_candidate":b,"conclusion":"left_mount_candidate_better" if improves and lateral_ok else "inconclusive", "config_changed":False}
-        if prior is not None:
+        report["mount"] = dict(mount_prior["mount"]) if mount_prior else {"current":a,"left_candidate":b,"conclusion":"left_mount_candidate_better" if improves and lateral_ok else "inconclusive", "config_changed":False}
+        if mount_prior is not None:
+            report["mount"]["physical_retest_run"] = args.rotation_from
+        elif prior is not None:
             prior_a = prior["mount"]["current"]
             retest_ok = all(b[s["name"]]["max_center_shift_m"]<=.6*prior_a[s["name"]]["max_center_shift_m"]
                            for s in csegments if "rotate" in s["name"])
