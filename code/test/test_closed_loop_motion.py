@@ -126,6 +126,8 @@ class ClosedLoopMotionTests(unittest.TestCase):
                                     [Sample(0.0), Sample(-0.48), Sample(-0.49)],
                                     tool.ActionRequest("drive-distance", distance_m=-0.5), target)
         self.assertAlmostEqual(metrics["distance_error_m"], 0.01)
+        self.assertTrue(metrics["fused_precision_met"])
+        self.assertEqual(metrics["precision_source"], "fused_pose")
         self.assertTrue(metrics["precision_met"])
         turn_target = tool.target_from_start(Pose2D(0.0, 0.0, start.yaw_rad, 0.0),
                                              tool.ActionRequest("rotate", angle_rad=math.radians(20)))
@@ -141,6 +143,8 @@ class ClosedLoopMotionTests(unittest.TestCase):
         steps += [fake_step(sample_end, RobocupMissionState.TARGET_OPERATION, MotionActionState.SUCCEEDED)]
         steps += [fake_step(sample_end, RobocupMissionState.TARGET_OPERATION) for _ in range(8)]
         runtime = FakeRuntime(steps)
+        runtime.t265_source = type("Source", (), {"serial": "t265-test"})()
+        started_serials = []
         now = [0.0]
 
         def clock():
@@ -153,8 +157,11 @@ class ClosedLoopMotionTests(unittest.TestCase):
             result = tool.run_one(runtime, object(), tool.ActionRequest("drive-distance", distance_m=0.05),
                                   abort=lambda: False, max_s=2.0, preflight_s=1.0, settle_s=1.0,
                                   preflight_stable_s=0.1,
+                                  on_started=lambda started_runtime: started_serials.append(
+                                      tool._runtime_serial(started_runtime)),
                                   sleep=sleep, clock=clock)
         self.assertTrue(runtime.started)
+        self.assertEqual(started_serials, ["t265-test"])
         self.assertEqual(runtime.motion.calls, [("drive_distance", 0.05)])
         self.assertEqual(runtime.drive.stop_count, 1)
         self.assertAlmostEqual(result["metrics"]["distance_error_m"], 0.0)

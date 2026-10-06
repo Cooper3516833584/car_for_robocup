@@ -140,8 +140,7 @@ MG90S 规格参考：堵转扭矩 ~1.8 kg·cm、速度 ~0.1 s/60°、死区 ~5 u
 | `tools/servo_pwm7_hold.py` | 停在某角度并保持（detach，`--stop` 干净退出） |
 | `tools/servo_backdrive_probe.py` | 诊断回弹：空载/保持/松开三段的母线电压对比 |
 | `tools/board_overlay.py` | 板端 overlay 启停/查询（改 `extlinux.conf`，自动备份） |
-| `tools/board_servo_patch.py` | 为板端配置分支生成最小补丁（见 §7） |
-| `tools/board_servo_deploy.py` | 带备份、回滚脚本和校验的板端部署 |
+| `tools/car_ssh.py` / `car_sync.py` | 本机辅助脚本，**不在仓库里**（见 §7.2） |
 
 组件不读 TOML：生产路径由 `build_servo()` 把校验过的配置传进来。构造**不会**打开硬件，
 只有 `ServoAxis.start()` 才写 sysfs——与仓库其它组件"构造不动作"的约定一致。
@@ -218,22 +217,47 @@ axis.return_to_start(rate_deg_s=30.0)                   # 回到 start() 记录�
   当路径最后一个分量本身是符号链接时，`resolve()` 不保证继续展开嵌套的 `device`
   链接（Python 3.13 行为不同）。这是实测发现并修掉的问题，属于必须保持的写法。
 
-### 4.2 权限
+### 4.2 权限（实测：需要 root）
 
-sysfs 通道属 root。两种做法：
+**结论：写这个通道需要 root。** 实车验证：
 
-- 联调时直接 `sudo`（最简单）；
-- 长期部署：加 udev 规则把 `pwmchip*` 归到 `gpio` 组（与声光报警同一组）：
+| 事实 | 值 |
+|---|---|
+| 通道属主/权限 | `root:pwm`，模式 `775`（`period`/`duty_cycle`/`enable` 都是） |
+| `radxa` 的组 | 含 `108(pwm)`、`106(gpio)` |
+| 以 `radxa` 运行 `servo_pwm7_hold.py` | **`Permission denied: .../pwm0/period`** |
+| 以 root 运行同一命令 | 正常写入并保持 |
 
-```bash
-sudo tee /etc/udev/rules.d/90-rock5a-pwm.rules >/dev/null <<'EOF'
-SUBSYSTEM=="pwm", ACTION=="add", RUN+="/bin/sh -c 'chgrp -R gpio /sys/class/pwm/pwmchip*; chmod -R g+w /sys/class/pwm/pwmchip*'"
-EOF
-sudo udevadm control --reload-rules
-```
+也就是说，尽管文件系统权限位对 `pwm` 组开放，sysfs 属性写入仍被拒绝——
+**不要依赖组权限**，那些位看起来够用但实际不行。首次联调时它曾短暂成功过，
+所以不要把它当成稳定行为。
 
-注意：仓库**不再安装**旧的 `rock5a-pwm0-permissions.service`（见 `docs/LEGACY_CLEANUP.md`），
-需要用权限就用上面的 udev 规则，不要再引入开机服务。
+推荐做法（按优先级）：
+
+1. **开机服务以 root 运行保持器**。仓库里已有用 systemd 跑 root 级硬件服务的
+   先例（声光报警、电池监控），与现有部署方式一致，也避免把密码放进脚本：
+
+   ```ini
+   [Unit]
+   Description=Park PWM servo at 0 degrees and hold
+   After=multi-user.target
+
+   [Service]
+   Type=simple
+   Environment=PYTHONPATH=/home/radxa/car/code
+   ExecStart=/usr/bin/python3 /home/radxa/car/tools/servo_pwm7_hold.py --foreground
+   Restart=on-failure
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   注意 `--foreground`：systemd 自己就是 supervisor，不需要再 fork。
+
+2. **联调时直接 `sudo`**（最简单）。
+
+> 不要按旧文档把 `pwmchip*` 改到 `gpio` 组：实测那既不是正确的组，实际也不生效。
+> 旧的 `rock5a-pwm0-permissions.service` 也不要再引入（见 `docs/LEGACY_CLEANUP.md`）。
 
 ### 4.3 为什么"松手后位置会变"，以及怎么让它真的停在某个角度
 
@@ -377,35 +401,48 @@ sudo PYTHONPATH=/home/radxa/car/code python3 -m components.servo_axis --angle 0
 
 ---
 
-## 7. 为什么这次没有用 `tools/car_sync.py` 全量同步
+## 7. 板端部署方式（现状：`git pull --ff-only`）
 
-`tools/car_sync.py` 是把整个工作树快照推到板端的正常通道，但**本次不适用**：
-开发工作树与板端 checkout 的分支谱系不同。实测差异：
-
-| 文件 | 差异 |
-|---|---|
-| `code/config/v2_loader.py` | 板端版本**更新**，对已停用的 `navigation.map`/`navigation.footprint`/`safety` 旧键做了宽容处理；开发版本是严格版，全量同步会让板端 profile 直接加载失败 |
-| `code/config/v2_models.py` | 板端没有 `CompetitionMapConfig` / `FootprintConfig`，`CalibrationStatusConfig` 字段也不同 |
-| `configs/robocup_diffdrive.toml` | 板端为 gitignore 的实车配置，且 `configs/robocup_diffdrive.example.toml` 内容不同 |
-| `code/config/v2_loader.py` 里的 devices 白名单 | 不接受 `[devices.servo]`，必须单独放行 |
-
-所以本次采用外科式同步，只动舵机需要的最小集合：
+**现在板端就是普通 Git 部署，不需要任何专用部署脚本。** 舵机改动已在
+`origin/main` 里，板端直接拉取即可：
 
 ```bash
-# 1) 取回板端这几个共享文件
-py -3 tools/car_ssh.py get /home/radxa/car/code/config/v2_models.py ../_board_stage/code/config/v2_models.py
-#    ...（v2_loader.py / v2_factory.py / hal/pwm.py 同理）
-
-# 2) 在板端版本上生成最小补丁（追加 ServoConfig、build_servo、devices.servo 白名单）
-py -3 tools/board_servo_patch.py
-
-# 3) 部署：逐文件备份 + 写回滚脚本 + 板端自检
-py -3 tools/board_servo_deploy.py --with-tests
+ssh ROCK-5A                      # ~/.ssh/config 里的别名，用 key 登录
+cd /home/radxa/car
+git rev-parse --short HEAD       # 确认当前提交
+git status --porcelain           # 必须是干净的（gitignore 的实车配置除外）
+git fetch origin
+git pull --ff-only origin main
+python3 -m compileall -q code tools
+python3 tools/servo_pwm7_status.py
 ```
 
-`board_servo_deploy.py` 会拒绝在文件布局变化时瞎猜插入点，并在结束前用
-`tools/servo_pwm7_status.py` 做板端自检；每次运行都在
-`/home/radxa/car_servo_backups/<时间戳>/` 留下备份与 `rollback.sh`。
+### 7.1 曾经为什么要"外科式同步"（历史，已结束）
 
-由此，板端 `git status` 会出现 6 个修改 + 若干新增文件；这些改动都已在
-本文档记录，等上游把舵机变更合并进板端谱系后即可由正常同步通道接管。
+提交 `2abbac3` 合并之前，板端 checkout 与开发工作树的**分支谱系不同**：板端
+`v2_loader.py` 是宽容版（容忍已停用的 `navigation.map`/`navigation.footprint` 键），
+`v2_models.py` 没有 `CompetitionMapConfig`/`FootprintConfig`。那时直接全量覆盖会让
+板端 profile 加载失败，所以曾经用两个临时脚本把舵机代码"补丁"进板端版本：
+
+- `tools/board_servo_patch.py`（在板端版本上生成最小补丁）
+- `tools/board_servo_deploy.py`（逐文件备份 + 回滚脚本 + 板端自检）
+
+**这两个脚本已经删除**，原因不是它们不好用，而是它们的输入前提消失了：
+
+1. 舵机代码现在是 `origin/main` 的原生内容，板端 `git pull` 就能拿到；
+2. 在"已经含 ServoConfig"的文件上再跑一次补丁，只会重复插入或需要
+   `--refetch` 去撤销自己的改动——这正是本次踩到的坑：
+   `--refetch` 从已打过补丁的板端取回文件后，那块**过期的 `ServoConfig`
+   会被当成基线保留**，于是板端跑的默认值和仓库不一致（旧版含已删除的
+   `release_on_close`）。保留一个只能用来自我撤销的工具没有意义。
+
+历史产物仍可查：`git log 2abbac3`，以及板端
+`/home/radxa/car_servo_backups/<时间戳>/`（含每次部署的备份与 `rollback.sh`）。
+
+### 7.2 部署前必须知道的两件事
+
+- **写 PWM 通道需要 root**（见 §4.2），所以板端跑 `servo_pwm7_hold.py` 要 `sudo`；
+  单纯 `git pull` 和跑测试都不需要。
+- **`tools/car_ssh.py` / `tools/car_sync.py` 不是仓库文件**：它们是本机辅助脚本，
+  `origin/main` 里没有。`car_ssh.py` 走 `~/.ssh/config` 的 key 认证（不再内置密码），
+  `car_sync.py` 是整树快照通道，谱系一致时才用。日常部署按上面的 `git pull` 即可。

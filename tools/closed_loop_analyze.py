@@ -12,6 +12,7 @@ Read-only: this tool never opens a device and never writes next to the log.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -63,6 +64,27 @@ def _by_type(events: list[dict], name: str) -> list[dict]:
     return [event for event in events if event.get("type") == name]
 
 
+def _slam_anchor_summary(events: list[dict]) -> dict:
+    anchors = _by_type(events, "slam_anchor")
+    rejection_reasons = Counter(
+        str(event.get("rejection_reason")) for event in anchors
+        if event.get("rejection_reason")
+    )
+    innovations = [abs(_num(event.get("innovation_m"))) for event in anchors
+                   if event.get("innovation_m") is not None]
+    yaw_innovations = [abs(_num(event.get("innovation_yaw_rad"))) for event in anchors
+                       if event.get("innovation_yaw_rad") is not None]
+    return {
+        "total": len(anchors),
+        "accepted": sum(event.get("accepted") is True for event in anchors),
+        "rejected": sum(event.get("accepted") is False for event in anchors),
+        "consensus_pending": sum(bool(event.get("consensus_pending")) for event in anchors),
+        "max_innovation_m": max(innovations, default=0.0),
+        "max_abs_innovation_yaw_deg": math.degrees(max(yaw_innovations, default=0.0)),
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
+    }
+
+
 def _integrate(events: list[dict], value) -> float:
     total = 0.0
     for previous, current in zip(events, events[1:]):
@@ -103,6 +125,7 @@ def summarize(run: Path) -> dict:
         "valid": (summary or {}).get("valid"),
         "error": (summary or {}).get("error"),
         "samples": {"fused": len(fused), "motion_action": len(motion), "drive_command": len(commands)},
+        "slam_anchor_events": _slam_anchor_summary(events),
     }
 
     if not motion or not fused:
@@ -177,14 +200,18 @@ def summarize(run: Path) -> dict:
         result["slam_innovation"] = {
             "max_m": round(biggest[0], 4),
             "max_at_s": round(biggest[1], 2),
-            "nonzero_updates": sum(1 for value, _ in innovations if value > 1e-9),
+            "fused_samples_with_nonzero_last_innovation": sum(
+                1 for value, _ in innovations if value > 1e-9
+            ),
         }
 
     if t265:
-        result["t265_raw"] = {
+        adapter_yaw = sum(unwrap_delta(_num(a.get("yaw_rad")), _num(b.get("yaw_rad")))
+                          for a, b in zip(t265, t265[1:]))
+        result["t265_adapter"] = {
             "displacement_m": round(math.hypot(_num(t265[-1]["x_m"]) - _num(t265[0]["x_m"]),
                                                _num(t265[-1]["y_m"]) - _num(t265[0]["y_m"])), 4),
-            "yaw_change_deg": round(math.degrees(_num(t265[-1]["yaw_rad"]) - _num(t265[0]["yaw_rad"])), 3),
+            "yaw_change_deg": round(math.degrees(adapter_yaw), 3),
             "min_tracker_confidence": round(min(_num(e.get("tracker_confidence")) for e in t265), 2),
         }
 
@@ -284,8 +311,10 @@ def _print(result: dict) -> None:
         print("  jumps:     %s" % json.dumps(result["fused_jumps"]))
     if "slam_innovation" in result:
         print("  slam_innov:%s" % json.dumps(result["slam_innovation"]))
-    if "t265_raw" in result:
-        print("  t265 raw:  %s" % json.dumps(result["t265_raw"]))
+    if "t265_adapter" in result:
+        print("  t265 adapter: %s" % json.dumps(result["t265_adapter"]))
+    if result.get("slam_anchor_events"):
+        print("  slam anchors: %s" % json.dumps(result["slam_anchor_events"]))
     if result.get("safety"):
         print("  safety:    %s" % json.dumps(result["safety"]))
     validity = result.get("validity")

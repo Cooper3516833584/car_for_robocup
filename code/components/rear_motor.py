@@ -270,6 +270,12 @@ class RearMotorDriver:
             return self._command.requested
 
     @property
+    def current_chassis_command(self) -> ChassisCommand:
+        """Last quantized C10B chassis command held by the sender."""
+        with self._state_lock:
+            return self._command
+
+    @property
     def is_running(self) -> bool:
         with self._state_lock:
             return self._fd is not None and self._writer_error is None

@@ -79,7 +79,10 @@ class C10BDifferentialBackendTests(unittest.TestCase):
         backend.command_wheel_speeds(WheelSpeeds(-0.100, -0.065))
 
         rear.set_wheels.assert_called_once_with(-65.0, -100.0, enforce_min_turn_radius=False)
+        self.assertEqual(backend.last_encoded_wheel_speeds_m_s, (-0.065, -0.1))
         encoded = wheel_speeds_to_chassis(-65.0, -100.0, enforce_min_turn_radius=False)
+        rear.current_chassis_command = encoded
+        self.assertEqual(backend.last_c10b_chassis_command, encoded)
         self.assertEqual(encoded.linear_mm_s, -82)
         self.assertLess(encoded.angular_mrad_s, 0)
 

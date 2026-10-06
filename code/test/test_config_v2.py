@@ -130,7 +130,7 @@ class ConfigV2Tests(unittest.TestCase):
 
     def test_unknown_device_table_is_rejected(self) -> None:
         with self.assertRaisesRegex(ConfigV2Error, "unknown device table"):
-            self._load_modified({"[devices.t265]": '[devices.servo]\nport = "x"\n\n[devices.t265]'})
+            self._load_modified({"[devices.t265]": '[devices.unknown]\nport = "x"\n\n[devices.t265]'})
 
     def test_missing_required_device_table_is_rejected(self) -> None:
         with self.assertRaisesRegex(ConfigV2Error, r"\[devices.d500\]"):

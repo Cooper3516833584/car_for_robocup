@@ -7,7 +7,7 @@ import math
 import time
 from typing import Protocol
 
-from .rear_motor import RearMotorDriver, UnsupportedWheelCommand
+from .rear_motor import ChassisCommand, RearMotorDriver, UnsupportedWheelCommand
 from core.types import WheelSpeeds
 
 
@@ -65,6 +65,7 @@ class C10BDifferentialBackend:
         )
         self.allow_in_place_rotation = bool(allow_in_place_rotation)
         self.max_wheel_speed_m_s = _positive("max_wheel_speed_m_s", max_wheel_speed_m_s)
+        self._last_encoded_wheel_speeds_m_s: tuple[float, float] | None = None
         driver_track_m = getattr(rear_driver, "track_width_mm", None)
         if driver_track_m is not None and not math.isclose(
             float(driver_track_m) / 1000.0, self.firmware_track_width_m, rel_tol=1e-6
@@ -109,6 +110,8 @@ class C10BDifferentialBackend:
         if self.protocol_mode is C10BProtocolMode.DIFFERENTIAL_VX_VZ and linear < 0.0:
             encoded_left, encoded_right = right, left
 
+        self._last_encoded_wheel_speeds_m_s = (encoded_left, encoded_right)
+
         try:
             self.rear_driver.set_wheels(
                 encoded_left * 1000.0,
@@ -119,6 +122,17 @@ class C10BDifferentialBackend:
             )
         except UnsupportedWheelCommand as exc:
             raise UnsupportedFirmwareMotion(str(exc)) from exc
+
+    @property
+    def last_encoded_wheel_speeds_m_s(self) -> tuple[float, float] | None:
+        """Last wheel-speed pair passed to the C10B frame driver."""
+        return self._last_encoded_wheel_speeds_m_s
+
+    @property
+    def last_c10b_chassis_command(self) -> ChassisCommand | None:
+        """Quantized Vx/Vz values currently held by the C10B sender."""
+        command = getattr(self.rear_driver, "current_chassis_command", None)
+        return command if isinstance(command, ChassisCommand) else None
 
     def start(self) -> None:
         self.rear_driver.start()
