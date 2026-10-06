@@ -376,6 +376,71 @@ class Runner:
         self.closures.append(result)
         return result
 
+    def settle(self, stopped):
+        deadline = time.monotonic()+SETTLE_MAX_WAIT_S
+        history = []
+        while time.monotonic()<deadline:
+            self.tick()
+            now = time.monotonic()
+            raw = self.log.latest.get("t265_pose",{})
+            angular = raw.get("raw_angular_velocity_xyz")
+            if angular is not None and now-raw["host_monotonic_s"]<=.15:
+                history.append((now,self.previous.yaw_rad,math.sqrt(sum(v*v for v in angular))))
+            history = [p for p in history if now-p[0]<=SETTLE_WINDOW_S+.05]
+            anchor = self.log.latest.get("slam_anchor",{})
+            if len(history)>=6 and history[-1][0]-history[0][0]>=SETTLE_WINDOW_S:
+                ys = [wrap(p[1]-history[0][1]) for p in history]
+                if (max(ys)-min(ys)<=SETTLE_MAX_YAW_SPAN_RAD
+                        and statistics.median(p[2] for p in history)<math.radians(2)
+                        and anchor.get("host_monotonic_s",0)>stopped
+                        and now-anchor["host_monotonic_s"]<=.5):
+                    return self.previous,now-stopped
+            time.sleep(PERIOD_S)
+        raise DiagAbort("fused/IMU/new-anchor did not settle within 1.5s","FAILED_ROTATION_SETTLING")
+
+    def precise_rotate(self, name, angle, *, corrections):
+        start = self.previous
+        target = wrap(start.yaw_rad+angle)
+        self.runtime.motion.rotate(angle)
+        segment = self.motion(name+"_coarse",0,math.copysign(.2,angle),
+                              controller=self.runtime.motion,stop_s=0)
+        initial_error = wrap(target-self.previous.yaw_rad)
+        stopped = segment["stop_cmd_host_s"]
+        stable,waited = self.settle(stopped)
+        settled_error = wrap(target-stable.yaw_rad)
+        count = 0
+        signs = []
+        while corrections and abs(wrap(target-stable.yaw_rad))>FINAL_YAW_TARGET_RAD and count<MAX_CORRECTIONS:
+            error = wrap(target-stable.yaw_rad)
+            signs.append(math.copysign(1,error))
+            if len(signs)>1 and signs[-1]!=signs[-2]:
+                raise DiagAbort("opposing consecutive yaw corrections","FAILED_ROTATION_SETTLING")
+            count += 1
+            started = time.monotonic()
+            try:
+                while time.monotonic()-started<1.:
+                    self.tick()
+                    error = wrap(target-self.previous.yaw_rad)
+                    if abs(error)<math.radians(.8):
+                        break
+                    self.send(Twist2D(0,max(-CORRECTION_MAX_OMEGA_RAD_S,min(CORRECTION_MAX_OMEGA_RAD_S,1.2*error))))
+                    time.sleep(PERIOD_S)
+            finally:
+                stopped = time.monotonic()
+                self.log.emit({"type":"diag_stop_command","name":name+"_correction"},priority=True)
+                self.stop()
+            stable,extra = self.settle(stopped)
+            waited += extra
+        final_error = wrap(target-stable.yaw_rad)
+        result = {"name":name,"first_stop_error_deg":math.degrees(initial_error),
+            "post_settle_error_deg":math.degrees(settled_error),"correction_count":count,
+            "final_error_deg":math.degrees(final_error),"time_to_stable_s":waited,
+            "corrections_enabled":corrections,"passed":abs(final_error)<=FINAL_YAW_TARGET_RAD,
+            "post_stop":rotation_cause(self.log.events,segment)}
+        self.log.emit({"type":"diag_precision_rotation",**result},priority=True)
+        self.hold(INTER_SEGMENT_STOP_S)
+        return result
+
 
 def sign_verified(segment, reverse=False):
     m = segment.get("metrics",{})
@@ -481,6 +546,7 @@ def main(argv=None):
     parser.add_argument("--output",required=True)
     parser.add_argument("--confirm-unattended-low-speed",action="store_true")
     parser.add_argument("--confirm-area-clear",action="store_true")
+    parser.add_argument("--mount-retest-from",help="prior run with verified protocol and a better left mount")
     args = parser.parse_args(argv)
     if sys.platform!="linux" or not(args.confirm_unattended_low_speed and args.confirm_area_clear):
         parser.error("Linux and explicit unattended low-speed/clear-area authorization required")
@@ -498,6 +564,22 @@ def main(argv=None):
         max_angular_speed_rad_s=min(config.drive.max_angular_speed_rad_s,TEST_MAX_ANGULAR_RAD_S)))
     original = path.read_text(encoding="utf-8")
     output.mkdir(parents=True)
+    prior = None
+    if args.mount_retest_from:
+        prior_dir = Path(args.mount_retest_from).resolve()
+        prior = json.loads((prior_dir/"report.json").read_text(encoding="utf-8"))
+        prior_manifest = json.loads((prior_dir/"manifest.json").read_text(encoding="utf-8"))
+        arcs = [s for s in prior["segments"] if s["name"].startswith(("B2a","B2b"))]
+        if (prior_manifest["config_sha256"]!=hashlib.sha256(path.read_bytes()).hexdigest()
+                or len(arcs)!=8 or not all(sign_verified(s) for s in arcs)
+                or prior.get("mount",{}).get("conclusion")!="left_mount_candidate_better"):
+            parser.error("prior run does not authorize this protocol/mount candidate")
+        combined = candidate(output/"candidate_t265_mount.toml",original,{
+            "calibration":{"c10b_diff_firmware_verified":"true"},
+            "vehicle.drive":{"protocol_mode":'"differential_vx_vz"'},
+            "sensors.t265.mount":{k:str(v) for k,v in asdict(LEFT_MOUNT).items()}})
+        config = replace(accepted_relative_slam_profile(combined),drive=replace(config.drive,protocol_mode="differential_vx_vz"),t265_mount=LEFT_MOUNT)
+        config = replace(config,calibration=combined.calibration)
     manifest = {"commit":git("rev-parse","HEAD"),"git_status":git("status","--short"),
         "config_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"config_path":str(path),
         "base_config":asdict(base),"effective_config":asdict(config),"t265_serial":"unknown",
@@ -525,9 +607,9 @@ def main(argv=None):
         report["stationary_health"] = runner.preflight()
         print("PREFLIGHT PASS " + json.dumps(report["stationary_health"]),flush=True)
         runner.open_drive(config)
-        arcs = runner.arcs("B")
-        reverse_bug = all(sign_verified(arcs[i],reverse=i in (1,3)) for i in range(4))
-        report["protocol"] = {"baseline_arcs":[s["metrics"] for s in arcs],
+        arcs = runner.arcs("B") if prior is None else []
+        reverse_bug = bool(arcs) and all(sign_verified(arcs[i],reverse=i in (1,3)) for i in range(4))
+        report["protocol"] = dict(prior["protocol"]) if prior else {"baseline_arcs":[s["metrics"] for s in arcs],
             "conclusion":"LIKELY_DIFF_CAR_REVERSE_VZ_BEHAVIOR" if reverse_bug else "UNKNOWN",
             "config_changed":False}
         if reverse_bug:
@@ -537,6 +619,7 @@ def main(argv=None):
             proposed = replace(config,calibration=proposed.calibration,drive=replace(config.drive,protocol_mode="differential_vx_vz"))
             runner.open_drive(proposed)
             repeated = runner.arcs("B2a")+runner.arcs("B2b")
+            report["protocol"]["candidate_arcs"] = [s["metrics"] for s in repeated]
             if all(sign_verified(s) for s in repeated):
                 report["protocol"]["conclusion"] = "differential_vx_vz_verified_by_motion"
                 config = proposed
@@ -544,7 +627,7 @@ def main(argv=None):
             else:
                 runner.open_drive(config)
                 report["protocol"]["conclusion"] = "UNKNOWN_CANDIDATE_FAILED"
-        elif all(sign_verified(s) for s in arcs):
+        elif arcs and all(sign_verified(s) for s in arcs):
             report["protocol"]["conclusion"] = "current_protocol_signs_consistent"
         cstart = len(runner.segments)
         runner.pair("C_straight20",.20)
@@ -554,7 +637,18 @@ def main(argv=None):
         improves = all(b[s["name"]]["max_center_shift_m"]<=.6*a[s["name"]]["max_center_shift_m"] for s in csegments if "rotate" in s["name"])
         lateral_ok = all(abs(b[s["name"]]["lateral_m"])<=abs(a[s["name"]]["lateral_m"])+.01 for s in csegments if "straight" in s["name"])
         report["mount"] = {"current":a,"left_candidate":b,"conclusion":"left_mount_candidate_better" if improves and lateral_ok else "inconclusive", "config_changed":False}
-        if improves and lateral_ok:
+        if prior is not None:
+            prior_a = prior["mount"]["current"]
+            retest_ok = all(b[s["name"]]["max_center_shift_m"]<=.6*prior_a[s["name"]]["max_center_shift_m"]
+                           for s in csegments if "rotate" in s["name"])
+            retest_ok = retest_ok and all(abs(b[s["name"]]["lateral_m"])<=abs(prior_a[s["name"]]["lateral_m"])+.01
+                           for s in csegments if "straight" in s["name"])
+            report["mount"]["physical_retest_passed"] = retest_ok
+            report["mount"]["baseline_run"] = args.mount_retest_from
+            if not retest_ok:
+                raise DiagAbort("left mount physical retest did not retain the A/B improvement","FAILED_T265_MOUNT")
+            report["mount"]["conclusion"] = "left_mount_verified_by_ab_and_motion"
+        elif improves and lateral_ok:
             candidate(output/"candidate_t265_mount.toml",original,{"sensors.t265.mount":{k:str(v) for k,v in asdict(LEFT_MOUNT).items()}})
             # Retesting with a new mount requires a fresh adapter/SLAM session.
             raise DiagAbort("left mount candidate requires fresh-session physical retest before later phases","FAILED_T265_MOUNT")
@@ -562,9 +656,68 @@ def main(argv=None):
         runner.pair("D_rotate30",math.pi/6,rotate=True)
         runner.pair("D_rotate90",math.pi/2,rotate=True)
         report["rotation"] = [rotation_cause(capture.events,s) for s in runner.segments[dstart:]]
-        if report["protocol"]["conclusion"]=="UNKNOWN":
+        if report["protocol"]["conclusion"].startswith("UNKNOWN"):
             raise DiagAbort("protocol sign evidence inconclusive; precision phases blocked","FAILED_DRIVE_PROTOCOL")
-        raise DiagAbort("precision/controller acceptance requires completed mount and rotation evidence","FAILED_ROTATION_SETTLING")
+        if any(r["cause"]=="physical_or_drive_motion_after_stop" for r in report["rotation"]):
+            raise DiagAbort("IMU/native/adapter/fused evidence of continued motion after STOP","FAILED_DRIVE_HARDWARE")
+        if any(r["cause"] in {"adapter_or_time_or_rebase","fusion_or_slam_anchor"} for r in report["rotation"]):
+            raise DiagAbort("rotation attribution requires adapter/fusion investigation before controller changes")
+        use_corrections = any(r["cause"]=="t265_pose_settling_after_physical_stop" for r in report["rotation"])
+        report["settle"] = {"enabled_by_diagnosis":use_corrections,"runs":[]}
+        for i,sign in enumerate((1,-1,1,-1,1,-1,1,-1)):
+            result = runner.precise_rotate("E%d"%i,sign*math.pi/2,corrections=use_corrections)
+            report["settle"]["runs"].append(result)
+            if not result["passed"]:
+                raise DiagAbort("FAIL_FINAL_YAW: "+json.dumps(result),"FAILED_ROTATION_SETTLING")
+        if report["mount"]["conclusion"]!="left_mount_verified_by_ab_and_motion":
+            raise DiagAbort("mount not verified; position precision tests blocked","FAILED_T265_MOUNT")
+        precision_text = (output/"candidate_t265_mount.toml").read_text(encoding="utf-8")
+        candidate(output/"candidate_precision.toml",precision_text,{"navigation":{
+            "position_tolerance_m":"0.01","slowdown_distance_m":"0.15"}})
+        config = replace(config,navigation=replace(config.navigation,position_tolerance_m=.01,slowdown_distance_m=.15))
+        runner.runtime.motion.navigation = config.navigation
+        runner.runtime.motion.navigator.navigation = config.navigation
+        report["linear"] = []
+        for distance,repeats in ((.2,1),(.5,3)):
+            runner.radius = .75 if distance==.5 else .60
+            for i in range(repeats):
+                index = len(runner.segments)
+                closure = runner.pair("F_%dcm_%d"%(distance*100,i),distance,controller=True)
+                measurements = []
+                for s in runner.segments[index:]:
+                    metrics = s["metrics"]
+                    target = math.copysign(distance,s["requested_v_m_s"])
+                    passed = abs(metrics["longitudinal_m"]-target)<=.01 and abs(metrics["lateral_m"])<=.01
+                    measurements.append({"name":s["name"],"error_m":metrics["longitudinal_m"]-target,
+                        "lateral_m":metrics["lateral_m"],"passed":passed})
+                report["linear"].append({"actions":measurements,"closure":closure})
+                if not all(m["passed"] for m in measurements):
+                    raise DiagAbort("linear precision regression failed","FAILED_DRIVE_HARDWARE")
+        # Final matrix retains this same T265/SLAM session.
+        runner.radius = .60
+        report["final_stationary_health"] = runner.preflight()
+        final_arcs = runner.arcs("FINAL_B")
+        if not all(sign_verified(s) for s in final_arcs):
+            raise DiagAbort("final protocol direction matrix failed","FAILED_DRIVE_PROTOCOL")
+        runner.pair("FINAL_small20",.2,controller=True)
+        for sign in (1,-1):
+            runner.precise_rotate("FINAL_30_%d"%sign,sign*math.pi/6,corrections=use_corrections)
+        for i,sign in enumerate((1,-1,1,-1,1,-1)):
+            result = runner.precise_rotate("FINAL_90_%d"%i,sign*math.pi/2,corrections=use_corrections)
+            if not result["passed"]:
+                raise DiagAbort("final settled rotation failed","FAILED_ROTATION_SETTLING")
+        for distance in (.2,.5):
+            runner.radius = .75 if distance==.5 else .60
+            for i in range(3):
+                index = len(runner.segments)
+                closure = runner.pair("FINAL_%dcm_%d"%(distance*100,i),distance,controller=True)
+                if closure["pair_position_closure_m"]>(.015 if distance==.2 else .020):
+                    raise DiagAbort("final position closure failed","FAILED_DRIVE_HARDWARE")
+                for s in runner.segments[index:]:
+                    m = s["metrics"]
+                    if abs(m["longitudinal_m"]-math.copysign(distance,s["requested_v_m_s"]))>.01 or abs(m["lateral_m"])>.01:
+                        raise DiagAbort("final longitudinal/lateral error >1cm","FAILED_DRIVE_HARDWARE")
+        report["verdict"] = "INTERNAL_CLOSED_LOOP_PASS"
     except BaseException as exc:
         report["error"] = type(exc).__name__+": "+str(exc)
         report["verdict"] = getattr(exc,"verdict","FAILED_LOCALIZATION")
