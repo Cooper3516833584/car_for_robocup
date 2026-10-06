@@ -526,15 +526,24 @@ def rotation_cause(events, segment):
     after = rows if still is None else [e for e in rows if e["host_monotonic_s"]>=still]
     result = {"name":segment["name"],"t_imu_still_after_stop_s":None if still is None else still-stopped,
               "post_stop":segment_metrics(rows),"post_imu_still":segment_metrics(after)}
+    initial = [r for r in raw if r["host_monotonic_s"]<=stopped+.3]
+    initial_norm = statistics.median([math.sqrt(sum(v*v for v in r["raw_angular_velocity_xyz"]))
+                                     for r in initial]) if initial else None
+    result["initial_gyro_norm_median_deg_s"] = None if initial_norm is None else math.degrees(initial_norm)
     m = result["post_imu_still"]
     native = abs(m.get("native_quaternion_yaw_delta_deg") or 0)
     adapter = abs(m.get("t265_pose_yaw_delta_deg") or 0)
     fused = abs(m.get("fused_pose_yaw_delta_deg") or 0)
-    if still is None and all(abs(result["post_stop"].get(k) or 0)>1 for k in
-        ("native_quaternion_yaw_delta_deg","t265_pose_yaw_delta_deg","fused_pose_yaw_delta_deg")):
-        cause = "physical_or_drive_motion_after_stop"
-    elif still is not None and 1<=native<=5 and 1<=adapter<=5:
+    post = result["post_stop"]
+    changes = [post.get(k) for k in ("native_quaternion_yaw_delta_deg","t265_pose_yaw_delta_deg","fused_pose_yaw_delta_deg")]
+    moving_after_stop = (initial_norm is not None and initial_norm>math.radians(2)
+        and all(v is not None and abs(v)>.5 for v in changes)
+        and all(v*changes[0]>0 for v in changes))
+    if still is not None and 1<=native<=5 and 1<=adapter<=5:
         cause = "t265_pose_settling_after_physical_stop"
+    elif moving_after_stop:
+        # Eventual stopping does not erase real movement before t_imu_still.
+        cause = "physical_or_drive_motion_after_stop"
     elif native<.3 and adapter>1:
         cause = "adapter_or_time_or_rebase"
     elif native<.3 and adapter<.3 and fused>1:
@@ -543,6 +552,24 @@ def rotation_cause(events, segment):
         cause = "inconclusive_or_no_significant_settling"
     result["cause"] = cause
     return result
+
+
+def reanalyze(run):
+    report = json.loads((run/"report.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run/"manifest.json").read_text(encoding="utf-8"))
+    events = sorted([json.loads(line) for line in (run/"events.jsonl").read_text(encoding="utf-8").splitlines()],
+                    key=lambda e:e["host_monotonic_s"])
+    rotations = [s for s in report["segments"] if s["name"].startswith("D_")]
+    report["rotation"] = [rotation_cause(events,s) for s in rotations]
+    if any(r["cause"]=="physical_or_drive_motion_after_stop" for r in report["rotation"]):
+        report["acquisition_error"] = report.get("acquisition_error",report.get("error"))
+        report["verdict"] = "FAILED_DRIVE_HARDWARE"
+        report["error"] = "STOP followed by nonzero raw angular velocity and aligned native/adapter/fused yaw; stable-IMU yaw drift is small"
+    report["analysis_commit"] = git("rev-parse","HEAD")
+    report["analysis_source_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    write_json(run/"report.json",report)
+    (run/"report.md").write_text(render_report(report,manifest),encoding="utf-8")
+    print("REPORT " + str(run/"report.md"))
 
 
 def render_report(report, manifest):
@@ -566,13 +593,19 @@ def render_report(report, manifest):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config",required=True)
-    parser.add_argument("--output",required=True)
+    parser.add_argument("--config")
+    parser.add_argument("--output")
+    parser.add_argument("--analyze-run",help="reanalyze existing JSONL without hardware")
     parser.add_argument("--confirm-unattended-low-speed",action="store_true")
     parser.add_argument("--confirm-area-clear",action="store_true")
     parser.add_argument("--mount-retest-from",help="prior run with verified protocol and a better left mount")
     parser.add_argument("--rotation-from",help="reuse completed physical mount retest and begin at phase D")
     args = parser.parse_args(argv)
+    if args.analyze_run:
+        reanalyze(Path(args.analyze_run).resolve())
+        return 0
+    if not args.config or not args.output:
+        parser.error("live diagnosis requires --config and --output")
     if sys.platform!="linux" or not(args.confirm_unattended_low_speed and args.confirm_area_clear):
         parser.error("Linux and explicit unattended low-speed/clear-area authorization required")
     path,output = Path(args.config).resolve(),Path(args.output).resolve()
