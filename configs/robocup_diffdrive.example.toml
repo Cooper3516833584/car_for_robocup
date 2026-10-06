@@ -83,6 +83,28 @@ query_timeout_s = 1.0
 verify_writes = true         # read back the state after every switch command
 disconnect_on_shutdown = true
 
+# Single-axis PWM hobby servo (MG90S) on ROCK 5A PWM7_IR_M0 = physical Pin 28.
+# The pin needs the rk3588-pwm7-m0 device-tree overlay; see docs/SERVO_PWM7_M0.md.
+# chip_device_match names the device-tree node instead of a probe-order pwmchipN.
+# Do not add a pwmchipN fallback: on this board pwmchip0 is D500's fd8b0000.pwm,
+# so a numeric fallback would silently drive the wrong pin instead of failing.
+# 0 degrees is the MID pulse (1500 us), so power-up cannot drive the arm into a
+# mechanical stop. Power the servo from a separate 5-6 V BEC, never the 5 V pin.
+# The axis holds by default: a servo has no holding torque once its pulse train
+# stops, so a loaded axis would lose the angle. See docs/SERVO_PWM7_M0.md 4.3.
+[devices.servo]
+enabled = false
+chip_device_match = ["febd0030.pwm"]
+channel = 0
+pwm_path = ""                # set to bypass chip lookup, e.g. "/sys/class/pwm/pwmchip3/pwm0"
+period_us = 20000            # 50 Hz analog-servo frame
+pulse_min_us = 500           # software travel limit at -travel_half_range_deg
+pulse_max_us = 2500          # software travel limit at +travel_half_range_deg
+travel_half_range_deg = 90.0
+home_angle_deg = 0.0         # angle applied by start(); 0 = mid pulse
+settle_s = 0.35              # time allowed for the arm to reach a new target
+min_command_interval_s = 0.02
+
 [sensors.t265.mount]
 # Upright left-facing camera, housing centered on the drive axle. Initial
 # optical-origin estimate only: inner shell y=0.1678 m plus 5.95 mm depth;

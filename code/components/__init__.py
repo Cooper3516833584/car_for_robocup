@@ -91,6 +91,19 @@ _EXPORT_MODULES = {
     'list_serial_ports': 'relay_lcus',
     'parse_status_response': 'relay_lcus',
     'resolve_relay_settings': 'relay_lcus',
+    'FakeServoAxis': 'servo_axis',
+    'MG90S_TRAVEL': 'servo_axis',
+    'ROCK5A_PWM7_M0_CHIP': 'servo_axis',
+    'ROCK5A_PWM7_M0_OVERLAY': 'servo_axis',
+    'ROCK5A_PWM7_M0_PHYSICAL_PIN': 'servo_axis',
+    'ServoAxis': 'servo_axis',
+    'ServoError': 'servo_axis',
+    'ServoNotStartedError': 'servo_axis',
+    'ServoRangeError': 'servo_axis',
+    'ServoTravel': 'servo_axis',
+    'angle_to_pulse_us': 'servo_axis',
+    'pulse_to_angle_deg': 'servo_axis',
+    'travel_from_endpoints': 'servo_axis',
 }
 __all__ = tuple(_EXPORT_MODULES)
 

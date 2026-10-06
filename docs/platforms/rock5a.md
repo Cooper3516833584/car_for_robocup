@@ -9,6 +9,27 @@
 旧前轮转向舵机及 PWM 部署脚本已移除。现行几何和传感器外参见
 `docs/HARDWARE_MEASUREMENTS.md`，由 schema-v2 profile 配置。
 
+## PWM 舵机（MG90S）
+
+单轴 PWM 舵机，用于载荷指向，**不是**旧的阿克曼前轮转向。详细接线、overlay
+启用步骤和实车命令见 `docs/SERVO_PWM7_M0.md`。
+
+| 项目 | 值 |
+|---|---|
+| 物理 Pin | 28 |
+| 引脚功能 | `PWM7_IR_M0`（`GPIO0_D0`） |
+| 设备树节点 | `febd0030.pwm` |
+| 设备树 overlay | `rk3588-pwm7-m0`（板端默认未启用，需追加后重启） |
+| 舵机 | Tower Pro MG90S，50 Hz，±90 度 ↔ 500~2500 us |
+| 0 度 | 中位脉宽 1500 us |
+| 供电 | 独立 5~6 V BEC + 共地；**不要**用排针 5V |
+| 权限 | sysfs 通道属 `pwm` 组，组内用户无需 sudo |
+| 静止位 | 默认保持使能（舵机松手后没有保持力矩） |
+| 配置节 | `[devices.servo]` |
+
+`rk3588-pwm0-m2.dtbo` 是为 D500 的 `UART6-M1` 一起加载的旧 overlay，与舵机无关：
+Pin 28 需要**额外**追加 `rk3588-pwm7-m0.dtbo`，不要移除已有 overlay。
+
 ## D500 雷达
 
 | 项目 | 值 |

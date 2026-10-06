@@ -147,6 +147,71 @@ class RelayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ServoConfig:
+    """Optional single-axis PWM hobby servo (payload pan/tilt axis).
+
+    Disabled unless a profile opts in, so every profile written before the servo
+    existed keeps loading unchanged. ``chip_device_match`` holds one or more
+    selectors for :func:`hal.pwm.resolve_chip`; the default names the ROCK 5A
+    ``PWM7_IR_M0`` device-tree node (physical Pin 28) rather than a
+    probe-order-dependent ``pwmchipN``. ``0`` degrees is the mid pulse, matching
+    ``components/servo_axis.py``.
+    """
+
+    enabled: bool = False
+    # Only the device-tree node name is trusted by default. A ``pwmchipN``
+    # fallback is deliberately absent: probe order and truncated sysfs class
+    # names make it easy to bind an unrelated PWM controller that happens to
+    # share the number, which would drive the wrong pin instead of failing.
+    chip_device_match: tuple[str, ...] = ("febd0030.pwm",)
+    channel: int = 0
+    pwm_path: str = ""
+    period_us: int = 20_000
+    pulse_min_us: int = 500
+    pulse_max_us: int = 2500
+    travel_half_range_deg: float = 90.0
+    home_angle_deg: float = 0.0
+    settle_s: float = 0.35
+    min_command_interval_s: float = 0.02
+
+    def __post_init__(self) -> None:
+        if isinstance(self.chip_device_match, str):
+            selectors = (self.chip_device_match,)
+        else:
+            selectors = tuple(self.chip_device_match)
+        if not all(isinstance(item, str) and item.strip() for item in selectors):
+            raise ConfigV2Error("devices.servo.chip_device_match must hold non-empty strings")
+        object.__setattr__(self, "chip_device_match", selectors)
+        if isinstance(self.channel, bool) or not isinstance(self.channel, int) or self.channel < 0:
+            raise ConfigV2Error("devices.servo.channel must be a non-negative integer")
+        if not self.pwm_path.strip() and not selectors:
+            raise ConfigV2Error(
+                "devices.servo needs either pwm_path or chip_device_match when enabled"
+            )
+        if isinstance(self.period_us, bool) or not isinstance(self.period_us, int):
+            raise ConfigV2Error("devices.servo.period_us must be an integer")
+        for name in ("pulse_min_us", "pulse_max_us"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigV2Error(f"devices.servo.{name} must be an integer number of microseconds")
+        if not 0 <= self.pulse_min_us < self.pulse_max_us < self.period_us:
+            raise ConfigV2Error(
+                "devices.servo pulses must satisfy 0 <= pulse_min_us < pulse_max_us < period_us"
+            )
+        half_range = _positive("devices.servo.travel_half_range_deg", self.travel_half_range_deg)
+        home = _finite("devices.servo.home_angle_deg", self.home_angle_deg)
+        if not -half_range <= home <= half_range:
+            raise ConfigV2Error(
+                "devices.servo.home_angle_deg must lie inside travel_half_range_deg"
+            )
+        _positive("devices.servo.settle_s", self.settle_s)
+        for name in ("min_command_interval_s",):
+            value = _finite(f"devices.servo.{name}", getattr(self, name))
+            if value < 0.0:
+                raise ConfigV2Error(f"devices.servo.{name} must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class D500LocalizationConfig:
     enable_icp: bool
     enable_wall_absolute: bool
@@ -271,6 +336,7 @@ class DifferentialRobotConfig:
     navigation: NavigationConfig
     safety: SafetyConfig
     relay: RelayConfig = RelayConfig()
+    servo: ServoConfig = ServoConfig()
     localization: LocalizationConfig = LocalizationConfig()
 
     def __post_init__(self) -> None:

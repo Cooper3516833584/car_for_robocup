@@ -25,6 +25,7 @@ from .v2_models import (
     SlamLocalizationConfig,
     NavigationConfig,
     RelayConfig,
+    ServoConfig,
     SafetyConfig,
     SensorMount3DConfig,
     T265Config,
@@ -83,7 +84,7 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
     if set(vehicle) != {"geometry", "drive"}:
         raise ConfigV2Error("vehicle must contain [vehicle.geometry] and [vehicle.drive]")
     missing_devices = {"c10b", "d500", "t265"} - set(devices)
-    unknown_devices = set(devices) - {"c10b", "d500", "t265", "relay"}
+    unknown_devices = set(devices) - {"c10b", "d500", "t265", "relay", "servo"}
     if missing_devices or unknown_devices:
         raise ConfigV2Error(
             "devices must contain [devices.c10b], [devices.d500], [devices.t265]"
@@ -131,6 +132,14 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         else _build(RelayConfig, _table(devices, "relay", "devices.relay"), "devices.relay")
     )
 
+    # [devices.servo] is optional for the same reason: an absent table means "no
+    # PWM servo axis fitted", so profiles written before it keep loading.
+    servo = (
+        ServoConfig()
+        if devices.get("servo") is None
+        else _build(ServoConfig, _table(devices, "servo", "devices.servo"), "devices.servo")
+    )
+
     return DifferentialRobotConfig(
         schema_version=version,
         robot_name=document.get("robot_name", ""),
@@ -152,4 +161,5 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         navigation=_build(NavigationConfig, navigation_settings, "navigation"),
         safety=_build(SafetyConfig, safety_settings, "safety"),
         relay=relay,
+        servo=servo,
     )

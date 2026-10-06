@@ -106,6 +106,47 @@ def build_relay(config: DifferentialRobotConfig, *, fake: bool = False):
     )
 
 
+def build_servo(config: DifferentialRobotConfig, *, fake: bool = False):
+    """Build the optional single-axis PWM servo; construction never opens a device.
+
+    Returns ``None`` when ``[devices.servo] enabled = false``. Device opening is
+    deferred to :meth:`components.servo_axis.ServoAxis.start`, so building the
+    runtime cannot move a physical axis. ``fake=True`` returns the in-memory axis
+    used by dry-run and replay.
+    """
+
+    servo_config = getattr(config, "servo", None)
+    if servo_config is None or not servo_config.enabled:
+        return None
+
+    from components.servo_axis import FakeServoAxis, ServoAxis, ServoTravel
+
+    travel = ServoTravel(
+        half_range_deg=servo_config.travel_half_range_deg,
+        pulse_min_us=servo_config.pulse_min_us,
+        pulse_max_us=servo_config.pulse_max_us,
+        period_us=servo_config.period_us,
+    )
+    common = {
+        "travel": travel,
+        "settle_s": servo_config.settle_s,
+        "min_command_interval_s": servo_config.min_command_interval_s,
+        "home_angle_deg": servo_config.home_angle_deg,
+    }
+    if fake:
+        return FakeServoAxis(**common)
+    from hal.pwm import LinuxSysfsPWMOutput
+
+    kwargs = {"pwm_path": servo_config.pwm_path} if servo_config.pwm_path.strip() else {}
+    output = LinuxSysfsPWMOutput(
+        chip_device_match=tuple(servo_config.chip_device_match),
+        channel=servo_config.channel,
+        period_ns=servo_config.period_us * 1000,
+        **kwargs,
+    )
+    return ServoAxis(pwm=output, **common)
+
+
 def build_pose_fusion(config: DifferentialRobotConfig):
     """Build the pure pose-fusion state object from validated v2 settings."""
 
