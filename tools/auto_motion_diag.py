@@ -3,7 +3,8 @@
 
 Run the existing robocup_slam.launch.py sidecar separately. Active TOML is
 never overwritten: evidence-backed candidates are written under --output.
-Every movement has an eight-second deadline, including +/-90 and +/-50cm.
+Long movements are not split. The operator waived the original eight-second
+limit; a thirty-second deadline and all localization/drive guards remain.
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ from tools.drive_calibration import accepted_fused_sample
 
 TEST_MAX_LINEAR_M_S = 0.06
 TEST_MAX_ANGULAR_RAD_S = 0.20
-SEGMENT_MAX_S = 8.0
+SEGMENT_MAX_S = 30.0
 MAX_RADIUS_FROM_ROUND_START_M = 0.60
 MAX_SINGLE_POSE_STEP_M = 0.08
 MAX_SINGLE_YAW_STEP_RAD = math.radians(15)
@@ -323,7 +324,15 @@ class Runner:
                         raise DiagAbort("controller " + output.state.value,"FAILED_DRIVE_HARDWARE")
                     requested = output.command
                 if now-started>=SEGMENT_MAX_S:
-                    raise DiagAbort("eight-second movement deadline: " + name,"FAILED_DRIVE_HARDWARE")
+                    raise DiagAbort("thirty-second movement deadline: " + name,"FAILED_DRIVE_HARDWARE")
+                if v and omega and controller is None:
+                    # Maintain the requested arc radius during acceleration.
+                    # Independent v/w slew would initially request radius .248m
+                    # in compat firmware coordinates, below its .350m gate.
+                    # Shape test input only; retain existing acceleration limits.
+                    ramp_v = min(abs(v), abs(previous_limited.linear_x_m_s)
+                                 + self.config.drive.max_linear_accel_m_s2*max(0.,dt))
+                    requested = Twist2D(math.copysign(ramp_v,v),omega*ramp_v/abs(v))
                 self.send(requested)
                 previous_limited = self.drive.last_limited_twist
                 time.sleep(PERIOD_S)
@@ -455,8 +464,8 @@ def render_report(report, manifest):
         ("Round-trip closure",report.get("closures")),("Changes made",report.get("changes",[]))]
     lines = ["# Automatic motion diagnosis", "", "Final verdict: **"+report["verdict"]+"**", "",
         "Error: "+str(report.get("error")),"", "No external chassis truth. All measurements are internal T265 + D500/SLAM consistency.", "",
-        "Hard limits: v <= 0.06 m/s, omega <= 0.20 rad/s, movement <= 8.0 s, radius <= 0.60 m (0.75 m only for 50 cm).", "",
-        "90 degrees at 0.20 rad/s and 50 cm at 0.06 m/s can exceed the movement deadline. The deadline is never relaxed.", ""]
+        "Limits: v <= 0.06 m/s, omega <= 0.20 rad/s, movement <= 30.0 s, radius <= 0.60 m (0.75 m only for 50 cm).", "",
+        "Operator explicitly waived the original eight-second limit and requested unsplit long movements. A finite thirty-second deadline remains.", ""]
     for title,value in headings:
         lines += ["## "+title,"","```json",json.dumps(value if value is not None else {"status":"NOT_RUN"},ensure_ascii=False,indent=2),"```",""]
     lines += ["## Completed/aborted segments","", "| Segment | Complete | Time (s) | Fused yaw (deg) |", "|---|---|---|---|"]
@@ -493,6 +502,7 @@ def main(argv=None):
         "config_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"config_path":str(path),
         "base_config":asdict(base),"effective_config":asdict(config),"t265_serial":"unknown",
         "operator_evidence":"area clear; unattended low-speed authorized; T265 on left side",
+        "operator_deadline_override":"Do not split movements; no eight-second limit. Retain finite 30s deadline.",
         "python":sys.version,"started_utc":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
         "critical_source_sha256":{str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
             for p in [Path(__file__),ROOT/"code/robocup_runtime.py",ROOT/"code/components/pose_fusion.py",
