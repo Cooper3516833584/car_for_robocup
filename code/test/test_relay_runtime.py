@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 logging.getLogger("robocup-runtime").setLevel(logging.CRITICAL)
 logging.getLogger("components.relay_lcus").setLevel(logging.CRITICAL)
 
-from components.relay_lcus import FakeLCUSRelay, LCUSRelay
+from components.relay_lcus import DEFAULT_VERIFY_SETTLE, FakeLCUSRelay, LCUSRelay
 from config.v2_factory import build_relay
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode, validate_runtime_readiness
@@ -86,6 +86,16 @@ class RelayFactoryTests(unittest.TestCase):
         self.assertEqual(relay.baudrate, self.enabled.relay.baudrate)
         self.assertEqual(relay.channel_count, self.enabled.relay.channel_count)
         self.assertFalse(relay.connected)
+
+    def test_built_relay_follows_the_configured_channel_count(self) -> None:
+        # This robot carries the 4-channel LCUS board; an 8-channel board stays possible.
+        self.assertEqual(build_relay(self.enabled).channel_count, 4)
+        eight = replace(self.enabled, relay=replace(self.enabled.relay, channel_count=8))
+        self.assertEqual(build_relay(eight).channel_count, 8)
+        self.assertEqual(build_relay(eight, fake=True).channel_count, 8)
+
+    def test_built_relay_uses_the_driver_default_settle(self) -> None:
+        self.assertEqual(build_relay(self.enabled).verify_settle, DEFAULT_VERIFY_SETTLE)
 
     def test_enabling_the_relay_does_not_change_hardware_mission_readiness(self) -> None:
         self.assertEqual(

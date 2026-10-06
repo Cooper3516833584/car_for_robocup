@@ -73,11 +73,15 @@ serial = ""
 # CH340 has the same USB ID as the HC-14 radio and /dev/ttyUSB* numbering moves.
 # Contacts stay latched after the process exits; the runtime requests all_off on
 # shutdown. See docs/RELAY_LCUS.md.
+# On the current ROCK 5A rig the 4-channel LCUS board was confirmed (2026-10-06)
+# on USB bus 8 port 1, i.e. /dev/ttyUSB0, udev path
+# platform-fc8c0000.usb-usb-0:1:1.0-port0. Prefer the pinned by-path symlink over
+# /dev/ttyUSB0, which renumbers when another USB serial device is plugged in.
 [devices.relay]
 enabled = false
-port = ""                    # e.g. "/dev/relay_lcus"
+port = ""                    # e.g. "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"
 baudrate = 9600
-channel_count = 8            # 4 or 8 depending on the fitted board
+channel_count = 4            # this robot carries the 4-channel LCUS board; use 8 for an 8-channel board
 read_timeout_s = 0.2
 query_timeout_s = 1.0
 verify_writes = true         # read back the state after every switch command

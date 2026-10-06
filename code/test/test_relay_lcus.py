@@ -21,6 +21,8 @@ logging.getLogger("components.relay_lcus").setLevel(logging.CRITICAL)
 
 from components.relay_lcus import (
     DEFAULT_BAUDRATE,
+    DEFAULT_CHANNEL_COUNT,
+    DEFAULT_VERIFY_SETTLE,
     FakeLCUSRelay,
     LCUSRelay,
     RELAY_PORT_ENV,
@@ -31,6 +33,11 @@ from components.relay_lcus import (
     parse_status_response,
     resolve_relay_settings,
 )
+
+# The hardware self-test CLI lives next to this module; its --identify path is
+# pure software (the relay is patched out), so it can be covered here.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import relay_selftest  # noqa: E402
 
 
 def status_text(states: dict[int, bool], channels: int) -> bytes:
@@ -108,11 +115,25 @@ class FakeSerial:
         return frames
 
 
-def make_relay(serial: FakeSerial, *, channel_count: int = 8, query_timeout: float = 0.05) -> LCUSRelay:
+def make_relay(
+    serial: FakeSerial,
+    *,
+    channel_count: int = 8,
+    query_timeout: float = 0.05,
+    verify_settle: float = 0,
+) -> LCUSRelay:
+    """Build a driver on the injected double.
+
+    ``verify_settle=0`` keeps the frame-level tests instant and deterministic; the
+    real 4-channel board derives its default settle from ``DEFAULT_VERIFY_SETTLE``
+    and the settle path itself is covered by ``SettleTests`` below.
+    """
+
     return LCUSRelay(
         port="COM_TEST",
         channel_count=channel_count,
         query_timeout=query_timeout,
+        verify_settle=verify_settle,
         serial_factory=lambda: serial,
     )
 
@@ -128,13 +149,21 @@ class ChannelCommandTests(unittest.TestCase):
     }
 
     def test_command_table_matches_the_datasheet(self) -> None:
+        # Channels 5..8 exist on the 8-channel board, so the full table is checked
+        # with an explicit channel_count; the default is the fitted 4-channel board.
         for channel, expected in self.ON_FRAMES.items():
-            self.assertEqual(build_channel_command(channel, True).hex().upper(), expected)
+            self.assertEqual(build_channel_command(channel, True, 8).hex().upper(), expected)
         for channel, expected in self.OFF_FRAMES.items():
-            self.assertEqual(build_channel_command(channel, False).hex().upper(), expected)
+            self.assertEqual(build_channel_command(channel, False, 8).hex().upper(), expected)
+
+    def test_the_default_channel_count_rejects_channels_five_to_eight(self) -> None:
+        self.assertEqual(build_channel_command(4, True).hex().upper(), "A00401A5")
+        for invalid in (5, 8):
+            with self.assertRaises(ValueError):
+                build_channel_command(invalid, True)
 
     def test_checksum_is_the_low_byte_of_the_prefix_channel_and_state_sum(self) -> None:
-        command = build_channel_command(7, True)
+        command = build_channel_command(7, True, 8)
         self.assertEqual(command[3], (command[0] + command[1] + command[2]) & 0xFF)
 
     def test_invalid_channel_is_rejected(self) -> None:
@@ -146,6 +175,16 @@ class ChannelCommandTests(unittest.TestCase):
         for invalid in (0, 9, True, 2.5):
             with self.assertRaises(ValueError):
                 LCUSRelay(port="COM_TEST", channel_count=invalid)
+
+    def test_default_settle_is_used_and_can_be_turned_off(self) -> None:
+        self.assertEqual(LCUSRelay(port="COM_TEST").verify_settle, DEFAULT_VERIFY_SETTLE)
+        self.assertEqual(LCUSRelay(port="COM_TEST", verify_settle=0).verify_settle, 0.0)
+        self.assertEqual(LCUSRelay(port="COM_TEST", verify_settle=0.25).verify_settle, 0.25)
+
+    def test_invalid_verify_settle_is_rejected(self) -> None:
+        for invalid in (-0.1, True, "fast", float("inf"), float("nan")):
+            with self.assertRaises(ValueError):
+                LCUSRelay(port="COM_TEST", verify_settle=invalid)
 
 
 class StatusParsingTests(unittest.TestCase):
@@ -164,6 +203,24 @@ class StatusParsingTests(unittest.TestCase):
 
     def test_ignores_channels_above_the_configured_count(self) -> None:
         self.assertEqual(parse_status_response(b"CH5: ON \r\n", 4), {})
+
+    def test_the_default_channel_count_matches_the_four_channel_board(self) -> None:
+        self.assertEqual(DEFAULT_CHANNEL_COUNT, 4)
+        self.assertEqual(parse_status_response(status_text({}, 4)), {1: False, 2: False, 3: False, 4: False})
+
+    def test_parses_the_binary_reply_of_the_eight_channel_board(self) -> None:
+        # Same protocol, different firmware: one byte per channel, no ASCII lines.
+        self.assertEqual(
+            parse_status_response(bytes((1, 0, 1, 0, 0, 0, 0, 0)), 8),
+            {1: True, 2: False, 3: True, 4: False, 5: False, 6: False, 7: False, 8: False},
+        )
+        self.assertEqual(parse_status_response(b"\x00\x00\x00\x00", 4), {1: False, 2: False, 3: False, 4: False})
+
+    def test_binary_fallback_is_rejected_for_short_or_non_binary_replies(self) -> None:
+        # A fragment must not be mistaken for a state snapshot ...
+        self.assertEqual(parse_status_response(b"\x01\x00", 4), {})
+        # ... and arbitrary noise must not be either.
+        self.assertEqual(parse_status_response(b"\x00\xff\x00\xff", 4), {})
 
     def test_format_states_is_sorted_and_explicit(self) -> None:
         self.assertEqual(format_states({3: True, 1: False}), "CH1=OFF CH3=ON")
@@ -225,7 +282,7 @@ class OpenCloseTests(unittest.TestCase):
             created.append(serial)
             return serial
 
-        relay = LCUSRelay(port="COM_TEST", serial_factory=factory)
+        relay = LCUSRelay(port="COM_TEST", verify_settle=0, serial_factory=factory)
         self.assertEqual(created, [])
         relay.open()
         self.assertEqual(len(created), 1)
@@ -256,8 +313,9 @@ class ControlTests(unittest.TestCase):
         relay.close()
 
     def test_verify_confirms_after_one_idempotent_resend(self) -> None:
-        # The board reports the old state for roughly 50 ms after a command, so
-        # the first comparison fails and the identical resend is confirmed.
+        # verify_settle=0 in make_relay models the worst case the settle wait exists
+        # for: the first read-back still shows the old state, so the identical resend
+        # has to confirm it. Tests that exercise the wait itself live in SettleTests.
         serial = FakeSerial([
             status_text({1: False}, 4),
             status_text({1: True, 2: True}, 4),
@@ -319,6 +377,61 @@ class ControlTests(unittest.TestCase):
         relay.close()
 
 
+class SettleTests(unittest.TestCase):
+    """``verify=True`` must wait for the board's state snapshot before read-back.
+
+    The 4-channel board reports the previous state for roughly 15-50 ms after a
+    control frame, so reading back immediately used to fail and force a redundant
+    resend. The driver now waits ``verify_settle`` first; the resend stays as a
+    fallback for a board that is slower or loses the first frame.
+    """
+
+    def test_verify_waits_before_the_first_read_back(self) -> None:
+        serial = FakeSerial([status_text({1: True}, 4)])
+        relay = LCUSRelay(
+            port="COM_TEST",
+            channel_count=4,
+            query_timeout=0.05,
+            verify_settle=0.25,
+            serial_factory=lambda: serial,
+        )
+        relay.open()
+        with patch("components.relay_lcus.time.sleep") as sleep:
+            self.assertTrue(relay.set_channel(1, True, verify=True))
+        sleep.assert_called_once_with(0.25)
+        self.assertEqual(
+            serial.command_frames(),
+            [bytes.fromhex("A00101A2"), b"\xff"],
+            "a settled read-back must be confirmed without a resend",
+        )
+        relay.close()
+
+    def test_settle_zero_keeps_the_immediate_read_back(self) -> None:
+        serial = FakeSerial([status_text({1: True}, 4)])
+        relay = make_relay(serial, channel_count=4, verify_settle=0)
+        relay.open()
+        with patch("components.relay_lcus.time.sleep") as sleep:
+            self.assertTrue(relay.set_channel(1, True, verify=True))
+        sleep.assert_not_called()
+        relay.close()
+
+    def test_without_verify_no_settle_wait_and_no_read_back(self) -> None:
+        serial = FakeSerial()
+        relay = LCUSRelay(
+            port="COM_TEST",
+            channel_count=4,
+            query_timeout=0.05,
+            verify_settle=0.25,
+            serial_factory=lambda: serial,
+        )
+        relay.open()
+        with patch("components.relay_lcus.time.sleep") as sleep:
+            self.assertTrue(relay.set_channel(1, True))
+        sleep.assert_not_called()
+        self.assertEqual(serial.command_frames(), [bytes.fromhex("A00101A2")])
+        relay.close()
+
+
 class QueryTests(unittest.TestCase):
     def test_query_status_reads_all_channels(self) -> None:
         serial = FakeSerial([status_text({1: True, 2: False, 3: True, 4: False}, 4)])
@@ -364,6 +477,37 @@ class QueryTests(unittest.TestCase):
         self.assertIsNone(relay.detect_channel_count())
         relay.close()
 
+    def test_read_raw_response_returns_the_board_bytes(self) -> None:
+        payload = status_text({1: True, 2: False, 3: False, 4: False}, 4)
+        serial = FakeSerial([payload])
+        relay = make_relay(serial, channel_count=4)
+        relay.open()
+        self.assertEqual(relay.read_raw_response(), payload)
+        self.assertEqual(serial.command_frames(), [b"\xff"], "raw identification must only send FF")
+        relay.close()
+
+    def test_read_raw_response_returns_empty_without_a_reply(self) -> None:
+        relay = make_relay(FakeSerial([]), channel_count=4)
+        relay.open()
+        self.assertEqual(relay.read_raw_response(), b"")
+        relay.close()
+
+    def test_read_raw_response_requires_an_open_port(self) -> None:
+        relay = make_relay(FakeSerial(), channel_count=4)
+        with self.assertRaisesRegex(RuntimeError, "未打开"):
+            relay.read_raw_response()
+
+    def test_read_raw_response_does_not_swallow_a_serial_fault(self) -> None:
+        class ExplodingSerial(FakeSerial):
+            def write(self, data):
+                raise OSError("port unplugged")
+
+        relay = make_relay(ExplodingSerial(), channel_count=4)
+        relay.open()
+        with self.assertRaisesRegex(OSError, "unplugged"):
+            relay.read_raw_response()
+        relay.close()
+
 
 class FakeRelayTests(unittest.TestCase):
     def test_fake_relay_mirrors_the_driver_surface_without_a_port(self) -> None:
@@ -387,6 +531,60 @@ class FakeRelayTests(unittest.TestCase):
         relay.close()
         self.assertEqual(relay.close_count, 1)
         self.assertFalse(relay.connected)
+
+
+class IdentifyToolTests(unittest.TestCase):
+    """The --identify path must stay read-only: one FF query, no control frame."""
+
+    class StubRelay:
+        def __init__(self, payload: bytes) -> None:
+            self.raw = payload
+            self.read_calls = 0
+            self.writes = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info) -> bool:
+            return False
+
+        def read_raw_response(self, timeout=None) -> bytes:
+            self.read_calls += 1
+            return self.raw
+
+        def set_channel(self, *args, **kwargs):
+            self.writes += 1
+            raise AssertionError("--identify must never send a control frame")
+
+    def _run(self, stub, args):
+        import io
+        from contextlib import redirect_stdout
+
+        buffer = io.StringIO()
+        with patch.object(relay_selftest, "LCUSRelay", lambda **kwargs: stub):
+            with redirect_stdout(buffer):
+                code = relay_selftest.main(args)
+        return code, buffer.getvalue()
+
+    def test_identify_reports_a_relay_without_touching_a_contact(self) -> None:
+        stub = self.StubRelay(status_text({1: False, 2: False, 3: False, 4: True}, 4))
+        code, output = self._run(stub, ["--port", "COM_TEST", "--identify", "--channels", "4"])
+        self.assertEqual(code, 0)
+        self.assertEqual(stub.read_calls, 1)
+        self.assertIn("CH4=ON", output)
+        self.assertIn("未动触点", output)
+
+    def test_identify_fails_when_the_port_does_not_answer(self) -> None:
+        stub = self.StubRelay(b"")
+        code, output = self._run(stub, ["--port", "COM_TEST", "--identify"])
+        self.assertEqual(code, 1)
+        self.assertIn("没有收到任何返回", output)
+
+    def test_identify_fails_on_unparsable_data(self) -> None:
+        stub = self.StubRelay(b"\x00\xff\x00\xff")
+        code, output = self._run(stub, ["--port", "COM_TEST", "--identify", "--channels", "4"])
+        self.assertEqual(code, 1)
+        self.assertIn("无法解析", output)
 
 
 if __name__ == "__main__":

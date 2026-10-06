@@ -11,11 +11,18 @@
   节（见 ``code/config/v2_factory.py`` 的 ``build_relay``）；组件本身不读 TOML。
   单文件独立使用时仍可显式传 ``port`` 或设置环境变量 ``D_TASK_RELAY_PORT``。
 
-协议、控制帧、异常语义、锁粒度均与交付版本一致，未作改动。
+控制帧、异常语义、锁粒度均与交付版本一致, 未作改动; 相对交付版本吸收了两项修复
+(来自同协议的 8 路板实机驱动, 协议层完全一致):
+
+1. ``verify=True`` 时先等待 ``verify_settle``(默认 ``DEFAULT_VERIFY_SETTLE`` = 0.1s)
+   再回读, 消除"首次回读读到旧状态 -> 假失败 -> 多发一帧"的现象; 重发机制保留为兜底;
+2. ``parse_status_response()`` 除 ASCII 文本外还识别二进制返回格式 (每字节一路),
+   换用固件返回二进制的板子时不必改代码。
 
 硬件与协议（来自厂家说明与已知规律）:
 
 - 设备: LCUS 型 USB 继电器, 4 路或 8 路, 板载 CH340 转串口, 固定 9600 8N1;
+  本项目当前装的是 **4 路板**(ASCII 返回), 因此 ``DEFAULT_CHANNEL_COUNT`` 默认 4;
 - 控制帧固定 4 字节: ``A0 | 路号 | 状态 | 校验``
     - 路号 ``0x01``~``0x08`` 对应第 1~8 路, 依次类推;
     - 状态 ``0x01`` = 开, ``0x00`` = 关;
@@ -23,8 +30,12 @@
     - 例: 第 1 路开 ``A0 01 01 A2``, 第 1 路关 ``A0 01 00 A1``;
 - 状态查询: 发送单字节 ``FF``, 继电器返回每一路 10 字节 ASCII 文本行, 例如
     ``"CH1: ON \\r\\nCH2: ON \\r\\nCH3: OFF\\r\\nCH4: OFF\\r\\n"``;
-    开与关的返回长度相同, 8 路共 80 字节。控制帧本身没有应答,
-    因此需要确认控制结果时用 ``set_channel(..., verify=True)`` 触发一次 FF 回读。
+    开与关的返回长度相同, 4 路共 40 字节(8 路 80 字节)。控制帧本身没有应答,
+    因此需要确认控制结果时用 ``set_channel(..., verify=True)`` 触发一次 FF 回读;
+- 返回格式不是唯一的: 同协议的 8 路板实测返回 **二进制** (连续 ``channel_count`` 个字节,
+    每字节一路, ``0x01``=开 ``0x00``=关), 本项目 4 路板实测为 ASCII。两种格式都由
+    ``parse_status_response()`` 识别, 因此换板子不需要改解析代码, 但要按实际板子设置
+    ``channel_count``。
 
 设计约束:
 
@@ -40,13 +51,14 @@
 - 状态保持: 继电器触点由板子自锁保持, ``close()`` 和进程退出都**不会**断开触点;
   需要断开必须显式调用 ``all_off()``, 不要假设"程序退出 = 断开"。
   实机观察: USB 断电重插后板子复位为全部 OFF, 但不得依赖该行为作为安全手段。
-- 已验证范围(相对交付版本): 仅在一块 4 路 LCUS 板 (PC/COM3, CH340, 9600 8N1) 上验证过
-  只读 FF 查询、``detect_channel_count()`` 和单路开/关; 8 路板、第 5~8 路映射、
-  多路同时吸合、长时间稳定性、运行中拔插 USB 均**未验证**。
-- 首次回读可能滞后: 实测控制帧后约 50ms 内 FF 回读仍返回旧状态, 因此 ``verify=True``
-  会稳定出现"第一次判定失败 -> 同状态重发 -> 第二次确认成功"。
-  同路同状态重发是幂等的、方向安全, 但每次带校验的操作可能多发一帧;
-  若首帧真的丢失, 重发是必需的, 因此不要为了少发一帧而关掉重发/校验。
+- 已验证范围(本仓库): 本项目当前这块 **4 路 LCUS 板**(CH340, 9600 8N1) 上验证过只读 FF
+  查询、``detect_channel_count()``、单路开/关, 板子本身无损坏通道, 因此没有需要避开的通道;
+  8 路板、第 5~8 路映射、多路同时吸合、长时间稳定性、运行中拔插 USB 均**未在本项目验证**
+  (参考工程曾在另一块 8 路板上实测到过烧毁、以及运行中 USB 掉线导致关断帧发不出去的故障,
+  故障现象与处置见 ``docs/RELAY_LCUS.md`` 第 6 节; 这些属于硬件风险, 不代表本块板子的状态)。
+- 首次回读可能滞后: 实测控制帧后约 50ms 内 FF 回读仍返回旧状态。``verify=True`` 因此先等待
+  ``verify_settle``(默认 0.1s) 再回读, 正常情况下首次回读即一致; 板子更慢或首帧真的丢失时,
+  仍会"失败 -> 同状态重发 -> 确认"。同路同状态重发幂等、方向安全, 不要为了少发一帧而关掉重发/校验。
 - DTR/RTS: 打开串口时显式拉低 DTR/RTS, 个别继电器板可能把这两根线接到其他电路,
   实机副作用尚未验证。
 - 无硬件互锁: 本驱动走独立 USB 串口, 不受底盘看门狗、ACK/重试/心跳保护, 也没有任何
@@ -57,7 +69,8 @@
   不保证跨路原子性(其他线程可能插入到两路之间)。
 - 协议解析边界: 校验规则与返回格式来自说明书和 4 路板实测; 换用其他固件时,
   若返回行格式不同(例如缺行尾空格/换行不同), ``parse_status_response()`` 会忽略无法匹配的行,
-  表现为"缺少通道"告警, 需要重新确认协议后再使用。
+  表现为"缺少通道"告警, 需要重新确认协议后再使用。二进制返回只在没有任何 ASCII 行匹配、
+  长度达到 ``channel_count`` 且字节全为 ``0x00``/``0x01`` 时才采用, 不会与 ASCII 互相误判。
 - 时序边界: 固定 9600 8N1, 4 字节控制帧约 4.2ms; 一次 FF 查询默认最多等待
   ``query_timeout``(默认 1.0s), 等待期间持有内部锁, 不要在高频控制回环里同步调用。
 
@@ -76,6 +89,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import threading
@@ -87,9 +101,17 @@ LOG = logging.getLogger(__name__)
 RELAY_PORT_ENV = "D_TASK_RELAY_PORT"
 
 DEFAULT_BAUDRATE = 9600
-DEFAULT_CHANNEL_COUNT = 8
+# 本项目装的是 4 路 LCUS 板 (ASCII 返回), 所以默认按 4 路构造;
+# 换成 8 路板时显式传 channel_count=8(正式运行由 TOML 的 devices.relay.channel_count 给出)。
+DEFAULT_CHANNEL_COUNT = 4
 MAX_CHANNEL_COUNT = 8
 MIN_CHANNEL = 1
+
+# ``verify=True`` 时, 控制帧发出后到首次 FF 回读之间的稳定等待(秒)。
+# 实测(4 路板): 板子在收到控制帧后约 15~50ms 内, FF 回读仍返回旧状态, 导致每次带校验的
+# 开关都要"失败一次 -> 重发 -> 确认"并多发一帧。等待 100ms 后首次回读即可拿到新状态,
+# 重发只作为兜底保留(板子更慢时可调大该值, 或在测试里传 verify_settle=0 关掉等待)。
+DEFAULT_VERIFY_SETTLE = 0.1
 
 CMD_PREFIX = 0xA0
 QUERY_BYTE = 0xFF
@@ -111,6 +133,7 @@ __all__ = [
     "RELAY_PORT_ENV",
     "DEFAULT_BAUDRATE",
     "DEFAULT_CHANNEL_COUNT",
+    "DEFAULT_VERIFY_SETTLE",
     "MAX_CHANNEL_COUNT",
     "MIN_CHANNEL",
 ]
@@ -181,20 +204,38 @@ def build_channel_command(channel: int, on: bool, channel_count: int = DEFAULT_C
 
 
 def parse_status_response(data: Union[bytes, bytearray, str], channel_count: int = DEFAULT_CHANNEL_COUNT) -> Dict[int, bool]:
-    """解析 FF 查询返回的 ``CHn: ON/OFF`` 文本, 返回 ``{路号: True/False}``。
+    """解析 FF 查询返回, 返回 ``{路号: True/False}``。
 
-    容忍分片接收、前后噪声和行尾空白; 只保留 1~``channel_count`` 的结果。
+    支持实机见到的两种格式:
+
+    1. **ASCII 文本**(本项目 4 路板, 与说明书一致): 每路 10 字节,
+       ``CH1: ON \\r\\n`` / ``CH1: OFF\\r\\n``; 容忍分片接收、前后噪声、大小写和行尾空白,
+       只保留 1~``channel_count`` 的结果;
+    2. **二进制**(同协议的 8 路板实测): 连续 ``channel_count`` 个字节, 每字节一路,
+       ``0x01``=开 ``0x00``=关; 全关为 ``00 00 00 00``(8 路板 8 个字节)。
+
+    二进制分支只在没有任何 ASCII 行匹配、长度达到 ``channel_count``、且前 ``channel_count``
+    字节全是 ``0x00``/``0x01`` 时才采用: ASCII 文本字节都 >= 0x20, 因此不会互相误判;
+    长度不足(分片)时返回空, 避免把半个包或噪声当成状态。
     """
     if isinstance(data, (bytes, bytearray)):
-        text = bytes(data).decode("ascii", errors="ignore")
+        raw = bytes(data)
+        text = raw.decode("ascii", errors="ignore")
     else:
         text = str(data)
+        raw = text.encode("ascii", errors="ignore")
     states: Dict[int, bool] = {}
     for match in STATUS_PATTERN.finditer(text):
         channel = int(match.group(1))
         if MIN_CHANNEL <= channel <= channel_count:
             states[channel] = match.group(2).upper() == "ON"
-    return states
+    if states:
+        return states
+    if len(raw) >= channel_count:
+        head = raw[:channel_count]
+        if all(byte in (STATE_OFF, STATE_ON) for byte in head):
+            return {index + 1: byte == STATE_ON for index, byte in enumerate(head)}
+    return {}
 
 
 def format_states(states: Dict[int, bool]) -> str:
@@ -210,6 +251,8 @@ def _hex(data: bytes) -> str:
 
 class LCUSRelay(object):
     """LCUS 4/8 路 USB 继电器驱动 (CH340 转串口, 9600 8N1)。
+
+    ``channel_count`` 默认 ``DEFAULT_CHANNEL_COUNT``(4, 本项目当前板子); 8 路板传 8。
 
     串口访问由内部锁串行化, 避免多线程同时发控制帧和查询帧时请求/应答错配。
     参数错误抛 ``ValueError``; 串口未打开抛 ``RuntimeError``;
@@ -229,20 +272,28 @@ class LCUSRelay(object):
         channel_count: int = DEFAULT_CHANNEL_COUNT,
         timeout: float = 0.2,
         query_timeout: float = 1.0,
+        verify_settle: float = DEFAULT_VERIFY_SETTLE,
         serial_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
         """
         port: 串口设备, 例如 ``/dev/relay_lcus`` 或 ``COM5``; 为空时取环境变量 ``D_TASK_RELAY_PORT``
         baudrate: 波特率, 默认 9600
-        channel_count: 继电器路数, 默认 8
+        channel_count: 继电器路数, 默认 4(本项目当前板子); 8 路板显式传 8
         timeout: 单次串口读超时(秒)
         query_timeout: 一次 FF 状态查询等待完整返回的总超时(秒)
+        verify_settle: ``verify=True`` 时, 控制帧发出后到首次 FF 回读之间的稳定等待(秒),
+            默认 ``DEFAULT_VERIFY_SETTLE``; 设为 0 表示不等待(退回旧行为, 只靠重发兜底)
         serial_factory: 可选的串口样式对象工厂, 仅用于测试/离线联调
         """
         self._port, self._baudrate = resolve_relay_settings(port, baudrate)
         self.channel_count = _validate_channel_count(channel_count)
         self._timeout = float(timeout)
         self._query_timeout = float(query_timeout)
+        if isinstance(verify_settle, bool) or not isinstance(verify_settle, (int, float)):
+            raise ValueError(f"verify_settle 必须是数字, 实际 {verify_settle!r}")
+        if not math.isfinite(float(verify_settle)) or float(verify_settle) < 0:
+            raise ValueError(f"verify_settle 必须是非负有限值, 实际 {verify_settle!r}")
+        self._verify_settle = float(verify_settle)
         self._serial_factory = serial_factory
         self._serial = None
         self._lock = threading.RLock()
@@ -256,6 +307,11 @@ class LCUSRelay(object):
     @property
     def baudrate(self) -> int:
         return self._baudrate
+
+    @property
+    def verify_settle(self) -> float:
+        """``verify=True`` 时控制帧到首次 FF 回读之间的稳定等待(秒)。"""
+        return self._verify_settle
 
     @property
     def connected(self) -> bool:
@@ -354,9 +410,12 @@ class LCUSRelay(object):
 
         风险与边界:
         - 本方法会真实吸合/断开触点, 调用前必须确认负载安全;
-        - 实测 4 路板在控制帧后约 50ms 内 FF 回读仍为旧状态, 所以 ``verify=True``
-          通常会出现一次"判定失败 -> 同状态重发 -> 确认成功"; 这是预期行为,
-          同路同状态重发幂等且方向安全, 不要为了少发一帧而把重发设为 0;
+        - 实测 4 路板在控制帧后约 15~50ms 内 FF 回读仍为旧状态; 因此 ``verify=True``
+          先等待 ``verify_settle``(默认 ``DEFAULT_VERIFY_SETTLE``=0.1s) 再回读,
+          正常情况下首次回读即一致。板子更慢或首帧真的丢失时仍会"失败 -> 同状态重发 -> 确认",
+          重发幂等且方向安全, 不要为了少发一帧而把重发设为 0;
+          每次带校验的开关因此比立即回读多约 0.1s 耗时, 这是刻意的稳定性取舍,
+          需要旧行为可传 ``verify_settle=0``;
         - ``verify=False`` 只表示"控制帧已发出", 不能证明继电器真的动作了,
           需要确认时必须用 ``verify=True`` 或事后调用 ``query_status()``。
         """
@@ -371,7 +430,9 @@ class LCUSRelay(object):
                 LOG.info("[RELAY] 第%s路 -> %s (发送 %s)", channel, state_text, _hex(command))
                 if not verify:
                     return True
-                # 立即回读: 板子状态刷新有延迟时这里会读到旧状态, 由下面的重发兜底
+                # 稳定等待: 板子状态快照更新需要几十毫秒, 立即回读会读到旧状态
+                if self._verify_settle > 0:
+                    time.sleep(self._verify_settle)
                 states = self._query_locked(serial_obj)
                 if states is not None and states.get(channel) == bool(on):
                     LOG.info("[RELAY] 第%s路 %s 已确认(%s)", channel, state_text, format_states(states))
@@ -430,8 +491,9 @@ class LCUSRelay(object):
 
         return: ``{路号: True/False}``; 超时或没有任何有效返回时返回 None。
 
-        风险与边界: 返回的是板子**状态快照**, 刚发完控制帧就查询可能拿到旧值
-        (实测约 50ms 内滞后); 按 ``channel_count`` 配置的路数收不齐时只告警并返回已收到的部分,
+        风险与边界: 返回的是板子**状态快照**, 刚发完控制帧就查询可能拿到旧值(实测约 50ms 内滞后;
+        ``set_channel(verify=True)`` 已经内置了 ``verify_settle`` 等待, 所以带校验的动作之后读到的是新值);
+        按 ``channel_count`` 配置的路数收不齐时只告警并返回已收到的部分,
         不会为缺失通道编造状态 —— 判定控制是否成功时不要只看返回值是否为 None。
         """
         with self._lock:
@@ -464,6 +526,18 @@ class LCUSRelay(object):
         state = states[channel]
         LOG.info("[RELAY] 第%s路当前状态: %s", channel, "ON" if state else "OFF")
         return state
+
+    def read_raw_response(self, timeout: Optional[float] = None) -> bytes:
+        """发一次 FF 查询并返回**原始字节**, 用于确认端口归属(只发查询帧, 不动触点)。
+
+        用途: 换端口、加 udev 规则或排查接线时, 需要看到板子真正回了什么。
+        LCUS 板会对 FF 回 ``CHn: ON/OFF`` 文本或 ``channel_count`` 字节的二进制快照,
+        空返回表示这个端口不是 LCUS 继电器(或波特率/供电不对)。
+        与 ``query_status()`` 的区别: 这里不做"缺少通道"告警, 也不把解析结果当作状态。
+        """
+        with self._lock:
+            serial_obj = self._require_serial()
+            return self._query_raw_locked(serial_obj, timeout)
 
     def detect_channel_count(self, timeout: Optional[float] = None) -> Optional[int]:
         """发送 FF 识别板子实际报告的路数(例如 4 路板返回 4, 8 路板返回 8)。
@@ -505,6 +579,21 @@ class LCUSRelay(object):
         warn_missing: 是否对缺少的通道打告警(识别路数时为 False)。
         """
         limit = self.channel_count if channel_limit is None else int(channel_limit)
+        buffer = self._query_raw_locked(serial_obj, timeout, expect_channels=limit)
+        states = parse_status_response(buffer, limit)
+        if not states:
+            return None
+        missing = [c for c in range(MIN_CHANNEL, limit + 1) if c not in states]
+        if missing and warn_missing:
+            LOG.warning("[RELAY] FF 状态查询缺少通道: %s", missing)
+        return states
+
+    def _query_raw_locked(self, serial_obj, timeout: Optional[float] = None, expect_channels: int = 0) -> bytes:
+        """在已持锁的前提下发送 FF 并返回收到的原始字节。调用方必须已持有 self._lock。
+
+        ``expect_channels`` > 0 时, 收齐这么多路的状态就提前结束等待(正常查询/识别用);
+        为 0(``read_raw_response``)时一直读到超时, 以便看到板子的完整原始返回。
+        """
         serial_obj.reset_input_buffer()
         deadline = time.perf_counter() + (self._query_timeout if timeout is None else float(timeout))
         serial_obj.write(bytes((QUERY_BYTE,)))
@@ -512,34 +601,29 @@ class LCUSRelay(object):
         LOG.debug("[RELAY] 发送状态查询 %s", _hex(bytes((QUERY_BYTE,))))
 
         buffer = b""
-        states: Dict[int, bool] = {}
         while time.perf_counter() < deadline:
             waiting = serial_obj.in_waiting
             chunk = serial_obj.read(waiting) if waiting else serial_obj.read(1)
             if not chunk:
                 continue
             buffer += chunk
-            states = parse_status_response(buffer, limit)
-            if len(states) >= limit:
+            if expect_channels > 0 and len(parse_status_response(buffer, expect_channels)) >= expect_channels:
                 break
-        if not states:
-            return None
-        missing = [c for c in range(MIN_CHANNEL, limit + 1) if c not in states]
-        if missing and warn_missing:
-            LOG.warning("[RELAY] FF 状态查询缺少通道: %s", missing)
         LOG.debug("[RELAY] FF 原始返回: %r", buffer)
-        return states
+        return buffer
 
 
 class FakeLCUSRelay:
     """内存继电器（dry-run / 回放 / 单元测试用）: 不打开任何串口。
 
     与 ``LCUSRelay`` 保持同名方法, 便于运行时统一调用; 状态在内存中立即生效, 因此
-    ``verify=True`` 恒成立。``commands`` 记录发出的控制帧(十六进制可在测试里比对),
+    ``verify=True`` 恒成立, 不需要真实驱动的 ``verify_settle`` 等待(只有真实板子才有回读滞后)。
+    ``commands`` 记录发出的控制帧(十六进制可在测试里比对),
     ``off_requests`` 记录 ``all_off()`` 次数, ``close_count`` 记录 ``close()`` 次数。
     """
 
     def __init__(self, channel_count: int = DEFAULT_CHANNEL_COUNT, *, initial_on: bool = False) -> None:
+        """channel_count 默认 4(本项目当前板子); 8 路板显式传 8。"""
         self.channel_count = _validate_channel_count(channel_count)
         self._states: Dict[int, bool] = {
             channel: bool(initial_on) for channel in range(MIN_CHANNEL, self.channel_count + 1)

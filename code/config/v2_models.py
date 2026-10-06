@@ -121,13 +121,15 @@ class RelayConfig:
 
     Channel bounds mirror the LCUS protocol in ``components/relay_lcus.py``: one
     board drives 1..8 relay channels and always runs at 9600 8N1, so only the
-    port and the installed board's channel count are deployment choices.
+    port and the installed board's channel count are deployment choices. The
+    default is 4 because the board fitted to this robot is a 4-channel LCUS
+    board; set 8 explicitly for an 8-channel board.
     """
 
     enabled: bool = False
     port: str = ""
     baudrate: int = 9600
-    channel_count: int = 8
+    channel_count: int = 4
     read_timeout_s: float = 0.2
     query_timeout_s: float = 1.0
     verify_writes: bool = True
