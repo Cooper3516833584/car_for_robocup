@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import datetime, timezone
 import hashlib
 import html
@@ -69,7 +70,7 @@ def render_gallery(output: Path, rows: list[dict]) -> None:
     tile_width, tile_height, columns = 480, 340, 3
     canvas = Image.new("RGB", (tile_width * columns, tile_height * ((len(rows) + columns - 1) // columns)), "#edf1f6")
     draw = ImageDraw.Draw(canvas)
-    title_font, label_font = font(20), font(18)
+    title_font, label_font = font(14), font(18)
     for index, row in enumerate(rows):
         x, y = (index % columns) * tile_width, (index // columns) * tile_height
         scene = output / row["scene"] if row.get("scene") else None
@@ -78,8 +79,13 @@ def render_gallery(output: Path, rows: list[dict]) -> None:
                 thumbnail = ImageOps.contain(image.convert("RGB"), (456, 246))
             canvas.paste(thumbnail, (x + (tile_width - thumbnail.width) // 2, y + 12 + (246 - thumbnail.height) // 2))
         draw.text((x + 12, y + 265), row["file"], fill="#182435", font=title_font)
-        color = "#157347" if row.get("result", {}).get("task") else "#b34b00"
+        color = "#157347" if row.get("matches_expected", row.get("result", {}).get("task") is not None) else "#b34b00"
         draw.text((x + 12, y + 294), task_label(row.get("result", {})), fill=color, font=label_font)
+        if row.get("expected") is not None:
+            expected = row["expected"]
+            draw.text((x + 12, y + 317),
+                      f"答案：红 {expected['red']} / 蓝 {expected['blue']} / 绿 {expected['green']}",
+                      fill="#182435", font=label_font)
     canvas.save(output / "overview.png")
 
 
@@ -114,9 +120,11 @@ def render_html(output: Path, report: dict) -> None:
                             f'<p>{esc(task_label(attempt_result))} {esc(attempt_result.get("reason") or "")}</p>'
                             f'<table><tr><th>编号</th><th>实际识别文字</th><th>OCR 分数</th></tr>{tokens}</table>'
                             f'<details><summary>查看这次尝试的图片</summary>{attempt_image}</details></details>')
-        style = "ok" if result.get("task") else "failed"
+        style = "ok" if row.get("matches_expected", result.get("task") is not None) else "failed"
+        answer_label = "" if expected is None else (
+            f" · 答案：红 {expected['red']} / 蓝 {expected['blue']} / 绿 {expected['green']}")
         cards.append(f'<article id="{esc(Path(row["file"]).stem)}"><h2>{esc(row["file"])}</h2>'
-                     f'<p class="{style}">{esc(task_label(result))} · {esc(comparison)}</p>'
+                     f'<p class="{style}">{esc(task_label(result))}{esc(answer_label)} · {esc(comparison)}</p>'
                      f'<p>解析置信度：{result.get("confidence", 0):.4f} · 路径：{esc(result.get("source", "none"))}'
                      f' · 用时：{row["elapsed_ms"]:.0f} ms · 推断颜色：{esc(result.get("inferred_colors", []))}</p>'
                      f'<p>{esc(reason)}</p><div class="images">{pictures}</div>{"".join(attempts)}'
@@ -135,7 +143,7 @@ details{{margin:12px 0}}summary{{cursor:pointer;font-weight:600}}.ok{{color:#157
 </style><main><header><h1>任务板识别检查</h1>
 <p>输入图片 {report['total']} 张；得到有效任务 {report['valid']} 张；有标注的视角测试 {report['matched_views']}/{report['expected_views']} 张符合数量。</p>
 <p>调用当前 TaskBoardReader.recognize_frame 和真实 RapidOCR，保留默认识别配置。这是每张图片的一次单帧识别，votes=1，未执行相机多帧一致性检查。每次 OCR 尝试的文字、分数及输入图均保留。</p>
-<p>任务板原图和汇总拼图也进行了识别；它们是辅助图，单独列出，不计入 12 个视角的通过率。蓝框对应 OCR 文字位置，绿色框对应板面检测。</p>
+<p>仅有答案标注的图片计入核对统计。蓝框对应 OCR 文字位置，绿色框对应板面检测。答案仅用于识别完成后的比较，不传入识别器；未启用任务启动时的固定数量兜底。</p>
 <p>代码 SHA-256：{esc(report['reader_sha256'])}</p><p><a href="summary.json">汇总 JSON</a> · <a href="overview.png">图片总览</a></p><p>{navigation}</p></header>
 {''.join(cards)}</main></html>'''
     (output / "index.html").write_text(document, encoding="utf-8")
@@ -147,6 +155,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", type=Path)
     parser.add_argument("--output", required=True, type=Path, help="new or empty output directory")
+    parser.add_argument("--answers", type=Path, help="JSON answer list with filename/red/blue/green")
     args = parser.parse_args()
     dataset, output = args.dataset.resolve(), args.output.resolve()
     if output.exists() and any(output.iterdir()):
@@ -158,6 +167,19 @@ def main() -> int:
     manifest_path = dataset / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     views = {view["file"]: view for view in manifest.get("views", [])}
+    answers = {}
+    if args.answers is not None:
+        answer_rows = json.loads(args.answers.read_text(encoding="utf-8-sig"))
+        for answer in answer_rows:
+            filename = answer["filename"]
+            if filename in answers:
+                parser.error(f"duplicate answer: {filename}")
+            counts = {color: answer[color] for color in ("red", "blue", "green")}
+            if any(type(value) is not int or not 0 <= value <= 4 for value in counts.values()) or sum(counts.values()) != 4:
+                parser.error(f"invalid answer: {filename}")
+            answers[filename] = {"expected": counts, "corners_tl_tr_br_bl": answer.get("quad")}
+        if set(answers) != {path.name for path in inputs}:
+            parser.error("answer filenames must match all dataset images exactly")
     backend = RapidOCRBackend()
     rows = []
     for index, path in enumerate(inputs, start=1):
@@ -194,12 +216,12 @@ def main() -> int:
             if not cv2.imwrite(str(scene_path), scene):
                 raise OSError(f"could not write {scene_path}")
             row["scene"] = scene_path.relative_to(output).as_posix()
-        view = views.get(path.name)
+        view = answers.get(path.name, views.get(path.name))
         if view is not None:
             row["expected"] = view.get("expected", manifest.get("expected"))
             row["matches_expected"] = result.get("task") == row["expected"]
             quad = result.get("board_quad")
-            row["mean_corner_error_px"] = None if quad is None else float(np.linalg.norm(
+            row["mean_corner_error_px"] = None if quad is None or view.get("corners_tl_tr_br_bl") is None else float(np.linalg.norm(
                 order_quad(quad) - order_quad(view["corners_tl_tr_br_bl"]), axis=1).mean())
         row["result_json"] = (directory / "result.json").relative_to(output).as_posix()
         write_json(directory / "result.json", row)
@@ -214,6 +236,24 @@ def main() -> int:
               "total": len(rows), "valid": sum(row["result"].get("task") is not None for row in rows),
               "expected_views": sum("expected" in row for row in rows),
               "matched_views": sum(row.get("matches_expected", False) for row in rows), "images": rows}
+    report.update(correct_valid=report["matched_views"],
+                  wrong_valid=sum("expected" in row and row["result"].get("task") is not None
+                                  and not row["matches_expected"] for row in rows),
+                  invalid_reject=sum("expected" in row and row["result"].get("task") is None for row in rows),
+                  fixed_task_fallback_used=0,
+                  answers_file=None if args.answers is None else str(args.answers.resolve()))
+    with (output / "comparison.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+        columns = ["file", "expected_red", "expected_blue", "expected_green", "actual_red", "actual_blue", "actual_green", "matches_expected", "source", "reason", "elapsed_ms"]
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            expected, actual = row.get("expected") or {}, row["result"].get("task") or {}
+            comparison = {"file": row["file"], "matches_expected": row.get("matches_expected"),
+                          "source": row["result"].get("source"), "reason": row["result"].get("reason"),
+                          "elapsed_ms": round(row["elapsed_ms"])}
+            comparison.update({"expected_" + color: expected.get(color) for color in ("red", "blue", "green")})
+            comparison.update({"actual_" + color: actual.get(color) for color in ("red", "blue", "green")})
+            writer.writerow(comparison)
     write_json(output / "summary.json", report)
     render_gallery(output, rows)
     render_html(output, report)
