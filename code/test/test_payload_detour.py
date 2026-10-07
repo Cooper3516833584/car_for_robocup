@@ -348,6 +348,30 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertAlmostEqual(road.x_m, .77, delta=.012)
         self.assertIs(self.runtime.motion.drive, original)
 
+    def test_visible_target_slow_cap_only_applies_to_patrol_and_extra_7cm(self):
+        self.fixture(started=False)
+        original = self.runtime.motion.drive
+        advance = self.advance
+        stages_seen = set()
+        vision = self.vision(lambda: BOX if self.pose[0] > .5 or self.releases else None)
+
+        def check_speed_scope(dt):
+            if (self.stage in ("advance_7cm", "left_90deg", "forward_47cm", "reverse_47cm", "right_90deg")
+                    and self.runtime.motion.action_type.value != "follow_segment"):
+                stages_seen.add(self.stage)
+                if self.stage == "advance_7cm":
+                    self.assertLessEqual(self.runtime.motion.drive.max_linear_speed_m_s, .08)
+                else:
+                    self.assertIs(self.runtime.motion.drive, original)
+            advance(dt)
+
+        route.run_route(self.runtime, vision, None, detour=DetourSettings(),
+                        clock=lambda: self.now, sleep=check_speed_scope)
+        self.assertEqual(stages_seen, {"advance_7cm", "left_90deg", "forward_47cm",
+                                      "reverse_47cm", "right_90deg"})
+        self.assertIs(self.runtime.motion.drive, original)
+        self.assert_safe_exit()
+
     def test_horizontal_trigger_ignores_y_and_considers_all_colours(self):
         for cy in (5, 240, 475):
             for cls in range(4):

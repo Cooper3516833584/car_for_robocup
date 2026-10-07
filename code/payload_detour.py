@@ -34,7 +34,8 @@ class DetourSettings:
 
 
 def run_payload_detour(runtime, settings, *, guard=lambda: None,
-                       check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep):
+                       check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
+                       travel_drive=None):
     """Advance 7cm, left90, forward47cm, release, reverse47cm, restore road yaw.
 
     Caller owns runtime/relay lifecycle and resumes its original segment.
@@ -43,6 +44,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
     """
     relay = runtime.relay
     original = runtime.motion.navigation
+    entry_drive = runtime.motion.drive
     hold_failure = None
 
     def check():
@@ -93,6 +95,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         road_pose = motion("advance_7cm", "drive_distance", settings.advance_m)
         road_yaw = road_pose.yaw_rad
         runtime.record_event("payload_detour_road_pose", pose=road_pose)
+        # The visible-target cap belongs to patrol and the extra 7cm only.
+        runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
         side_pose = motion("left_90deg", "rotate_to", road_yaw + math.pi / 2)
         runtime.drive.stop()
         hold(0.20)  # Keep fusion live while the completed turn settles.
@@ -126,6 +130,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.drive.stop()
         runtime.motion.stop()
         runtime.motion.navigation = original
+        runtime.motion.drive = entry_drive
         # On success only the selected magnet is released; preserve other loads.
         # On failure disconnect all contacts; runtime close retries cleanup.
         primary_error = sys.exc_info()[0] is not None

@@ -328,7 +328,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                     print(f"[route] PAYLOAD DETOUR slot={detour.payload_slot}", flush=True)
                     run_payload_detour(runtime, detour, guard=guard,
                                        check_vision=lambda: vision.observe(clock()),
-                                       clock=clock, sleep=sleep)
+                                       clock=clock, sleep=sleep, travel_drive=original_drive)
                     drop_count += 1
                     # Frames seen while turning/dropping cannot re-arm a target.
                     drop_latch.require_clear()
