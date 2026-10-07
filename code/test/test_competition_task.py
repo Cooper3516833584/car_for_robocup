@@ -264,6 +264,70 @@ class CompetitionTaskTests(unittest.TestCase):
                                    "--goal-x", "0", "--goal-y", "0"]), 2)
             build.assert_not_called()
 
+    def test_main_standalone_search_and_align_codes_use_result(self):
+        detection = YellowDetection(640, 360, 80, 80, 0.9)
+        for stage in ("yellow-search", "yellow-align"):
+            for result, expected in ((None, 1), (detection, 0)):
+                with self.subTest(stage=stage, found=result is not None), \
+                     patch("main_robocup.build_runtime", return_value=self.runtime), \
+                     patch.object(task, "run_competition_stage", return_value=result):
+                    self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", stage]), expected)
+
+    def test_main_runtime_safety_and_route_exception_return_one(self):
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch.object(task, "run_competition_stage", side_effect=RuntimeError("motion failed")):
+            self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", "drop-route"]), 1)
+        self.assertFalse(self.runtime.is_running)
+        self.runtime.mission.request_safe_stop("runtime safety")
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch.object(task, "run_competition_stage", return_value=YellowDetection(640, 360, 80, 80, 0.9)):
+            self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", "yellow-search"]), 1)
+
+    def _run_full_cli(self, *, hc_ok=True, found=True, align_ok=True, drop_ok=True, ocr_ok=True):
+        self.stack.enter_context(patch.object(task, "load_detector", return_value=Mock()))
+        self.stack.enter_context(patch.object(task, "_open_yellow_camera", return_value=(Mock(), False)))
+        self.stack.enter_context(patch.object(task, "_detect_stopped", return_value=(
+            YellowDetection(640, 360, 80, 80, 0.9) if found else None)))
+        self.stack.enter_context(patch.object(task, "send_task_once", return_value=hc_ok))
+        drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=drop_ok))
+        if not align_ok:
+            self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=None))
+        if ocr_ok:
+            self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
+        else:
+            reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+            reader.recognize_camera.side_effect = OSError("OCR camera unavailable")
+            self.stack.enter_context(patch("components.task_board_reader.TaskBoardReader", return_value=reader))
+        with patch("main_robocup.build_runtime", return_value=self.runtime):
+            code = main(["--mode", "hardware-mission", "--competition"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertFalse(self.runtime.is_running)
+        return drop
+
+    def test_full_cli_hc_failure_still_returns_success(self):
+        self._run_full_cli(hc_ok=False)
+
+    def test_full_cli_yellow_missing_still_returns_success(self):
+        self._run_full_cli(found=False).assert_not_called()
+
+    def test_full_cli_align_failure_still_returns_success(self):
+        self._run_full_cli(align_ok=False).assert_not_called()
+
+    def test_full_cli_drop_failure_still_returns_success(self):
+        self._run_full_cli(drop_ok=False).assert_called_once_with(self.runtime.relay, 1)
+
+    def test_full_cli_ocr_fallback_still_returns_success(self):
+        with self.assertLogs("competition_task", level="WARNING") as logs:
+            self._run_full_cli(ocr_ok=False)
+        self.assertEqual(self.runtime.mission.task_counts.key, (1, 2, 1))
+        self.assertTrue(any("using fallback task" in message for message in logs.output))
+
+    def test_full_cli_does_not_report_success_before_finish(self):
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch.object(task, "run_competition_stage", return_value=None):
+            self.assertEqual(main(["--mode", "hardware-mission", "--competition"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

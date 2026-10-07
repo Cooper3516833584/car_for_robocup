@@ -204,16 +204,25 @@ def main(argv: list[str] | None = None) -> int:
         if competition_enabled:
             from competition_task import run_competition_stage
 
+            stage = args.competition_stage or "full"
             result = run_competition_stage(
-                runtime, args.competition_stage or "full",
+                runtime, stage,
                 task_board_camera=camera_value(args.task_board_camera),
                 yellow_camera=camera_value(args.yellow_camera),
                 weights=args.yellow_model, slot=args.payload_slot,
             )
             logging.info("competition stage completed: %s; result=%s",
-                         args.competition_stage or "full",
+                         stage,
                          result if isinstance(result, (bool, type(None))) else type(result).__name__)
-            return 0 if runtime.mission.state.value not in {"error", "safe_stop"} else 1
+            if runtime.mission.state.value in {"error", "safe_stop"}:
+                return 1
+            if stage in {"yellow-search", "yellow-align"}:
+                return 0 if result is not None else 1
+            if stage == "drop-route" and result is False:
+                return 1
+            if stage == "full":
+                return 0 if runtime.mission.state.value == "finished" else 1
+            return 0
         if task_board_enabled:
             from components.task_board_reader import TaskBoardConfig, TaskBoardReader
             from task_board_startup import acquire_task_board

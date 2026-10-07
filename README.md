@@ -34,6 +34,9 @@ or `--competition-stage` for an individual action. Route points and quick tuning
 values live at the top of `code/competition_task.py` and currently need field
 measurements. See [docs/COMPETITION_TASK.md](docs/COMPETITION_TASK.md) for the stage
 commands, existing YOLO model path, atomic functions, and field acceptance order.
+The `task-board`, `hc-send`, `yellow-detect`, and `drop` CLI stages operate their
+devices directly without starting localization or drive runtime. Measured lane
+segments guide the main route, and the finish requires position only.
 
 ## Task-board recognition
 
