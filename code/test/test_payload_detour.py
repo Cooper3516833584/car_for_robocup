@@ -78,8 +78,9 @@ class PayloadDetourTests(unittest.TestCase):
     def run_detour(self, settings=None, **kwargs):
         settings = settings or DetourSettings()
         self.assertTrue(prepare_payload(self.relay, settings.payload_slot))
+        kwargs.setdefault("sleep", self.advance)
         return run_payload_detour(self.runtime, settings,
-                                  clock=lambda: self.now, sleep=self.advance, **kwargs)
+                                  clock=lambda: self.now, **kwargs)
 
     def assert_safe_exit(self):
         self.assert_stopped()
@@ -240,6 +241,33 @@ class PayloadDetourTests(unittest.TestCase):
         self.run_detour(DetourSettings(payload_slot=2))
         self.assertEqual(self.relay.query_status(), {1: False, 2: True, 3: False, 4: True})
         self.assert_stopped()
+
+    def test_lateral_residual_at_drop_does_not_pivot_and_return_reuses_approach_heading(self):
+        self.fixture()
+        advance = self.advance
+        injected = False
+        samples = []
+
+        def with_residual(dt):
+            nonlocal injected
+            advance(dt)
+            if self.stage == "forward_47cm" and self.pose[1] > .4 and not injected:
+                self.pose[0] += .02
+                injected = True
+            if self.stage in ("forward_47cm", "reverse_47cm"):
+                samples.append((self.stage, self.pose[2], self.runtime.drive.last_limited_twist))
+
+        self.run_detour(sleep=with_residual)
+        self.assertTrue(injected)
+        side_yaw = self.stage_poses["left_90deg"].yaw_rad
+        for stage, yaw, twist in samples:
+            self.assertLess(abs(yaw - side_yaw), math.radians(10))
+            if stage == "reverse_47cm":
+                self.assertLessEqual(twist.linear_x_m_s, 0)
+        starts = [data for event, data in self.events if event == "payload_detour_stage_start"
+                  and data["stage"] in ("forward_47cm", "reverse_47cm")]
+        self.assertEqual([data["kwargs"]["heading_yaw_rad"] for data in starts], [side_yaw, side_yaw])
+        self.assert_safe_exit()
 
     def test_real_payload_profile_rejects_missing_fourth_channel(self):
         config = load_runtime_config()

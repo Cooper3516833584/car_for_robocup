@@ -202,7 +202,7 @@ def drive_distance(runtime, distance_m):
         original.position_tolerance_m, SHORT_MOVE_TOLERANCE_M))
     try:
         return run_motion_action(runtime, lambda: runtime.motion.drive_distance(
-            distance_m), label="drive_distance")
+            distance_m, lateral_tolerance_m=original.position_tolerance_m), label="drive_distance")
     finally:
         runtime.motion.navigation = original
 

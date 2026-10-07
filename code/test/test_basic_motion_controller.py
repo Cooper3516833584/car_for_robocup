@@ -78,6 +78,63 @@ class BasicMotionTests(unittest.TestCase):
         self.assertLess(self.step(self.pose(x=1.0)).command.linear_x_m_s, 0.0)
         self.assertIs(self.step(self.pose(x=0.5)).state, MotionActionState.SUCCEEDED)
 
+    def test_straight_distance_stops_at_observed_forward_residual_without_pivot(self):
+        # 2026-10-07: 47cm already reached, 2.001cm sideways; the old point
+        # closure requested omega=0.8 rad/s and changed the car heading by 46deg.
+        motion = self._tight_motion()
+        motion.navigation = replace(motion.navigation, position_tolerance_m=.005)
+        motion.drive_distance(.47, lateral_tolerance_m=.03)
+        motion.step(self.pose(), now_s=1.)
+        output = motion.step(self.pose(x=.4723193827, y=.0200137066, yaw=-.0415743644), now_s=2.)
+        self.assertIs(output.state, MotionActionState.SUCCEEDED)
+        self.assertEqual(output.command.linear_x_m_s, 0.)
+        self.assertEqual(output.command.angular_z_rad_s, 0.)
+        self.assertEqual(output.diagnostics["distance_policy"], "straight")
+
+    def test_straight_reverse_stops_at_observed_residual_instead_of_requiring_turn(self):
+        # Last recorded failure: along-track remaining 0.41mm, lateral 13.83mm.
+        motion = self._tight_motion()
+        motion.navigation = replace(motion.navigation, position_tolerance_m=.005)
+        motion.drive_distance(-.47, lateral_tolerance_m=.03)
+        motion.step(self.pose(), now_s=1.)
+        output = motion.step(self.pose(x=-.4704098771, y=-.0138318772, yaw=-.0285950052), now_s=2.)
+        self.assertIs(output.state, MotionActionState.SUCCEEDED)
+        self.assertEqual(output.command.linear_x_m_s, 0.)
+        self.assertEqual(output.command.angular_z_rad_s, 0.)
+
+    def test_saved_straight_heading_is_reused_despite_pose_yaw_change(self):
+        motion = self._tight_motion()
+        motion.drive_distance(-.47, lateral_tolerance_m=.03, heading_yaw_rad=1.5)
+        output = motion.step(self.pose(yaw=1.55), now_s=1.)
+        self.assertAlmostEqual(output.diagnostics["heading_reference_rad"], 1.5)
+        self.assertAlmostEqual(output.diagnostics["heading_drift_rad"], .05)
+        self.assertLess(output.command.linear_x_m_s, 0.)
+        self.assertLess(output.command.angular_z_rad_s, 0.)
+
+    def test_straight_distance_fails_closed_on_large_residual_or_heading(self):
+        for distance in (.47, -.47):
+            for x, y, yaw, reason in (
+                (distance, .031, 0., "straight_distance_lateral_error_exceeded"),
+                (0., 0., math.radians(21), "straight_distance_heading_diverged" if distance > 0 else "reverse_heading_diverged"),
+                (distance * 1.2, 0., 0., "straight_distance_overshoot"),
+            ):
+                with self.subTest(distance=distance, reason=reason):
+                    motion = self._tight_motion()
+                    motion.drive_distance(distance, lateral_tolerance_m=.03)
+                    motion.step(self.pose(), now_s=1.)
+                    output = motion.step(self.pose(x=x, y=y, yaw=yaw), now_s=2.)
+                    self.assertIs(output.state, MotionActionState.BLOCKED)
+                    self.assertEqual(output.diagnostics["reason"], reason)
+                    self.assertEqual(output.command.linear_x_m_s, 0.)
+                    self.assertEqual(output.command.angular_z_rad_s, 0.)
+
+    def test_invalid_straight_options_do_not_start_an_action(self):
+        for kwargs in ({"lateral_tolerance_m": 0}, {"lateral_tolerance_m": float("nan")},
+                       {"heading_yaw_rad": 1.}, {"lateral_tolerance_m": .03, "heading_yaw_rad": float("inf")}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                self.motion.drive_distance(.47, **kwargs)
+            self.assertIs(self.motion.state, MotionActionState.IDLE)
+
     def _tight_motion(self) -> BasicMotionController:
         """The car's measured endgame tolerance; the shipped example profile is looser."""
         config = load_v2_config()

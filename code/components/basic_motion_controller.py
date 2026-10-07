@@ -94,6 +94,8 @@ class _Action:
     accumulated_yaw: float = 0.0
     recovering: bool = False
     recovery_started: bool = False
+    lateral_tolerance_m: float | None = None
+    heading_reference_rad: float | None = None
 
 
 def _finite(value: float) -> float:
@@ -156,8 +158,24 @@ class BasicMotionController:
         if kind in {MotionActionType.NAVIGATE_TO, MotionActionType.NAVIGATE_TO_POSE}:
             self.navigator.set_goal(NavigationGoal(*args))
 
-    def drive_distance(self, distance_m: float) -> None:
-        self._begin(MotionActionType.DRIVE_DISTANCE, _finite(distance_m))
+    def drive_distance(self, distance_m: float, *, lateral_tolerance_m: float | None = None,
+                       heading_yaw_rad: float | None = None) -> None:
+        """Drive a signed distance; an explicit lateral bound selects straight travel.
+
+        Straight travel stops on along-track distance and never pivots toward an
+        endpoint's lateral residual. A saved heading can be reused for the return.
+        Existing callers without this option retain their point-closure behavior.
+        """
+        distance = _finite(distance_m)
+        lateral = None if lateral_tolerance_m is None else _finite(lateral_tolerance_m)
+        heading = None if heading_yaw_rad is None else normalize_angle_rad(_finite(heading_yaw_rad))
+        if lateral is not None and lateral <= 0:
+            raise ValueError("lateral tolerance must be positive")
+        if heading is not None and lateral is None:
+            raise ValueError("a saved distance heading requires an explicit lateral tolerance")
+        self._begin(MotionActionType.DRIVE_DISTANCE, distance)
+        self._active.lateral_tolerance_m = lateral
+        self._active.heading_reference_rad = heading
 
     def rotate(self, angle_rad: float) -> None:
         self._begin(MotionActionType.ROTATE_RELATIVE, _finite(angle_rad))
@@ -218,6 +236,8 @@ class BasicMotionController:
         if not action.initialized:
             action.start = (pose.x_m, pose.y_m)
             action.start_yaw = pose.yaw_rad
+            if action.heading_reference_rad is not None:
+                action.start_yaw = action.heading_reference_rad
             action.previous_yaw = pose.yaw_rad
             action.initialized = True
         kind = action.kind
@@ -300,6 +320,27 @@ class BasicMotionController:
         }
         if distance < 0.0 and abs(heading_drift) > REVERSE_DISTANCE_MAX_HEADING_DRIFT_RAD:
             return self._block("reverse_heading_diverged", **diagnostics)
+        if action.lateral_tolerance_m is not None:
+            diagnostics.update({"distance_policy": "straight", "lateral_tolerance_m": action.lateral_tolerance_m,
+                                "heading_reference_rad": action.start_yaw})
+            if abs(heading_drift) > REVERSE_DISTANCE_MAX_HEADING_DRIFT_RAD:
+                return self._block("straight_distance_heading_diverged", **diagnostics)
+            if abs(cross) > action.lateral_tolerance_m:
+                return self._block("straight_distance_lateral_error_exceeded", **diagnostics)
+            if abs(remaining) <= self.navigation.position_tolerance_m:
+                self._succeed()
+                return _ZERO, diagnostics
+            direction = 1.0 if distance >= 0.0 else -1.0
+            if direction * remaining < 0:
+                return self._block("straight_distance_overshoot", **diagnostics)
+            correction = _clamp(math.atan(self.navigation.path_yaw_gain * cross), SEGMENT_MAX_CORRECTION_RAD)
+            error = normalize_angle_rad(action.start_yaw - direction * correction - pose.yaw_rad)
+            diagnostics["heading_error_rad"] = error
+            if abs(error) > self.navigation.rotate_in_place_threshold_rad:
+                return self._block("straight_distance_requires_turn", **diagnostics)
+            self._phase = MotionPhase.TRACKING
+            return self._line_command(error, direction * remaining, direction,
+                                      min_speed_m_s=LINE_MINIMUM_SPEED_M_S), diagnostics
         if goal_distance <= self.navigation.position_tolerance_m and abs(remaining) <= self.navigation.position_tolerance_m:
             self._succeed()
             return _ZERO, diagnostics

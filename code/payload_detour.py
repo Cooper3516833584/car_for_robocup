@@ -49,13 +49,15 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         guard()
         check_vision()
 
-    def motion(label, method, *args):
+    def motion(label, method, *args, **kwargs):
         check()
         runtime.motion.stop()
         if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
             runtime.mission.on_payload_action_done()
-        getattr(runtime.motion, method)(*args)
-        runtime.record_event("payload_detour_stage_start", stage=label, args=args)
+        if method == "drive_distance":
+            kwargs["lateral_tolerance_m"] = original.position_tolerance_m
+        getattr(runtime.motion, method)(*args, **kwargs)
+        runtime.record_event("payload_detour_stage_start", stage=label, args=args, kwargs=kwargs)
         while True:
             check()
             result = _step(runtime)
@@ -91,8 +93,9 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         road_pose = motion("advance_7cm", "drive_distance", settings.advance_m)
         road_yaw = road_pose.yaw_rad
         runtime.record_event("payload_detour_road_pose", pose=road_pose)
-        motion("left_90deg", "rotate_to", road_yaw + math.pi / 2)
-        motion("forward_47cm", "drive_distance", settings.approach_m)
+        side_pose = motion("left_90deg", "rotate_to", road_yaw + math.pi / 2)
+        side_yaw = side_pose.yaw_rad
+        motion("forward_47cm", "drive_distance", settings.approach_m, heading_yaw_rad=side_yaw)
         runtime.motion.stop()
         runtime.drive.stop()
         check()
@@ -104,7 +107,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if not released:
             raise RuntimeError("payload release or relay deactivation failed")
         runtime.record_event("payload_release_done", slot=settings.payload_slot, channel=channel)
-        motion("reverse_47cm", "drive_distance", -settings.approach_m)
+        motion("reverse_47cm", "drive_distance", -settings.approach_m, heading_yaw_rad=side_yaw)
         returned = motion("right_90deg", "rotate_to", road_yaw)
         runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
         return returned

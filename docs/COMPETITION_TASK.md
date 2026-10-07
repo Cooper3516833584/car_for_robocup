@@ -38,7 +38,7 @@
 | `YELLOW_TARGET_CX_PX / YELLOW_CX_TOL_PX` | 当前 320 / 10，基于 640×480 参考画面；非此尺寸的检测坐标先按比例换算 |
 | `YELLOW_IMGSZ / CAMERA_WIDTH / CAMERA_HEIGHT / CAMERA_FPS` | 共用 `components/yolo_cpu.py` 的 320 / 640 / 480 / 30；OCR 仍使用自己的采集设置 |
 | `ALIGN_PIXEL_TO_DRIVE_SIGN / ALIGN_STEP_M` | 当前 +1 / 0.02 m，实测前后移动对 cx 的影响 |
-| `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作临时缩小现有 3 cm 容差，动作后恢复 |
+| `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作按纵向距离完成，横向边界保留原配置，动作后恢复；到位后不转向追点 |
 | `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 选项1/2/3对应右前CH2/中间CH3/左前CH4、False（通电吸住/断电释放）、0.5 s；与组件及路线测试共用已确认接线 |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
 | `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
