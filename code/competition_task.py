@@ -31,6 +31,9 @@ CAMERA_HEIGHT = 720
 # Servo 90 deg points the camera left. No servo control in this task.
 # TODO(field): add servo scanning only if an outside marker is out of view.
 
+# START_* are field notes only.
+# All route coordinates below use the current fused pose frame directly.
+# No START-relative transform is applied.
 START_X = 0.0
 START_Y = 0.0
 START_YAW_DEG = 0.0
@@ -53,7 +56,7 @@ CORNER_2_Y = 0.0
 CORNER_2_YAW_DEG = 0.0
 FINISH_X = 0.0
 FINISH_Y = 0.0
-FINISH_YAW_DEG = 0.0
+FINISH_YAW_DEG = 0.0  # Reserved; current finish does not use yaw.
 
 TASK_BOARD_MAX_TRIES = 3
 TASK_BOARD_RETRY_DELAY_S = 0.15
@@ -176,6 +179,11 @@ def move_to_pose(runtime, x_m, y_m, yaw_deg):
         x_m, y_m, math.radians(yaw_deg)), label="move_to_pose")
 
 
+def move_to_xy(runtime, x_m, y_m):
+    return run_motion_action(runtime, lambda: runtime.motion.navigate_to(
+        x_m, y_m), label="move_to_xy")
+
+
 def follow_lane_segment(runtime, start_xy, end_xy):
     return run_motion_action(runtime, lambda: runtime.motion.follow_segment(
         start_xy, end_xy), label="follow_lane_segment")
@@ -202,7 +210,10 @@ def go_to_lane(runtime):
 
 
 def go_to_task_board(runtime):
-    result = move_to_pose(runtime, TASK_BOARD_X, TASK_BOARD_Y, TASK_BOARD_YAW_DEG)
+    # TASK_BOARD_X/Y is the on-lane observation pose, not the board centre.
+    result = follow_lane_segment(runtime, (LANE_ENTRY_X, LANE_ENTRY_Y),
+                                 (TASK_BOARD_X, TASK_BOARD_Y))
+    turn_to_deg(runtime, TASK_BOARD_YAW_DEG)
     runtime.drive.stop()
     return result
 
@@ -254,13 +265,14 @@ def send_task_to_drone_once(counts, *, runtime=None):
 
 
 def go_to_first_corner(runtime):
-    return move_to_pose(runtime, CORNER_1_X, CORNER_1_Y, CORNER_1_YAW_DEG)
+    return follow_lane_segment(runtime, (TASK_BOARD_X, TASK_BOARD_Y),
+                               (CORNER_1_X, CORNER_1_Y))
 
 
 def enter_cross_lane(runtime):
     turn_to_deg(runtime, CROSS_LANE_YAW_DEG)
-    return move_to_pose(runtime, YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y,
-                        CROSS_LANE_YAW_DEG)
+    return follow_lane_segment(runtime, (CORNER_1_X, CORNER_1_Y),
+                               (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y))
 
 
 def detect_yellow_once(camera, detector):
@@ -417,11 +429,13 @@ def drop_payload(relay, slot=1):
 
 
 def go_to_second_corner(runtime):
-    return move_to_pose(runtime, CORNER_2_X, CORNER_2_Y, CORNER_2_YAW_DEG)
+    return follow_lane_segment(runtime, (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y),
+                               (CORNER_2_X, CORNER_2_Y))
 
 
 def go_to_finish(runtime):
-    result = move_to_pose(runtime, FINISH_X, FINISH_Y, FINISH_YAW_DEG)
+    result = follow_lane_segment(runtime, (CORNER_2_X, CORNER_2_Y),
+                                 (FINISH_X, FINISH_Y))
     runtime.drive.stop()
     runtime.mission.finish()
     runtime.record_event("competition_finished", x_m=result.estimate.pose.x_m,

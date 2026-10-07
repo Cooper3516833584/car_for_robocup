@@ -39,6 +39,11 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(task.time, "sleep", self.advance))
+        # Measured lane-segment fixtures must have distinct endpoints.
+        for name, value in {"LANE_ENTRY_X": 0.10, "TASK_BOARD_X": 0.20,
+                            "CORNER_1_X": 0.30, "YELLOW_SEARCH_START_X": 0.35,
+                            "CORNER_2_X": 0.45, "FINISH_X": 0.55}.items():
+            self.stack.enter_context(patch.object(task, name, value))
 
     def estimate(self, now):
         pose = None if self.lost else Pose2D(*self.xy_yaw, now)
@@ -122,7 +127,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
     def test_search_clips_last_step_and_needs_consecutive_frames(self):
-        self.stack.enter_context(patch.object(task, "YELLOW_SEARCH_END_X", 0.19))
+        self.stack.enter_context(patch.object(task, "YELLOW_SEARCH_END_X", 0.54))
         detection = YellowDetection(640, 360, 80, 80, 0.9)
         reads = [detection, None, None, None, None]
         detect = self.stack.enter_context(patch.object(task, "_detect_stopped",
@@ -161,10 +166,6 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
     def test_full_route_continues_after_hc_and_payload_failure(self):
-        for name, value in {"LANE_ENTRY_X": 0.10, "TASK_BOARD_X": 0.20,
-                            "CORNER_1_X": 0.30, "YELLOW_SEARCH_START_X": 0.35,
-                            "CORNER_2_X": 0.45, "FINISH_X": 0.55}.items():
-            self.stack.enter_context(patch.object(task, name, value))
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
         self.stack.enter_context(patch.object(task, "_detect_stopped",
@@ -175,6 +176,54 @@ class CompetitionTaskTests(unittest.TestCase):
         drop.assert_called_once_with(self.runtime.relay, 1)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
         self.assertAlmostEqual(self.xy_yaw[0], 0.55, delta=0.03)
+
+    def test_finish_at_xy_does_not_align_yaw(self):
+        self.xy_yaw[:] = [task.FINISH_X, task.FINISH_Y, math.pi / 2]
+        self.stack.enter_context(patch.object(task, "FINISH_YAW_DEG", -135))
+        with patch.object(self.runtime.motion, "rotate_to", wraps=self.runtime.motion.rotate_to) as rotate, \
+             patch.object(self.runtime.motion, "navigate_to_pose", wraps=self.runtime.motion.navigate_to_pose) as pose:
+            task.go_to_finish(self.runtime)
+        rotate.assert_not_called()
+        pose.assert_not_called()
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertEqual(self.xy_yaw[2], math.pi / 2)
+        self.assertEqual(self.sleep_count, 0)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
+        self.assertEqual(self.runtime.drive.last_limited_twist.angular_z_rad_s, 0)
+
+    def test_full_route_uses_measured_lane_segments(self):
+        self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
+        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        with patch.object(task, "follow_lane_segment", wraps=task.follow_lane_segment) as follow:
+            task.run_full_mission(self.runtime, detector=None)
+        self.assertEqual([(c.args[1], c.args[2]) for c in follow.call_args_list], [
+            ((0.10, 0.0), (0.20, 0.0)), ((0.20, 0.0), (0.30, 0.0)),
+            ((0.30, 0.0), (0.35, 0.0)), ((0.35, 0.0), (0.45, 0.0)),
+            ((0.45, 0.0), (0.55, 0.0))])
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+
+    def test_full_route_alignment_failure_skips_drop_and_finishes(self):
+        self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
+        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        self.stack.enter_context(patch.object(task, "search_yellow_drop_zone",
+            return_value=YellowDetection(640, 360, 80, 80, 0.9)))
+        self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=None))
+        drop = self.stack.enter_context(patch.object(task, "drop_payload"))
+        task.run_full_mission(self.runtime, detector=Mock())
+        drop.assert_not_called()
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+
+    def test_move_to_xy_does_not_set_final_yaw(self):
+        with patch.object(self.runtime.motion, "navigate_to", wraps=self.runtime.motion.navigate_to) as navigate:
+            task.move_to_xy(self.runtime, 0.10, 0.0)
+        navigate.assert_called_once_with(0.10, 0.0)
+
+    def test_second_corner_recovers_to_fixed_lane_after_offset_drop(self):
+        self.xy_yaw[:] = [0.38, 0.15, 0.2]
+        # Rejoin geometry must remain the measured lane, not current-pose -> goal.
+        with patch.object(task, "follow_lane_segment", return_value=Mock()) as follow:
+            task.go_to_second_corner(self.runtime)
+        follow.assert_called_once_with(self.runtime, (0.35, 0.0), (0.45, 0.0))
 
     def test_full_route_without_yellow_skips_drop_and_finishes(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
