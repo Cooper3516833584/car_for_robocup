@@ -108,6 +108,9 @@ DEFAULT_BAUDRATE = 9600
 # 本项目装的是 4 路 LCUS 板 (ASCII 返回), 所以默认按 4 路构造;
 # 换成 8 路板时显式传 channel_count=8(正式运行由 TOML 的 devices.relay.channel_count 给出)。
 DEFAULT_CHANNEL_COUNT = 4
+# 本车电磁铁接线（2026-10-07 操作者实测确认）：
+# CH1：未连接电磁铁；CH2：右前方电磁铁。
+# CH3 / CH4：对应位置尚未确认；这些注释不改变通道编号或控制逻辑。
 MAX_CHANNEL_COUNT = 8
 MIN_CHANNEL = 1
 
