@@ -35,10 +35,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--goal-x", type=float, help="optional goal x in the current fused pose frame, metres")
     parser.add_argument("--goal-y", type=float, help="optional goal y in the current fused pose frame, metres")
     parser.add_argument("--goal-yaw", type=float, help="optional final yaw in the current fused pose frame, radians")
-    parser.add_argument("--task-board-camera", help="enable startup task acquisition using a stable camera path or index")
+    parser.add_argument("--task-board-camera", help="startup/competition task camera path or index")
     parser.add_argument("--task-board-turn-deg", type=float,
                         help="measured signed chassis turn toward the board, required with --task-board-camera")
     parser.add_argument("--task-board-debug-dir", type=Path, help="optional task-board images and OCR evidence")
+    parser.add_argument("--competition", action="store_true", help="run the complete competition mission (hardware-mission)")
+    parser.add_argument("--competition-stage", choices=(
+        "full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
+        "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop", "corner2", "finish"),
+        help="run only this competition stage (implies --competition)")
+    parser.add_argument("--yellow-camera", help="competition camera index or stable device path")
+    parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
+    parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=1,
+                        help="slot for the standalone drop stage; full mission uses slot 1")
     return parser
 
 
@@ -57,13 +66,21 @@ def configure_logging(log_dir: str | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
+    competition_enabled = args.competition or args.competition_stage is not None
+    if competition_enabled and args.mode != RuntimeMode.HARDWARE_MISSION.value:
+        logging.error("competition requires --mode hardware-mission; use fake unit tests for software route validation")
+        return 2
+    if competition_enabled and (args.goal_x is not None or args.goal_y is not None
+                                or args.goal_yaw is not None or args.task_board_turn_deg is not None):
+        logging.error("competition owns its route; do not combine with --goal-* or startup --task-board-turn-deg")
+        return 2
     if (args.goal_x is None) != (args.goal_y is None):
         logging.error("--goal-x and --goal-y must be provided together")
         return 2
     if args.goal_yaw is not None and args.goal_x is None:
         logging.error("--goal-yaw requires --goal-x and --goal-y")
         return 2
-    task_board_enabled = args.task_board_camera is not None
+    task_board_enabled = args.task_board_camera is not None and not competition_enabled
     if task_board_enabled != (args.task_board_turn_deg is not None):
         logging.error("--task-board-camera and --task-board-turn-deg must be provided together")
         return 2
@@ -85,8 +102,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.log_dir is not None:
             runtime.event_logger = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
-        elif task_board_enabled:
-            runtime.event_logger = JsonlEventLogger(Path("logs") / "task-board" / "events.jsonl")
+        elif task_board_enabled or competition_enabled:
+            runtime.event_logger = JsonlEventLogger(Path("logs") / (
+                "competition" if competition_enabled else "task-board") / "events.jsonl")
     except (RuntimeReadinessError, FileNotFoundError, ValueError, NotImplementedError) as exc:
         logging.error("cannot start RoboCup runtime: %s", exc)
         if isinstance(exc, RuntimeReadinessError) and args.log_dir is not None:
@@ -107,6 +125,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        if competition_enabled:
+            from competition_task import run_competition_stage
+
+            def camera_value(value):
+                return int(value) if value is not None and value.isdigit() else value
+
+            result = run_competition_stage(
+                runtime, args.competition_stage or "full",
+                task_board_camera=camera_value(args.task_board_camera),
+                yellow_camera=camera_value(args.yellow_camera),
+                weights=args.yellow_model, slot=args.payload_slot,
+            )
+            logging.info("competition stage completed: %s; result=%s",
+                         args.competition_stage or "full",
+                         result if isinstance(result, (bool, type(None))) else type(result).__name__)
+            return 0 if runtime.mission.state.value not in {"error", "safe_stop"} else 1
         if task_board_enabled:
             from components.task_board_reader import TaskBoardConfig, TaskBoardReader
             from task_board_startup import acquire_task_board
@@ -142,6 +176,11 @@ def main(argv: list[str] | None = None) -> int:
         runtime.mission.request_safe_stop("keyboard interrupt")
         runtime.close()
         return 130
+    except Exception:
+        if not competition_enabled:
+            raise
+        logging.exception("competition stopped")
+        return 1
     finally:
         runtime.close()
 

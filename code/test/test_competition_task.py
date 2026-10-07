@@ -1,0 +1,220 @@
+"""Hardware-free route acceptance using the production motion/runtime loop."""
+
+from contextlib import ExitStack
+from pathlib import Path
+import math
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import competition_task as task
+from components.basic_motion_controller import MotionActionState
+from components.pose_fusion import FusedPoseEstimate, PoseFusionState
+from components.task_board_reader import TaskCounts, TaskBoardResult
+from components.yellow_yolo_adapter import YellowDetection
+from config.v2_runtime import RuntimeMode
+from core.types import Pose2D
+from main_robocup import main
+from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_config
+
+
+class CompetitionTaskTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 10.0
+        self.xy_yaw = [0.0, 0.0, 0.0]
+        self.lost = False
+        self.sleep_count = 0
+        self.runtime = build_runtime(load_runtime_config(), RuntimeMode.DRY_RUN,
+                                     clock=lambda: self.now)
+        self.runtime.start()
+        self.addCleanup(self.runtime.close)
+        # Fake canonical pose observations, propagated from the fake drive.
+        # All production fusion/motion/drive algorithms remain unmodified.
+        self.runtime._consume_t265 = lambda *_args, **_kwargs: None
+        self.runtime._consume_d500 = lambda *_args, **_kwargs: None
+        self.runtime.fusion.estimate = self.estimate
+        self.runtime.record_event = Mock()
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.object(task.time, "sleep", self.advance))
+
+    def estimate(self, now):
+        pose = None if self.lost else Pose2D(*self.xy_yaw, now)
+        return FusedPoseEstimate(pose, PoseFusionState.LOST if self.lost else PoseFusionState.OK,
+                                 0.0, ("test",), None if self.lost else 0.0,
+                                 None if self.lost else 0.0, None, None, True,
+                                 anchor_initialized=True)
+
+    def advance(self, dt):
+        self.sleep_count += 1
+        if self.sleep_count > 10000:
+            self.fail("simulation did not terminate")
+        twist = self.runtime.drive.last_limited_twist
+        yaw = self.xy_yaw[2] + twist.angular_z_rad_s * dt / 2
+        self.xy_yaw[0] += twist.linear_x_m_s * math.cos(yaw) * dt
+        self.xy_yaw[1] += twist.linear_x_m_s * math.sin(yaw) * dt
+        self.xy_yaw[2] += twist.angular_z_rad_s * dt
+        self.now += dt
+
+    def test_consecutive_real_actions_resume_ready_and_stop(self):
+        task.drive_distance(self.runtime, 0.12)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.TARGET_OPERATION)
+        first_x = self.xy_yaw[0]
+        task.drive_distance(self.runtime, -0.04)
+        self.assertLess(self.xy_yaw[0], first_x - 0.025)
+        self.assertEqual(self.runtime.motion.state, MotionActionState.SUCCEEDED)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
+
+    def test_two_centimetre_move_is_not_swallowed_by_route_tolerance(self):
+        original = self.runtime.motion.navigation
+        task.drive_distance(self.runtime, 0.02)
+        self.assertGreater(self.xy_yaw[0], 0.015)
+        self.assertIs(self.runtime.motion.navigation, original)
+
+    def test_fixed_route_uses_existing_rotate_actions(self):
+        self.stack.enter_context(patch.object(task, "FIXED_DROP_ROUTE", [
+            ("drive", 0.10), ("rotate", 20), ("rotate_to", 0)]))
+        task.run_fixed_drop_route(self.runtime)
+        self.assertGreater(self.xy_yaw[0], 0.08)
+        self.assertLess(abs(self.xy_yaw[2]), math.radians(3))
+
+    def test_transient_pose_loss_recovers_during_motion(self):
+        initial_advance = self.advance
+        elapsed = [0.0]
+
+        def advance(dt):
+            initial_advance(dt)
+            elapsed[0] += dt
+            self.lost = 0.1 < elapsed[0] < 0.3
+
+        self.stack.enter_context(patch.object(task.time, "sleep", advance))
+        task.drive_distance(self.runtime, 0.10)
+        self.assertEqual(self.runtime.motion.state, MotionActionState.SUCCEEDED)
+
+    def test_complete_pose_loss_stops_route(self):
+        initial_advance = self.advance
+
+        def advance(dt):
+            initial_advance(dt)
+            self.lost = True
+
+        self.stack.enter_context(patch.object(task.time, "sleep", advance))
+        with self.assertRaises(task.LocalizationLostError):
+            task.drive_distance(self.runtime, 0.20)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
+
+    def test_startup_localization_timeout(self):
+        self.lost = True
+        self.stack.enter_context(patch.object(task, "LOCALIZATION_WAIT_S", 0.15))
+        with self.assertRaises(task.LocalizationLostError):
+            task.wait_for_fused_localization(self.runtime)
+
+    def test_reader_consensus_and_fallback(self):
+        counts = TaskCounts(2, 1, 1)
+        reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+        reader.recognize_camera.return_value = TaskBoardResult(counts, 0.9, votes=3)
+        self.assertEqual(task.read_task_board(reader=reader).key, (2, 1, 1))
+        reader.recognize_camera.side_effect = OSError("camera missing")
+        self.assertEqual(task.read_task_board(reader=reader).key, (1, 2, 1))
+        self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
+    def test_search_clips_last_step_and_needs_consecutive_frames(self):
+        self.stack.enter_context(patch.object(task, "YELLOW_SEARCH_END_X", 0.19))
+        detection = YellowDetection(640, 360, 80, 80, 0.9)
+        reads = [detection, None, None, None, None]
+        detect = self.stack.enter_context(patch.object(task, "_detect_stopped",
+            side_effect=lambda *_: reads.pop(0) if reads else None))
+        with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
+            self.assertIsNone(task.search_yellow_drop_zone(self.runtime, Mock(), Mock()))
+        self.assertGreaterEqual(detect.call_count, 4)
+        distances = [c.args[1] for c in move.call_args_list]
+        self.assertLessEqual(sum(distances), 0.19 + 1e-9)
+        self.assertLessEqual(distances[-1], task.YELLOW_SEARCH_STEP_M)
+        self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
+    def test_alignment_forward_reverse_then_within_tolerance(self):
+        detections = iter([YellowDetection(600, 1000, 80, 80, 0.9),
+                           YellowDetection(641, 1000, 80, 80, 0.9)])
+        self.stack.enter_context(patch.object(task, "_detect_stopped", side_effect=lambda *_: next(detections)))
+        with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
+            aligned = task.align_yellow_drop_zone(self.runtime, Mock(), Mock(),
+                initial_detection=YellowDetection(680, 1000, 80, 80, 0.9))
+        self.assertEqual([c.args[1] for c in move.call_args_list], [0.02, -0.02])
+        self.assertIsNotNone(aligned)  # cy is not a gate.
+
+    def test_alignment_sign_and_max_step_limit(self):
+        self.stack.enter_context(patch.object(task, "ALIGN_PIXEL_TO_DRIVE_SIGN", -1))
+        self.stack.enter_context(patch.object(task, "ALIGN_MAX_STEPS", 2))
+        detection = YellowDetection(800, 360, 80, 80, 0.9)
+        self.stack.enter_context(patch.object(task, "_detect_stopped", return_value=detection))
+        with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
+            self.assertIsNone(task.align_yellow_drop_zone(self.runtime, Mock(), Mock()))
+        self.assertEqual([c.args[1] for c in move.call_args_list], [-0.02, -0.02])
+
+    def test_alignment_loss_retries_then_skips(self):
+        detect = self.stack.enter_context(patch.object(task, "_detect_stopped", return_value=None))
+        self.assertIsNone(task.align_yellow_drop_zone(self.runtime, Mock(), Mock()))
+        self.assertEqual(detect.call_count, 3)
+        self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
+    def test_full_route_continues_after_hc_and_payload_failure(self):
+        for name, value in {"LANE_ENTRY_X": 0.10, "TASK_BOARD_X": 0.20,
+                            "CORNER_1_X": 0.30, "YELLOW_SEARCH_START_X": 0.35,
+                            "CORNER_2_X": 0.45, "FINISH_X": 0.55}.items():
+            self.stack.enter_context(patch.object(task, name, value))
+        self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
+        send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        self.stack.enter_context(patch.object(task, "_detect_stopped",
+            return_value=YellowDetection(640, 360, 80, 80, 0.9)))
+        drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=False))
+        task.run_full_mission(self.runtime, yellow_camera=Mock(), detector=Mock())
+        send.assert_called_once()
+        drop.assert_called_once_with(self.runtime.relay, 1)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertAlmostEqual(self.xy_yaw[0], 0.55, delta=0.03)
+
+    def test_full_route_without_yellow_skips_drop_and_finishes(self):
+        self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
+        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        drop = self.stack.enter_context(patch.object(task, "drop_payload"))
+        task.run_full_mission(self.runtime, detector=None)
+        drop.assert_not_called()
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+
+    def test_standalone_drop_does_not_start_full_route(self):
+        drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=True))
+        full = self.stack.enter_context(patch.object(task, "run_full_mission"))
+        self.assertTrue(task.run_competition_stage(self.runtime, "drop", slot=3))
+        drop.assert_called_once_with(self.runtime.relay, 3)
+        full.assert_not_called()
+        self.assertEqual(self.runtime.motion.state, MotionActionState.IDLE)
+
+    def test_standalone_task_board_does_not_navigate(self):
+        reader = self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
+        go = self.stack.enter_context(patch.object(task, "go_to_task_board"))
+        task.run_competition_stage(self.runtime, "task-board", task_board_camera="/dev/camera")
+        reader.assert_called_once_with("/dev/camera", runtime=self.runtime)
+        go.assert_not_called()
+
+    def test_main_routes_camera_without_legacy_turn_and_always_closes(self):
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch.object(task, "run_competition_stage", return_value=True) as run:
+            self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", "drop",
+                                   "--task-board-camera", "1", "--payload-slot", "2"]), 0)
+        self.assertEqual(run.call_args.args, (self.runtime, "drop"))
+        self.assertEqual(run.call_args.kwargs["task_board_camera"], 1)
+        self.assertFalse(self.runtime.is_running)
+
+    def test_main_rejects_conflicting_goal_and_nonhardware_modes(self):
+        with patch("main_robocup.build_runtime") as build:
+            self.assertEqual(main(["--competition"]), 2)
+            self.assertEqual(main(["--mode", "hardware-mission", "--competition",
+                                   "--goal-x", "0", "--goal-y", "0"]), 2)
+            build.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

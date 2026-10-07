@@ -29,6 +29,12 @@ Copy-Item configs\robocup_diffdrive.example.toml configs\robocup_diffdrive.toml
 
 Production entry point: [code/main_robocup.py](code/main_robocup.py). Composition, startup, event loop, and safe shutdown live in [code/robocup_runtime.py](code/robocup_runtime.py). This path uses `DifferentialDrive` and does not import the old competition task runtime.
 
+The 2026 competition route is available with `--mode hardware-mission --competition`
+or `--competition-stage` for an individual action. Route points and quick tuning
+values live at the top of `code/competition_task.py` and currently need field
+measurements. See [docs/COMPETITION_TASK.md](docs/COMPETITION_TASK.md) for the stage
+commands, existing YOLO model path, atomic functions, and field acceptance order.
+
 ## Task-board recognition
 
 Task-board startup acquisition is available in `hardware-mission` with
