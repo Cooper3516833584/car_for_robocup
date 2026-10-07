@@ -211,7 +211,9 @@ class DifferentialDrive:
         try:
             self.backend.stop()
         finally:
-            self._reset_motion_state(self._last_update_s)
+            # Zero is being sent now; time spent stopped is not acceleration time.
+            now = _finite("clock", self._clock())
+            self._reset_motion_state(max(now, self._last_update_s or -math.inf))
 
     def _reset_motion_state(self, timestamp_s: float | None) -> None:
         self._last_twist = Twist2D(0.0, 0.0)

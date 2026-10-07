@@ -103,6 +103,34 @@ class DifferentialDriveTests(unittest.TestCase):
             drive.forward(0.05)
             self.assertEqual(len(drive.backend.commands), 1)
 
+    def test_repeated_stops_refresh_restart_acceleration_reference(self) -> None:
+        drive, backend, clock = self.make_drive(
+            max_linear_accel_m_s2=.30, max_angular_accel_rad_s2=1., command_timeout_s=3.)
+        self.addCleanup(drive.close)
+        clock.now_s = .2
+        drive.command(Twist2D(.075, .2), now_s=clock.now_s)
+        for stopped_at in (.25, .30, .35, .40):
+            clock.now_s = stopped_at
+            drive.stop()
+            self.assertEqual(drive.last_limited_twist, Twist2D(0., 0.))
+        clock.now_s = .45
+        drive.command(Twist2D(.075, .2), now_s=clock.now_s)
+        self.assertAlmostEqual(drive.last_limited_twist.linear_x_m_s, .015)
+        self.assertAlmostEqual(drive.last_limited_twist.angular_z_rad_s, .05)
+
+    def test_stop_does_not_reuse_old_motion_timestamp_after_idle(self) -> None:
+        drive, backend, clock = self.make_drive(
+            max_linear_accel_m_s2=.30, max_angular_accel_rad_s2=1., command_timeout_s=30.)
+        self.addCleanup(drive.close)
+        clock.now_s = .2
+        drive.command(Twist2D(.075, .2), now_s=clock.now_s)
+        clock.now_s = 10.
+        drive.stop()
+        clock.now_s = 10.05
+        drive.command(Twist2D(.075, -.2), now_s=clock.now_s)
+        self.assertAlmostEqual(drive.last_limited_twist.linear_x_m_s, .015)
+        self.assertAlmostEqual(drive.last_limited_twist.angular_z_rad_s, -.05)
+
 
 if __name__ == "__main__":
     unittest.main()
