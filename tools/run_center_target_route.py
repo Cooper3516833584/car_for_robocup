@@ -44,7 +44,7 @@ def main(argv=None):
     parser.add_argument("--config", default=str(ROOT / "configs/robocup_diffdrive.toml"))
     parser.add_argument("--weights", type=Path, default=MODEL_PATH)
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--servo-angle-deg", type=float, default=90,
+    parser.add_argument("--servo-angle-deg", type=float, default=0,
                         help="repository calibrated angle: 0=mid pulse, +90=2500us")
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument("--check-vision", action="store_true",
