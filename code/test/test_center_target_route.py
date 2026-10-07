@@ -26,6 +26,12 @@ class CenterTargetTests(unittest.TestCase):
         self.assertIsNone(task.central_target([(240, 160, 400, 320, .1, 0)], 640, 480))
         self.assertIsNone(task.central_target([(400, 160, 240, 320, .9, 0)], 640, 480))
 
+    def test_vision_cpu_selection_respects_allowed_cores(self):
+        policies = [(1800000, {0, 1, 2, 3}), (2352000, {4, 5}), (2304000, {6, 7})]
+        self.assertEqual(task.select_fastest_cpus(policies, range(8)), {4, 5})
+        self.assertEqual(task.select_fastest_cpus(policies, {0, 6, 7}), {6, 7})
+        self.assertEqual(task.select_fastest_cpus([], range(8)), set())
+
     def test_persistent_target_and_short_dropout_do_not_repeat(self):
         latch = task.EntryLatch()
         box = (1, 1, 2, 2, .9, 2)

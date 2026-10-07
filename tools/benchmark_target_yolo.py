@@ -70,15 +70,21 @@ def main():
                 torch.set_num_threads(threads)
                 for imgsz in (416, 320):
                     times, speeds, counts = [], [], []
-                    for _ in range(args.repeats + 1):
+                    initial_backend_threads = None
+                    for index in range(args.repeats + 1):
                         t0 = time.monotonic()
                         result = detector.predict(frame, imgsz=imgsz, conf=.5,
                                                   device="cpu", verbose=False)[0]
                         times.append(time.monotonic() - t0)
                         speeds.append(result.speed)
                         counts.append(len(result.boxes))
+                        if index == 0:
+                            initial_backend_threads = torch.get_num_threads()
+                            torch.set_num_threads(threads)
                     case = {"affinity": affinity_name, "cpus": sorted(affinity),
                             "threads": threads, "imgsz": imgsz,
+                            "warmup_backend_threads": initial_backend_threads,
+                            "actual_threads": torch.get_num_threads(),
                             "cold_s": times[0], "median_s": statistics.median(times[1:]),
                             "max_s": max(times[1:]), "speed_ms": speeds[-1],
                             "box_counts": counts}

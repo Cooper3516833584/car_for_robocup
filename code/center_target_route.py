@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 from pathlib import Path
 import threading
 import time
@@ -20,6 +21,31 @@ PERIOD_S = 0.05
 BEEP_S = 1.0
 VISION_MAX_AGE_S = 2.0
 MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_car.pt"
+
+
+def select_fastest_cpus(policies, allowed):
+    """Choose the fastest available frequency-policy group, without hardcoded IDs."""
+    available = [(frequency, set(cpus) & set(allowed)) for frequency, cpus in policies]
+    available = [(frequency, cpus) for frequency, cpus in available if cpus]
+    if not available:
+        return set()
+    fastest = max(frequency for frequency, _ in available)
+    return set().union(*(cpus for frequency, cpus in available if frequency == fastest))
+
+
+def pin_vision_worker():
+    """Restrict this Linux worker, leaving runtime/sensor thread affinity alone."""
+    try:
+        policies = []
+        for policy in Path("/sys/devices/system/cpu/cpufreq").glob("policy*"):
+            policies.append((int((policy / "cpuinfo_max_freq").read_text()),
+                             {int(cpu) for cpu in (policy / "related_cpus").read_text().split()}))
+        cpus = select_fastest_cpus(policies, os.sched_getaffinity(0))
+        if cpus:
+            os.sched_setaffinity(0, cpus)  # 0 identifies the calling native thread.
+        return sorted(cpus)
+    except (OSError, ValueError, AttributeError):
+        return []
 
 
 def central_target(boxes, width, height, min_conf=0.5):
@@ -87,11 +113,12 @@ class YoloVision:
     def _worker(self):
         capture = None
         try:
+            cpus = pin_vision_worker()
             import cv2
             import torch
             from components.yellow_yolo_adapter import load_detector
 
-            torch.set_num_threads(2)  # Leave CPU time for localization/control.
+            torch.set_num_threads(1)  # Measured fastest: one thread on big CPU cores.
             detector = load_detector(self.weights)
             capture = cv2.VideoCapture(self.camera, cv2.CAP_V4L2)
             if not capture.isOpened():
@@ -110,11 +137,18 @@ class YoloVision:
                                           device="cpu", verbose=False)[0]
                 frame_age = time.monotonic() - frame_at
                 frames += 1
+                if frames == 1:
+                    initial_threads = torch.get_num_threads()
+                    # Ultralytics' CPU backend overrides num_threads at setup.
+                    # Reapply the measured setting AFTER setup; discard warm-up.
+                    torch.set_num_threads(1)
+                    print(f"[vision] cpus={cpus}; backend_initial_threads={initial_threads}; "
+                          "steady_threads=1", flush=True)
                 if frames <= 3:
                     print(f"[vision] frame={frames} inference_s={frame_age:.3f}", flush=True)
                 # CPU/model cold-start can exceed the freshness limit. Discard
                 # that frame while stationary; only a fresh result declares ready.
-                if frame_age > VISION_MAX_AGE_S:
+                if frames == 1 or frame_age > VISION_MAX_AGE_S:
                     continue
                 boxes = [] if result.boxes is None else result.boxes.data.cpu().tolist()
                 # Standard detect models expose xyxy, confidence, class in six columns.
