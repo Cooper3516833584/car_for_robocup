@@ -71,7 +71,8 @@ python tools/run_center_target_route.py --confirm-motor-test \
 ```
 
 这条命令仍会真实运行小车的路线和投放往返动作，只有继电器为模拟。
-本次编码只进行了软件模拟验收和静止视觉检查，未启动此运动命令。
+本次编码只进行了软件模拟验收，未启动此运动命令。部署时小车SSH连接超时，
+暂未更新板端或完成新逻辑的静止视觉检查；连通后可先执行 `--check-vision`。
 
 以后确认继电器端口后可显式选择 `--release-mode relay --relay-port <已确认端口>
 --relay-channels 4`。现有驱动负责开启所选路并恢复关闭，退出必须 all_off。
