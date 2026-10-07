@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 
+from components.yolo_cpu import CpuDetector
+
 
 @dataclass(frozen=True)
 class YellowDetection:
@@ -19,7 +21,7 @@ def load_detector(weights):
     if not path.is_file():
         raise FileNotFoundError(path)  # Never download substitute weights.
     from ultralytics import YOLO
-    return YOLO(str(path))
+    return CpuDetector(YOLO(str(path)))
 
 
 def select_yellow(results, *, class_name="yellow", min_conf=0.55):

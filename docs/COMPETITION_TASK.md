@@ -35,14 +35,15 @@
 | `FINISH_YAW_DEG / CORNER_1_YAW_DEG / CORNER_2_YAW_DEG` | 保留记录值，当前正式车道和终点不以它们做最终朝向对齐 |
 | `CROSS_LANE_YAW_DEG / YELLOW_SEARCH_START_* / YELLOW_SEARCH_END_*` | 测量横向车道朝向、搜索起止点；默认搜索段长度为 0 |
 | `FIXED_DROP_ROUTE` | 当前仅 `[("drive", 0.0)]`；实测后填写 drive/rotate/rotate_to 序列 |
-| `YELLOW_TARGET_CX_PX / YELLOW_CX_TOL_PX` | 当前 640 / 20，按真实 1280×720 画面调节 |
+| `YELLOW_TARGET_CX_PX / YELLOW_CX_TOL_PX` | 当前 320 / 10，基于 640×480 参考画面；非此尺寸的检测坐标先按比例换算 |
+| `YELLOW_IMGSZ / CAMERA_WIDTH / CAMERA_HEIGHT / CAMERA_FPS` | 共用 `components/yolo_cpu.py` 的 320 / 640 / 480 / 30；OCR 仍使用自己的采集设置 |
 | `ALIGN_PIXEL_TO_DRIVE_SIGN / ALIGN_STEP_M` | 当前 +1 / 0.02 m，实测前后移动对 cx 的影响 |
 | `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作临时缩小现有 3 cm 容差，动作后恢复 |
 | `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 当前 CH1/2/3、True、0.5 s，确认接线和释放极性 |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
 | `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
 | `HC_TASK_MESSAGE_TEMPLATE` | `TASK,{red},{blue},{green}\n`，需要无人机接收程序按此格式解析 |
-| `YELLOW_MODEL_PATH` | 本地现有 `../target_yolo/best_car.pt`，板端部署后明确指定实际权重路径 |
+| `YELLOW_MODEL_PATH` | 仓库已有 `models/best_car.pt`，与路线测试和实测使用相同权重；可用 `--yellow-model` 覆盖 |
 
 这些数值尚未完成实车路线验收。全零坐标会产生零长度车道段，现有 motion 会拒绝，
 必须先测量填写不同的端点。使用 `get_current_pose(runtime)` 读取当前融合坐标，直接
@@ -71,6 +72,14 @@
 `detect_yellow_once` 接收已打开且有 `read()` 的 camera 以及 Ultralytics detector。
 搜索/对齐函数也支持相机索引或设备路径：内部打开的相机会释放，外部传入的
 camera 由调用者关闭。`run_full_mission` 的直接调用需传入 detector；CLI 自动加载。
+
+CLI 加载的 detector 复用路线测试的 CPU 优化：单线程推理，临时选择当前允许的
+最高频 CPU 核心，推理返回或异常后恢复调用线程的亲和性。Ultralytics 首次后端
+初始化会重设线程数，包装器在其返回后重新设为 1。首次初始化仍在停车状态进行。
+外部直接传入的 detector 由调用者配置线程/亲和性，YOLO 输入仍由任务指定为 320。
+2026-10-07 当前红色目标静止实测，现有权重在 320 输入下连续 300 帧采集及识别
+约 13.35 FPS；这是当前场景的视觉吞吐量，不代表整个含停车/移动流程的频率，
+也未验证黄色目标或远处小目标的识别率。
 
 ## CLI 单项入口
 

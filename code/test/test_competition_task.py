@@ -141,14 +141,35 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
     def test_alignment_forward_reverse_then_within_tolerance(self):
-        detections = iter([YellowDetection(600, 1000, 80, 80, 0.9),
-                           YellowDetection(641, 1000, 80, 80, 0.9)])
+        detections = iter([YellowDetection(300, 1000, 80, 80, 0.9),
+                           YellowDetection(321, 1000, 80, 80, 0.9)])
         self.stack.enter_context(patch.object(task, "_detect_stopped", side_effect=lambda *_: next(detections)))
         with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
             aligned = task.align_yellow_drop_zone(self.runtime, Mock(), Mock(),
-                initial_detection=YellowDetection(680, 1000, 80, 80, 0.9))
+                initial_detection=YellowDetection(340, 1000, 80, 80, 0.9))
         self.assertEqual([c.args[1] for c in move.call_args_list], [0.02, -0.02])
         self.assertIsNotNone(aligned)  # cy is not a gate.
+
+    def test_native_frame_pixels_are_normalized_before_alignment(self):
+        for shape, native in [((480, 640, 3), YellowDetection(320, 240, 80, 80, .9)),
+                              ((720, 1280, 3), YellowDetection(640, 360, 160, 120, .9))]:
+            camera, detector = Mock(), Mock()
+            frame = SimpleNamespace(shape=shape)
+            camera.read.return_value = True, frame
+            with patch.object(task, "select_yellow", return_value=native):
+                detection = task.detect_yellow_once(camera, detector)
+            self.assertEqual(detection, YellowDetection(320, 240, 80, 80, .9))
+            with patch.object(task, "drive_distance") as drive:
+                self.assertIs(task.align_yellow_drop_zone(self.runtime, camera, detector,
+                                                          initial_detection=detection), detection)
+            drive.assert_not_called()
+
+    def test_inference_failure_returns_no_target(self):
+        camera, detector = Mock(), Mock()
+        camera.read.return_value = True, SimpleNamespace(shape=(480, 640, 3))
+        detector.predict.side_effect = RuntimeError("backend failed")
+        with self.assertLogs("competition_task", level="ERROR"):
+            self.assertIsNone(task.detect_yellow_once(camera, detector))
 
     def test_alignment_sign_and_max_step_limit(self):
         self.stack.enter_context(patch.object(task, "ALIGN_PIXEL_TO_DRIVE_SIGN", -1))
@@ -169,7 +190,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
         self.stack.enter_context(patch.object(task, "_detect_stopped",
-            return_value=YellowDetection(640, 360, 80, 80, 0.9)))
+            return_value=YellowDetection(320, 240, 80, 80, 0.9)))
         drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=False))
         task.run_full_mission(self.runtime, yellow_camera=Mock(), detector=Mock())
         send.assert_called_once()
@@ -287,7 +308,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "load_detector", return_value=Mock()))
         self.stack.enter_context(patch.object(task, "_open_yellow_camera", return_value=(Mock(), False)))
         self.stack.enter_context(patch.object(task, "_detect_stopped", return_value=(
-            YellowDetection(640, 360, 80, 80, 0.9) if found else None)))
+            YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
         self.stack.enter_context(patch.object(task, "send_task_once", return_value=hc_ok))
         drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=drop_ok))
         if not align_ok:

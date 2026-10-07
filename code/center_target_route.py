@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import os
 from pathlib import Path
 import threading
 import time
 
 from components.basic_motion_controller import MotionActionState
+from components.yolo_cpu import (CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ,
+                                 pin_vision_worker, select_fastest_cpus)
 from competition_task import _step, _usable_pose
 from robocup_runtime import RobocupMissionState
 
@@ -21,31 +22,6 @@ PERIOD_S = 0.05
 BEEP_S = 1.0
 VISION_MAX_AGE_S = 2.0
 MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_car.pt"
-
-
-def select_fastest_cpus(policies, allowed):
-    """Choose the fastest available frequency-policy group, without hardcoded IDs."""
-    available = [(frequency, set(cpus) & set(allowed)) for frequency, cpus in policies]
-    available = [(frequency, cpus) for frequency, cpus in available if cpus]
-    if not available:
-        return set()
-    fastest = max(frequency for frequency, _ in available)
-    return set().union(*(cpus for frequency, cpus in available if frequency == fastest))
-
-
-def pin_vision_worker():
-    """Restrict this Linux worker, leaving runtime/sensor thread affinity alone."""
-    try:
-        policies = []
-        for policy in Path("/sys/devices/system/cpu/cpufreq").glob("policy*"):
-            policies.append((int((policy / "cpuinfo_max_freq").read_text()),
-                             {int(cpu) for cpu in (policy / "related_cpus").read_text().split()}))
-        cpus = select_fastest_cpus(policies, os.sched_getaffinity(0))
-        if cpus:
-            os.sched_setaffinity(0, cpus)  # 0 identifies the calling native thread.
-        return sorted(cpus)
-    except (OSError, ValueError, AttributeError):
-        return []
 
 
 def central_target(boxes, width, height, min_conf=0.5):
@@ -91,7 +67,7 @@ class YoloVision:
     movement. The worker cannot access the runtime or motor interfaces.
     """
 
-    def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=416, confidence=0.5):
+    def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=IMGSZ, confidence=0.5):
         self.weights = Path(weights)
         self.camera = camera
         self.imgsz = imgsz
@@ -118,13 +94,13 @@ class YoloVision:
             import torch
             from components.yellow_yolo_adapter import load_detector
 
-            torch.set_num_threads(1)  # Measured fastest: one thread on big CPU cores.
             detector = load_detector(self.weights)
             capture = cv2.VideoCapture(self.camera, cv2.CAP_V4L2)
             if not capture.isOpened():
                 raise RuntimeError("YOLO camera cannot open")
-            capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+            capture.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
             capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             latch = EntryLatch()
             frames = 0
@@ -138,12 +114,10 @@ class YoloVision:
                 frame_age = time.monotonic() - frame_at
                 frames += 1
                 if frames == 1:
-                    initial_threads = torch.get_num_threads()
-                    # Ultralytics' CPU backend overrides num_threads at setup.
-                    # Reapply the measured setting AFTER setup; discard warm-up.
-                    torch.set_num_threads(1)
-                    print(f"[vision] cpus={cpus}; backend_initial_threads={initial_threads}; "
-                          "steady_threads=1", flush=True)
+                    print(f"[vision] cpus={cpus}; imgsz={self.imgsz}; "
+                          f"steady_threads={torch.get_num_threads()}; "
+                          f"camera={frame.shape[1]}x{frame.shape[0]} "
+                          f"fps={capture.get(cv2.CAP_PROP_FPS):g}", flush=True)
                 if frames <= 3:
                     print(f"[vision] frame={frames} inference_s={frame_age:.3f}", flush=True)
                 # CPU/model cold-start can exceed the freshness limit. Discard

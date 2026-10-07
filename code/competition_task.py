@@ -14,6 +14,7 @@ from components.hc_task_sender import build_task_message, send_task_once
 from components.payload_task import drop_payload as release_payload
 from components.pose_fusion import PoseFusionState
 from components.yellow_yolo_adapter import load_detector, select_yellow
+from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
 from robocup_runtime import RobocupMissionState
 
 # ============================================================
@@ -26,8 +27,6 @@ CONTROL_DT_S = 0.05
 LOCALIZATION_WAIT_S = 30.0
 TASK_BOARD_CAMERA = 0
 YELLOW_CAMERA = 0
-CAMERA_WIDTH = 1280
-CAMERA_HEIGHT = 720
 # Servo 90 deg points the camera left. No servo control in this task.
 # TODO(field): add servo scanning only if an outside marker is out of view.
 
@@ -69,18 +68,18 @@ HC_BRIDGE_ENVELOPE = False
 HC_TASK_MESSAGE_TEMPLATE = "TASK,{red},{blue},{green}\n"
 HC_CONNECT_WAIT_S = 2.0
 
-# Existing model from the sibling target_yolo workspace; override if deployed
-# elsewhere. The model is not copied, trained, or downloaded by this program.
-YELLOW_MODEL_PATH = Path(__file__).resolve().parents[2] / "target_yolo" / "best_car.pt"
+# Use the same existing, deployed weights as the measured route test.
+# The model is not trained or downloaded by this program.
+YELLOW_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_car.pt"
 YELLOW_CLASS_NAME = "yellow"  # target_yolo/config.py: red, blue, green, yellow
 YELLOW_MIN_CONF = 0.55
-YELLOW_IMGSZ = 640
+YELLOW_IMGSZ = IMGSZ
 YELLOW_DEVICE = "cpu"
 YELLOW_CONFIRM_FRAMES = 2
 YELLOW_SEARCH_STEP_M = 0.08
-YELLOW_TARGET_CX_PX = 640
-YELLOW_CX_TOL_PX = 20
-YELLOW_TARGET_CY_PX = 360  # Observation/logging only.
+YELLOW_TARGET_CX_PX = CAMERA_WIDTH / 2
+YELLOW_CX_TOL_PX = 10  # Same horizontal fraction as 20 px at the old 1280 width.
+YELLOW_TARGET_CY_PX = CAMERA_HEIGHT / 2  # Observation/logging only.
 ALIGN_PIXEL_TO_DRIVE_SIGN = 1
 ALIGN_STEP_M = 0.02
 ALIGN_MAX_STEPS = 20
@@ -283,7 +282,15 @@ def detect_yellow_once(camera, detector):
             return None
         results = detector.predict(frame, imgsz=YELLOW_IMGSZ, conf=YELLOW_MIN_CONF,
                                    device=YELLOW_DEVICE, verbose=False)
-        return select_yellow(results, class_name=YELLOW_CLASS_NAME, min_conf=YELLOW_MIN_CONF)
+        detection = select_yellow(results, class_name=YELLOW_CLASS_NAME, min_conf=YELLOW_MIN_CONF)
+        if detection is None:
+            return None
+        # Drivers/external captures can return a different size. Ultralytics
+        # boxes are native-frame pixels; normalize to the tuning reference.
+        height, width = frame.shape[:2]
+        sx, sy = CAMERA_WIDTH / width, CAMERA_HEIGHT / height
+        return replace(detection, cx_px=detection.cx_px * sx, cy_px=detection.cy_px * sy,
+                       width_px=detection.width_px * sx, height_px=detection.height_px * sy)
     except Exception:
         LOG.exception("yellow camera/inference failed")
         return None
@@ -300,6 +307,7 @@ def _open_yellow_camera(camera):
             raise RuntimeError(f"cannot open yellow camera {camera!r}")
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+        capture.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         for _ in range(6):
             capture.read()

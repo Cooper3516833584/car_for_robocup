@@ -14,6 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 from center_target_route import MODEL_PATH, central_target, pin_vision_worker
+from components.yellow_yolo_adapter import load_detector
 
 
 def main():
@@ -34,16 +35,16 @@ def main():
     started = time.monotonic()
     import cv2
     import torch
-    from ultralytics import YOLO
+    import ultralytics
     import_s = time.monotonic() - started
     torch.set_num_threads(1)
     started = time.monotonic()
-    model = YOLO(str(args.weights))
+    model = load_detector(args.weights)
     load_s = time.monotonic() - started
     capture = cv2.VideoCapture(args.camera, cv2.CAP_V4L2)
     report = {"weights": str(args.weights), "import_s": import_s, "load_s": load_s,
               "cpu_affinity": cpus, "threads": 1, "torch": torch.__version__,
-              "ultralytics": __import__("ultralytics").__version__,
+              "ultralytics": ultralytics.__version__,
               "trigger_confidence": args.trigger_confidence, "classes": model.names,
               "note": "live observations of this scene, not a labelled accuracy evaluation",
               "cases": []}
