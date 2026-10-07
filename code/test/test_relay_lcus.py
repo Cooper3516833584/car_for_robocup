@@ -26,6 +26,7 @@ from components.relay_lcus import (
     FakeLCUSRelay,
     LCUSRelay,
     RELAY_PORT_ENV,
+    DEFAULT_RELAY_PORT,
     build_channel_command,
     format_port_list,
     format_states,
@@ -236,10 +237,13 @@ class PortResolutionTests(unittest.TestCase):
         with patch.dict(os.environ, {RELAY_PORT_ENV: "/dev/from-env"}):
             self.assertEqual(resolve_relay_settings(None, 19200), ("/dev/from-env", 19200))
 
-    def test_missing_port_is_rejected_with_the_environment_variable_name(self) -> None:
+    def test_confirmed_default_is_used_without_scanning_or_opening_hardware(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(ValueError, RELAY_PORT_ENV):
-                resolve_relay_settings(None, None)
+            with patch("components.relay_lcus.list_serial_ports", side_effect=AssertionError("do not scan")):
+                self.assertEqual(resolve_relay_settings(None, None), (DEFAULT_RELAY_PORT, DEFAULT_BAUDRATE))
+                relay = LCUSRelay()
+                self.assertEqual(relay.port, DEFAULT_RELAY_PORT)
+                self.assertFalse(relay.connected)
 
     def test_invalid_baudrate_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

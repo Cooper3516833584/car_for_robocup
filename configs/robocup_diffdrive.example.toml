@@ -79,7 +79,7 @@ serial = ""
 # /dev/ttyUSB0, which renumbers when another USB serial device is plugged in.
 [devices.relay]
 enabled = false
-port = ""                    # e.g. "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"
+port = "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"
 baudrate = 9600
 channel_count = 4            # this robot carries the 4-channel LCUS board; use 8 for an 8-channel board
 read_timeout_s = 0.2

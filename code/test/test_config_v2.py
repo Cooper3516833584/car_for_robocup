@@ -88,6 +88,10 @@ class ConfigV2Tests(unittest.TestCase):
     def test_relay_defaults_to_disabled(self) -> None:
         config = load_v2_config()
         self.assertFalse(config.relay.enabled)
+        self.assertEqual(
+            config.relay.port,
+            "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0",
+        )
         self.assertEqual(config.relay.baudrate, 9600)
         # The fitted board is the 4-channel LCUS; 8 is still accepted explicitly.
         self.assertEqual(config.relay.channel_count, 4)
@@ -107,7 +111,8 @@ class ConfigV2Tests(unittest.TestCase):
 
     def test_enabled_relay_is_parsed(self) -> None:
         config = self._load_modified({
-            'enabled = false\nport = ""': 'enabled = true\nport = "/dev/relay_lcus"',
+            '[devices.relay]\nenabled = false\nport = "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"':
+                '[devices.relay]\nenabled = true\nport = "/dev/relay_lcus"',
             "channel_count = 4": "channel_count = 8",
         })
         self.assertTrue(config.relay.enabled)
@@ -116,7 +121,10 @@ class ConfigV2Tests(unittest.TestCase):
 
     def test_enabled_relay_requires_a_port(self) -> None:
         with self.assertRaisesRegex(ConfigV2Error, "devices.relay.port"):
-            self._load_modified({'enabled = false\nport = ""': 'enabled = true\nport = ""'})
+            self._load_modified({
+                '[devices.relay]\nenabled = false\nport = "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"':
+                    '[devices.relay]\nenabled = true\nport = ""',
+            })
 
     def test_relay_channel_count_is_bounded(self) -> None:
         with self.assertRaisesRegex(ConfigV2Error, "channel_count"):

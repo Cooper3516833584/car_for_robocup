@@ -29,7 +29,8 @@
 2. `LCUSRelay(serial_factory=...)`：新增串口工厂注入点，供单测和离线联调使用；正式运行保持 `None`。
 3. 新增 `FakeLCUSRelay`：dry-run / 回放使用的内存继电器，不打开任何串口。
 4. 端口等参数正式运行时来自 TOML 的 `[devices.relay]`（组件本身不读 TOML）；
-   单文件独立使用时仍可显式传 `port` 或设置环境变量 `D_TASK_RELAY_PORT`。
+   单文件独立使用时默认采用组件的 `DEFAULT_RELAY_PORT`（本车已确认的 by-path），
+   显式 `port` 或环境变量 `D_TASK_RELAY_PORT` 可覆盖；构造 `LCUSRelay()` 不打开串口。
 
 ### 0.3 协议与硬件参数（不要改）
 
@@ -71,7 +72,7 @@ python3 code/test/relay_selftest.py --print-frames --channels 4
 ```toml
 [devices.relay]
 enabled = false              # 默认关闭: 装上板子并固定端口后再打开
-port = ""                    # 见下方"本机实测端口"
+port = "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"
 baudrate = 9600
 channel_count = 4            # 本项目装的是 4 路板; 8 路板写 8
 read_timeout_s = 0.2
@@ -81,6 +82,10 @@ disconnect_on_shutdown = true
 ```
 
 **本机实测端口（ROCK 5A，2026-10-06 通过 SSH 只读确认）**
+
+2026-10-07 已再次通过稳定路径发送一次只读 FF 查询确认：40 字节 ASCII，
+CH1～CH4 全部 OFF。该路径现为组件 `DEFAULT_RELAY_PORT` 和示例配置的端口；
+运行配置仍需显式启用继电器，路线测试仍默认模拟投放。
 
 - 板子：**4 路 LCUS**，CH340（`1a86:7523`，`ID_USB_DRIVER=ch341`）；
 - 节点：`/dev/ttyUSB0`（`lsusb` Bus 008 Device 002，USB 树 `platform-fc8c0000.usb` / `usb8/8-1`）；
@@ -374,7 +379,8 @@ python3 code/test/relay_selftest.py --port /dev/relay_lcus --channel 1 --off    
 
 ## 2. 环境变量与自启动
 
-- 端口来源优先级（正式运行时）：`[devices.relay] port` > `LCUSRelay(port=...)` 显式参数 > 环境变量 `D_TASK_RELAY_PORT`。
+- 正式运行由 factory 将 `[devices.relay] port` 显式传给组件；单独构造组件时，
+  端口优先级为 `LCUSRelay(port=...)` > 环境变量 `D_TASK_RELAY_PORT` > `DEFAULT_RELAY_PORT`。
 - **systemd 不读 shell 环境变量**，单文件独立使用时要在 unit 里显式写：
 
 ```ini
@@ -443,7 +449,8 @@ states  : CH1=ON CH2=OFF CH3=OFF CH4=OFF
 - 驱动会**真实吸合/断开触点**，且**没有任何硬件互锁**；不经过 C10B 底盘链路，因此不受底盘看门狗、
   ACK/重试/心跳保护。**不要把它当作安全关键回路**，急停与安全兜底由任务层负责。
 - 端口**不得按 VID/PID 猜**：CH340 与其他设备（如 HC-14 电台）USB ID 相同（`1a86:7523`），
-  必须显式指定 `port` 或 `D_TASK_RELAY_PORT`。
+  默认路径来自本车 FF 实测。换接线或设备时显式指定 `port` 或 `D_TASK_RELAY_PORT`；
+  默认路径不存在时串口打开报错，不自动扫描或回退到 `/dev/ttyUSB0`。
 - 串口读写故障（`serial.SerialException` 等）会**直接上抛**，驱动不吞异常、也不做安全兜底；
   参数错误抛 `ValueError`，未 `open()` 抛 `RuntimeError`。
 - `open()`/`close()`/`query_status()`/`get_channel_state()`/`read_raw_response()`/`detect_channel_count()`

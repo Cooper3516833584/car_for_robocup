@@ -9,7 +9,8 @@
 - 新增 ``FakeLCUSRelay``：dry-run / 回放使用的内存继电器，不打开任何串口；
 - 端口等参数由调用方给出。在本仓库正式运行时，参数来自 TOML 的 ``[devices.relay]``
   节（见 ``code/config/v2_factory.py`` 的 ``build_relay``）；组件本身不读 TOML。
-  单文件独立使用时仍可显式传 ``port`` 或设置环境变量 ``D_TASK_RELAY_PORT``。
+  单文件独立使用时默认使用本车已确认的 ``DEFAULT_RELAY_PORT``，显式 ``port`` 或
+  环境变量 ``D_TASK_RELAY_PORT`` 可覆盖；构造对象仍不打开串口。
 
 控制帧、异常语义、锁粒度均与交付版本一致, 未作改动; 相对交付版本吸收了两项修复
 (来自同协议的 8 路板实机驱动, 协议层完全一致):
@@ -43,8 +44,8 @@
   不接收也不调用任何底盘命令接口;
 - 串口打开时显式关闭 DTR/RTS, 与本仓库其他 CH340 设备的既有处理一致;
 - ``open()`` 不主动改变任何一路继电器状态, 需要全部断开时显式调用 ``all_off()``;
-- 端口不得猜测: CH340 的 USB ID 与 HC-14 电台相同(``1a86:7523``), 必须显式传入
-  ``port`` 或由 TOML / ``D_TASK_RELAY_PORT`` 指定。
+- 端口不得按 USB ID 猜测: 默认路径来自本车只读 FF 实测，换接线/设备时应显式
+  传入 ``port`` 或由 TOML / ``D_TASK_RELAY_PORT`` 覆盖；不扫描其他串口作为后备。
 
 风险与边界 (实机使用前必读):
 
@@ -99,6 +100,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 LOG = logging.getLogger(__name__)
 
 RELAY_PORT_ENV = "D_TASK_RELAY_PORT"
+# ROCK 5A LCUS 4-channel relay, re-confirmed by read-only FF on 2026-10-07.
+# Pin to this physical USB connector; ttyUSB numbering can change after reboot.
+DEFAULT_RELAY_PORT = "/dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0"
 
 DEFAULT_BAUDRATE = 9600
 # 本项目装的是 4 路 LCUS 板 (ASCII 返回), 所以默认按 4 路构造;
@@ -131,6 +135,7 @@ __all__ = [
     "format_port_list",
     "resolve_relay_settings",
     "RELAY_PORT_ENV",
+    "DEFAULT_RELAY_PORT",
     "DEFAULT_BAUDRATE",
     "DEFAULT_CHANNEL_COUNT",
     "DEFAULT_VERIFY_SETTLE",
@@ -140,13 +145,8 @@ __all__ = [
 
 
 def resolve_relay_settings(port: Optional[str] = None, baudrate: Optional[int] = None) -> Tuple[str, int]:
-    """解析串口参数: 端口优先取显式参数, 其次取环境变量 ``D_TASK_RELAY_PORT``。"""
-    resolved_port = port or os.environ.get(RELAY_PORT_ENV)
-    if not resolved_port:
-        raise ValueError(
-            "未指定 LCUS 继电器串口: 请传入 port 参数或设置环境变量 "
-            f"{RELAY_PORT_ENV}; 当前可用串口: {format_port_list()}"
-        )
+    """优先级: 显式端口 > D_TASK_RELAY_PORT > 本车已确认的稳定路径。"""
+    resolved_port = port or os.environ.get(RELAY_PORT_ENV) or DEFAULT_RELAY_PORT
     raw_baudrate = DEFAULT_BAUDRATE if baudrate is None else baudrate
     try:
         resolved_baudrate = int(raw_baudrate)
