@@ -94,6 +94,12 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         road_yaw = road_pose.yaw_rad
         runtime.record_event("payload_detour_road_pose", pose=road_pose)
         side_pose = motion("left_90deg", "rotate_to", road_yaw + math.pi / 2)
+        runtime.drive.stop()
+        hold(0.20)  # Keep fusion live while the completed turn settles.
+        check()
+        side_pose = _step(runtime).estimate.pose
+        if side_pose is None:
+            raise RuntimeError("payload turn settling pose unavailable")
         side_yaw = side_pose.yaw_rad
         motion("forward_47cm", "drive_distance", settings.approach_m, heading_yaw_rad=side_yaw)
         runtime.motion.stop()

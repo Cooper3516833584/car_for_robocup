@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import center_target_route as route
+from components.basic_motion_controller import MotionActionState
 from components.pose_fusion import FusedPoseEstimate, PoseFusionState
 from components.relay_lcus import FakeLCUSRelay
 from components.payload_task import payload_channel, prepare_payload
@@ -128,6 +129,47 @@ class PayloadDetourTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "operator STOP during release"):
             self.run_detour(guard=guard)
         self.assertNotIn("reverse_47cm", self.stage_poses)
+        self.assert_safe_exit()
+
+    def test_left_turn_settles_stopped_with_live_pose_before_locking_side_yaw(self):
+        self.fixture()
+        advance = self.advance
+        settling_time = 0.
+        injected = False
+
+        def settle_advance(dt):
+            nonlocal settling_time, injected
+            if self.stage == "left_90deg" and self.runtime.motion.state is MotionActionState.SUCCEEDED:
+                self.assert_stopped()
+                settling_time += dt
+                if not injected:
+                    self.pose[2] += .02  # Observe the final turn pose after the first completion tick.
+                    injected = True
+            advance(dt)
+
+        self.run_detour(sleep=settle_advance)
+        self.assertTrue(injected)
+        self.assertAlmostEqual(settling_time, .20)
+        headings = [data["kwargs"]["heading_yaw_rad"] for event, data in self.events
+                    if event == "payload_detour_stage_start"
+                    and data["stage"] in ("forward_47cm", "reverse_47cm")]
+        final_yaw = self.stage_poses["left_90deg"].yaw_rad + .02
+        self.assertAlmostEqual(headings[0], final_yaw)
+        self.assertEqual(headings[0], headings[1])
+        self.assert_safe_exit()
+
+    def test_abort_during_turn_settling_prevents_approach_and_releases_all(self):
+        self.fixture()
+
+        def guard():
+            if self.stage == "left_90deg" and self.runtime.motion.state is MotionActionState.SUCCEEDED:
+                raise RuntimeError("STOP during turn settling")
+
+        with self.assertRaisesRegex(RuntimeError, "turn settling"):
+            self.run_detour(guard=guard)
+        self.assertFalse(any(event == "payload_detour_stage_start" and data["stage"] == "forward_47cm"
+                             for event, data in self.events))
+        self.assertFalse(self.releases)
         self.assert_safe_exit()
 
     def test_visual_failure_during_approach_prevents_release(self):
