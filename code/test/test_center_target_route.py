@@ -50,7 +50,7 @@ class CenterTargetTests(unittest.TestCase):
         route = task.route_from_pose(start)
         self.assertEqual([a.method for a in route],
                          ["follow_segment", "rotate_to", "follow_segment", "rotate_to", "follow_segment"])
-        for index, distance in ((0, 2.6), (2, 3.8), (4, 2.2)):
+        for index, distance in ((0, 2.8), (2, 4.2), (4, 2.5)):
             self.assertAlmostEqual(math.dist(*route[index].args), distance)
         self.assertAlmostEqual(route[1].args[0] - start.yaw_rad, math.pi / 2)
         self.assertAlmostEqual(route[3].args[0] - route[1].args[0], math.pi / 2)
@@ -130,8 +130,8 @@ class CenterTargetTests(unittest.TestCase):
                                clock=lambda: self.now, sleep=self.advance)
         self.assertEqual(count, 2)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
-        self.assertAlmostEqual(self.pose[0], .4, delta=.04)
-        self.assertAlmostEqual(self.pose[1], 3.8, delta=.04)
+        self.assertAlmostEqual(self.pose[0], .3, delta=.04)
+        self.assertAlmostEqual(self.pose[1], 4.2, delta=.04)
         self.assertAlmostEqual(self.pose[2], math.pi, delta=.06)
         for duration in self.beeps:
             self.assertAlmostEqual(duration, 1., delta=.001)

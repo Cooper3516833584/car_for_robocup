@@ -1,4 +1,4 @@
-"""260/380/220 cm route with asynchronous, colour-independent YOLO stops.
+"""280/420/250 cm route with asynchronous, colour-independent YOLO stops.
 
 Hardware is opened explicitly, never on import. Only the runtime control thread
 commands motion/GPIO; the vision worker supplies observations.
@@ -207,11 +207,11 @@ def route_from_pose(pose):
                 pose.y_m + forward * s + left * c)
 
     return (
-        RouteAction("forward_260cm", "follow_segment", (xy(0, 0), xy(2.6, 0))),
+        RouteAction("forward_280cm", "follow_segment", (xy(0, 0), xy(2.8, 0))),
         RouteAction("left_90deg_1", "rotate_to", (pose.yaw_rad + math.pi / 2,)),
-        RouteAction("forward_380cm", "follow_segment", (xy(2.6, 0), xy(2.6, 3.8))),
+        RouteAction("forward_420cm", "follow_segment", (xy(2.8, 0), xy(2.8, 4.2))),
         RouteAction("left_90deg_2", "rotate_to", (pose.yaw_rad + math.pi,)),
-        RouteAction("forward_220cm", "follow_segment", (xy(2.6, 3.8), xy(0.4, 3.8))),
+        RouteAction("forward_250cm", "follow_segment", (xy(2.8, 4.2), xy(0.3, 4.2))),
     )
 
 
