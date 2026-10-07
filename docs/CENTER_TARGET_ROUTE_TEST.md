@@ -1,7 +1,9 @@
-# 中央目标停车测试
+# 目标减速与侧向投放巡线测试
 
 入口：`tools/run_center_target_route.py`。只使用生产 runtime 的融合定位、
-motion 动作和 DifferentialDrive 输出，不调用比赛占位坐标或释放载荷。
+motion 动作和 DifferentialDrive 输出，不调用比赛占位坐标。默认执行模拟投放，
+真实继电器保持关闭；载荷动作复用现有 `components/payload_task.py` 和 LCUS 驱动，
+本次不增加继电器驱动。
 
 路线从启动时的融合位置/朝向生成：前进 280 cm → 左转 90° → 前进
 420 cm → 左转 90° → 前进 250 cm。位置与转角完成容差沿用本车配置。
@@ -9,11 +11,27 @@ motion 动作和 DifferentialDrive 输出，不调用比赛占位坐标或释放
 摄像头舵机先转到仓库标定的 **+90°（2500 us）**，整个任务及退出后保持
 PWM。这里的角度沿用 ServoAxis 的 ±90° 坐标，0° 是中位 1500 us。
 
-YOLO 使用 `models/best_car.pt`（原有训练权重，red/blue/green/yellow 全部
-参与，不再按颜色筛选）。置信度至少 0.5，目标框中心位于画面宽和高各自
-25%～75% 时触发。视觉线程只提交结果，控制线程在下个周期先取消动作并
-停止驱动，再响 1 s。随后恢复原直线终点或转向终点，不重走整段。
-持续占用中央区域只响一次；连续三帧离开后重新进入可以再触发。
+YOLO 使用 `models/best_car.pt`（原有训练权重，red/blue/green/yellow 全部参与）。
+置信度至少 0.5。直行巡线时目标出现在画面内，动作层线速度上限降到
+8 cm/s，速度变化仍经过 DifferentialDrive 的原加减速限制。目标消失时恢复
+原巡线速度上限。目标框中心 X 进入画面横向中央 10%（45%～55%）才触发投放；
+上下位置不参与触发，多个检测框中任意合格目标可触发。
+
+可复用模块 `code/payload_detour.py` 的动作是：沿当前方向再前进 7 cm → 停车
+→ 左转 90° → 前进 47 cm → 投放 → 后退 47 cm → 右转 90° → 恢复原巡线路段。
+左右转使用同一保存的道路朝向，防止角度误差累加；直行投放动作临时使用
+5 mm 位置完成容差，结束或异常后恢复原设置。这是软件容差，实车精度尚需验收。
+前进的 7 cm 计入原巡线距离，返回后继续原终点，不重走整段。
+
+默认 `--release-mode simulate`，使用4路内存继电器，只记录模拟释放，不打开
+真实继电器。`--payload-slot 1/2/3` 选择 CH1/CH2/CH3，默认1；本次运行固定
+选择该路，默认模拟释放保持0.5 s。投放/返回期间不接受新触发，也不因转向时
+目标离开画面而重新允许触发。返回巡线后需连续三个不同的新鲜画面无目标，
+才允许再次触发。持续可见的同一目标只投放一次。
+
+`--target-speed-cm-s` 调整可见目标时的速度上限；
+`--drop-center-width-ratio` 调整横向中部范围。例如0.2代表横向40%～60%。
+`--target-action beep` 保留原中央50%（同时约束X/Y）立即停车、鸣叫1 s模式。
 
 相机/推理错误、结果超过 2 s 未更新、定位安全停止、超时、SIGINT/SIGTERM
 或 STOP 文件会结束测试并停车、关闭蜂鸣器。默认总时限 300 s。
@@ -48,8 +66,17 @@ ROS、pyrealsense2、OpenCV、PyTorch、Ultralytics 的 Python 环境启动：
 
 ```bash
 python tools/run_center_target_route.py --confirm-motor-test \
+  --payload-slot 1 --release-mode simulate \
   --log-dir /home/radxa/car_test_logs/center-route-YYYYMMDD-HHMMSS
 ```
+
+这条命令仍会真实运行小车的路线和投放往返动作，只有继电器为模拟。
+本次编码只进行了软件模拟验收和静止视觉检查，未启动此运动命令。
+
+以后确认继电器端口后可显式选择 `--release-mode relay --relay-port <已确认端口>
+--relay-channels 4`。现有驱动负责开启所选路并恢复关闭，退出必须 all_off。
+投放或关闭状态未确认会停止任务，不自动倒车或恢复巡线。实际板子为4路，
+用户于2026-10-07确认；CH4不参与本次投放选择。
 
 紧急停止可在 SSH 中执行 `touch <本次日志目录>/STOP`；运行输出、事件和
 `result.txt` 可用于核对动作与报警。执行测试已由用户明确授权。

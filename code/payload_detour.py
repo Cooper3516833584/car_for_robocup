@@ -1,0 +1,129 @@
+"""Interruptible left-side payload detour using the existing runtime motion API."""
+
+from dataclasses import dataclass, replace
+import math
+import sys
+import time
+
+from components.basic_motion_controller import MotionActionState
+from components.payload_task import drop_payload
+from competition_task import _step
+from robocup_runtime import RobocupMissionState
+
+PERIOD_S = 0.05
+
+
+@dataclass(frozen=True)
+class DetourSettings:
+    payload_slot: int = 1  # Slots 1/2/3 select relay CH1/CH2/CH3.
+    advance_m: float = 0.07
+    approach_m: float = 0.47
+    release_hold_s: float = 0.5
+    position_tolerance_m: float = 0.005
+    verify_relay: bool = True
+    patrol_slow_speed_m_s: float = 0.08
+
+    def __post_init__(self):
+        if (isinstance(self.payload_slot, bool) or not isinstance(self.payload_slot, int)
+                or self.payload_slot not in (1, 2, 3)):
+            raise ValueError("payload slot must be 1, 2 or 3")
+        for name in ("advance_m", "approach_m", "release_hold_s", "position_tolerance_m",
+                     "patrol_slow_speed_m_s"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+
+
+def run_payload_detour(runtime, settings, *, guard=lambda: None,
+                       check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep):
+    """Advance 7cm, left90, forward47cm, release, reverse47cm, restore road yaw.
+
+    Caller owns runtime/relay lifecycle and resumes its original segment.
+    Every motion/hold tick checks cancellation, vision and runtime safety.
+    Absolute turn headings avoid accumulating left/right turn tolerances.
+    """
+    relay = runtime.relay
+    original = runtime.motion.navigation
+    hold_failure = None
+
+    def check():
+        guard()
+        check_vision()
+
+    def motion(label, method, *args):
+        check()
+        runtime.motion.stop()
+        if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
+            runtime.mission.on_payload_action_done()
+        getattr(runtime.motion, method)(*args)
+        runtime.record_event("payload_detour_stage_start", stage=label, args=args)
+        while True:
+            check()
+            result = _step(runtime)
+            if runtime.motion.state is MotionActionState.SUCCEEDED:
+                runtime.drive.stop()
+                runtime.record_event("payload_detour_stage_done", stage=label,
+                                     pose=result.estimate.pose)
+                return result.estimate.pose
+            if runtime.motion.state not in {MotionActionState.RUNNING, MotionActionState.POSE_LOST}:
+                raise RuntimeError(f"{label}: motion failed: {runtime.motion.state.value}")
+            sleep(PERIOD_S)
+
+    def hold(duration):
+        nonlocal hold_failure
+        try:
+            deadline = clock() + duration
+            while clock() < deadline:
+                check()
+                _step(runtime)  # Motion cancelled: maintain zero output and live fusion.
+                sleep(min(PERIOD_S, max(0, deadline - clock())))
+            check()
+        except BaseException as exc:
+            hold_failure = exc
+            raise
+
+    try:
+        if relay is None or not relay.connected or relay.channel_count < settings.payload_slot:
+            raise RuntimeError("payload relay unavailable or selected channel is missing")
+        runtime.motion.navigation = replace(original, position_tolerance_m=min(
+            original.position_tolerance_m, settings.position_tolerance_m))
+        # Replace the patrol command directly; do not pause before the extra 7cm.
+        road_pose = motion("advance_7cm", "drive_distance", settings.advance_m)
+        road_yaw = road_pose.yaw_rad
+        runtime.record_event("payload_detour_road_pose", pose=road_pose)
+        motion("left_90deg", "rotate_to", road_yaw + math.pi / 2)
+        motion("forward_47cm", "drive_distance", settings.approach_m)
+        runtime.motion.stop()
+        runtime.drive.stop()
+        check()
+        runtime.record_event("payload_release_start", slot=settings.payload_slot)
+        released = drop_payload(relay, settings.payload_slot, hold_s=settings.release_hold_s,
+                                verify=settings.verify_relay, sleep=hold)
+        if hold_failure is not None:
+            raise hold_failure
+        if not released:
+            raise RuntimeError("payload release or relay deactivation failed")
+        runtime.record_event("payload_release_done", slot=settings.payload_slot)
+        motion("reverse_47cm", "drive_distance", -settings.approach_m)
+        returned = motion("right_90deg", "rotate_to", road_yaw)
+        runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
+        return returned
+    except BaseException as exc:
+        runtime.drive.stop()
+        runtime.motion.stop()
+        runtime.mission.request_safe_stop(str(exc))
+        raise
+    finally:
+        runtime.drive.stop()
+        runtime.motion.stop()
+        runtime.motion.navigation = original
+        # LCUS contacts latch after port closure. Runtime close retries cleanup.
+        if relay is not None and relay.connected:
+            primary_error = sys.exc_info()[0] is not None
+            try:
+                if relay.all_off(verify=settings.verify_relay) is False:
+                    raise RuntimeError("payload relay all_off was not confirmed")
+            except Exception as exc:
+                runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
+                runtime.mission.request_safe_stop(str(exc))
+                if not primary_error:
+                    raise

@@ -1,4 +1,4 @@
-"""280/420/250 cm route with asynchronous, colour-independent YOLO stops.
+"""280/420/250 cm route with YOLO payload detours or legacy stop/beep.
 
 Hardware is opened explicitly, never on import. Only the runtime control thread
 commands motion/GPIO; the vision worker supplies observations.
@@ -6,7 +6,7 @@ commands motion/GPIO; the vision worker supplies observations.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 import threading
@@ -16,6 +16,7 @@ from components.basic_motion_controller import MotionActionState
 from components.yolo_cpu import (CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ,
                                  pin_vision_worker, select_fastest_cpus)
 from competition_task import _step, _usable_pose
+from payload_detour import run_payload_detour
 from robocup_runtime import RobocupMissionState
 
 PERIOD_S = 0.05
@@ -24,18 +25,34 @@ VISION_MAX_AGE_S = 2.0
 MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_car.pt"
 
 
-def central_target(boxes, width, height, min_conf=0.5):
-    """Return any confident box whose centre is in the middle half of each axis.
-
-    Input boxes are (x1, y1, x2, y2, confidence, class_id); no colour filter.
-    """
+def visible_target(boxes, width, height, min_conf=0.5, *, region="frame"):
+    """Any confident colour target in the selected region of the native frame."""
+    if region not in {"frame", "center"}:
+        raise ValueError("target region must be frame or center")
+    lo, hi = (0.25, 0.75) if region == "center" else (0., 1.)
     for box in boxes:
         x1, y1, x2, y2, confidence, _class_id = box
         if (not all(math.isfinite(float(v)) for v in box[:5])
                 or confidence < min_conf or x2 <= x1 or y2 <= y1):
             continue
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        if width * 0.25 <= cx <= width * 0.75 and height * 0.25 <= cy <= height * 0.75:
+        if width * lo <= cx <= width * hi and height * lo <= cy <= height * hi:
+            return tuple(box)
+    return None
+
+
+def central_target(boxes, width, height, min_conf=0.5):
+    return visible_target(boxes, width, height, min_conf, region="center")
+
+
+def horizontal_target(boxes, width, min_conf=0.5, *, center_width_ratio=0.1):
+    """Trigger by box centre X only; there is no vertical-position gate."""
+    half = width * center_width_ratio / 2
+    for box in boxes:
+        x1, y1, x2, y2, confidence, _class_id = box
+        if (all(math.isfinite(float(v)) for v in box[:5]) and confidence >= min_conf
+                and x2 > x1 and y2 > y1
+                and abs((x1 + x2) / 2 - width / 2) <= half):
             return tuple(box)
     return None
 
@@ -47,14 +64,18 @@ class EntryLatch:
         self.armed = True
         self.clear_frames = 0
 
-    def update(self, target):
+    def require_clear(self):
+        self.armed = False
+        self.clear_frames = 0
+
+    def update(self, target, *, trigger=True):
         if target is None:
             self.clear_frames += 1
             if self.clear_frames >= 3:
                 self.armed = True
             return None
         self.clear_frames = 0
-        if self.armed:
+        if self.armed and trigger:
             self.armed = False
             return target
         return None
@@ -67,17 +88,27 @@ class YoloVision:
     movement. The worker cannot access the runtime or motor interfaces.
     """
 
-    def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=IMGSZ, confidence=0.5):
+    def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=IMGSZ, confidence=0.5,
+                 target_region="center", drop_center_width_ratio=0.1):
+        if target_region not in {"frame", "center"}:
+            raise ValueError("target region must be frame or center")
         self.weights = Path(weights)
         self.camera = camera
         self.imgsz = imgsz
         self.confidence = confidence
+        self.target_region = target_region
+        if not math.isfinite(drop_center_width_ratio) or not 0 < drop_center_width_ratio <= 1:
+            raise ValueError("drop center width ratio must be in (0, 1]")
+        self.drop_center_width_ratio = drop_center_width_ratio
         self._lock = threading.Lock()
         self._quit = threading.Event()
         self._ready = threading.Event()
         self._thread = None
         self._pending = None
         self._frame_at = None
+        self._target = None
+        self._visible = None
+        self._horizontal = None
         self._error = None
 
     def start(self):
@@ -126,10 +157,17 @@ class YoloVision:
                     continue
                 boxes = [] if result.boxes is None else result.boxes.data.cpu().tolist()
                 # Standard detect models expose xyxy, confidence, class in six columns.
-                target = central_target(boxes, frame.shape[1], frame.shape[0], self.confidence)
+                target = visible_target(boxes, frame.shape[1], frame.shape[0], self.confidence,
+                                        region=self.target_region)
+                visible = visible_target(boxes, frame.shape[1], frame.shape[0], self.confidence)
+                horizontal = horizontal_target(boxes, frame.shape[1], self.confidence,
+                                               center_width_ratio=self.drop_center_width_ratio)
                 entry = latch.update(target)
                 with self._lock:
                     self._frame_at = frame_at
+                    self._target = target
+                    self._visible = visible
+                    self._horizontal = horizontal
                     if entry is not None and self._pending is None:
                         self._pending = entry
                 self._ready.set()
@@ -145,12 +183,26 @@ class YoloVision:
     def ready(self):
         return self._ready.is_set()
 
+    def _check_fresh(self, now):
+        if self._error:
+            raise RuntimeError(self._error)
+        if self._frame_at is None or now - self._frame_at > VISION_MAX_AGE_S:
+            raise RuntimeError("YOLO inference unavailable or stale")
+
+    def observe(self, now):
+        """Latest native-frame observation; fresh frames are identified by timestamp."""
+        with self._lock:
+            self._check_fresh(now)
+            return self._frame_at, self._target
+
+    def observe_drop(self, now):
+        with self._lock:
+            self._check_fresh(now)
+            return self._frame_at, self._visible, self._horizontal
+
     def poll(self, now):
         with self._lock:
-            if self._error:
-                raise RuntimeError(self._error)
-            if self._frame_at is None or now - self._frame_at > VISION_MAX_AGE_S:
-                raise RuntimeError("YOLO inference unavailable or stale")
+            self._check_fresh(now)
             entry, self._pending = self._pending, None
             return entry
 
@@ -190,13 +242,17 @@ def route_from_pose(pose):
 
 
 def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
-              clock=time.monotonic, sleep=time.sleep):
-    """Monitor vision before each motion tick; cancel/zero before sounding.
+              clock=time.monotonic, sleep=time.sleep, detour=None):
+    """Slow on visibility; detour on horizontal centre, then resume fixed endpoints.
 
-    During the one-second alarm, localization continues with the action
-    cancelled. Resuming reuses the original segment/absolute turn target.
+    Optional legacy mode retains the one-second stop/alarm behavior.
     """
     deadline = clock() + max_seconds
+    original_drive = runtime.motion.drive
+    slow_drive = (replace(original_drive, max_linear_speed_m_s=min(
+        original_drive.max_linear_speed_m_s, detour.patrol_slow_speed_m_s))
+        if detour is not None else original_drive)
+    slowing = False
 
     def guard():
         if abort():
@@ -205,6 +261,9 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
             raise RuntimeError("route test time limit expired")
 
     try:
+        if detour is not None and (runtime.relay is None
+                                  or runtime.relay.channel_count < detour.payload_slot):
+            raise RuntimeError("payload relay must be configured before patrol starts")
         runtime.start()
         runtime.motion.stop()  # No implicit synthetic/default navigation goal.
         localization_deadline = min(deadline, clock() + 30)
@@ -217,7 +276,10 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
             _step(runtime)
             sleep(PERIOD_S)
         # Preserve a startup entry for handling before the first motion tick.
-        initial_entry = vision.poll(clock())
+        initial_entry = vision.poll(clock()) if detour is None else None
+        if detour is not None:
+            vision.observe(clock())
+        drop_latch, last_drop_frame = EntryLatch(), None
         while True:
             guard()
             result = _step(runtime)
@@ -228,14 +290,44 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
             sleep(PERIOD_S)
         actions = route_from_pose(result.estimate.pose)
         alarm_count = 0
+        drop_count = 0
         for action in actions:
             action.start(runtime)
             runtime.record_event("test_route_action_start", label=action.label, args=action.args)
             print(f"[route] START {action.label}", flush=True)
             while True:
                 guard()
-                entry = initial_entry if initial_entry is not None else vision.poll(clock())
+                if detour is not None:
+                    frame_at, visible, centered = vision.observe_drop(clock())
+                    entry = None
+                    target_visible = visible is not None and action.method == "follow_segment"
+                    if target_visible != slowing:
+                        slowing = target_visible
+                        runtime.motion.drive = slow_drive if slowing else original_drive
+                        runtime.record_event("test_route_target_speed", slowing=slowing,
+                                             max_speed_m_s=runtime.motion.drive.max_linear_speed_m_s)
+                    # Only patrol straight segments trigger; turns do not re-arm.
+                    if action.method == "follow_segment" and frame_at != last_drop_frame:
+                        last_drop_frame = frame_at
+                        if drop_latch.update(visible, trigger=centered is not None) is not None:
+                            entry = centered
+                else:
+                    entry = initial_entry if initial_entry is not None else vision.poll(clock())
                 initial_entry = None
+                if detour is not None and entry is not None:
+                    runtime.record_event("test_route_payload_target", label=action.label, box=entry)
+                    print(f"[route] PAYLOAD DETOUR slot={detour.payload_slot}", flush=True)
+                    run_payload_detour(runtime, detour, guard=guard,
+                                       check_vision=lambda: vision.observe(clock()),
+                                       clock=clock, sleep=sleep)
+                    drop_count += 1
+                    # Frames seen while turning/dropping cannot re-arm a target.
+                    drop_latch.require_clear()
+                    last_drop_frame = vision.observe(clock())[0]
+                    action.start(runtime)  # Preserve original endpoints; 7cm counts toward patrol.
+                    runtime.record_event("test_route_resume", label=action.label,
+                                         reason="payload_detour", drop_count=drop_count)
+                    continue
                 if entry is not None:
                     runtime.motion.stop()
                     runtime.drive.stop()
@@ -268,9 +360,9 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                 sleep(PERIOD_S)
         runtime.drive.stop()
         runtime.mission.finish()
-        runtime.record_event("test_route_finished", alarm_count=alarm_count)
-        print(f"[route] FINISHED; alarms={alarm_count}", flush=True)
-        return alarm_count
+        runtime.record_event("test_route_finished", alarm_count=alarm_count, drop_count=drop_count)
+        print(f"[route] FINISHED; alarms={alarm_count}; drops={drop_count}", flush=True)
+        return drop_count if detour is not None else alarm_count
     except BaseException as exc:
         runtime.drive.stop()
         runtime.mission.request_safe_stop(str(exc))
@@ -278,4 +370,6 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
     finally:
         # Drive stops before worker joins/log close; alarm is silenced on all exits.
         runtime.drive.stop()
-        alarm.off()
+        runtime.motion.drive = original_drive
+        if alarm is not None:
+            alarm.off()
