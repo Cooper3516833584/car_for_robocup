@@ -100,6 +100,7 @@ class YoloVision:
             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             latch = EntryLatch()
+            frames = 0
             while not self._quit.is_set():
                 ok, frame = capture.read()
                 frame_at = time.monotonic()
@@ -107,6 +108,14 @@ class YoloVision:
                     raise RuntimeError("YOLO camera frame unavailable")
                 result = detector.predict(frame, imgsz=self.imgsz, conf=self.confidence,
                                           device="cpu", verbose=False)[0]
+                frame_age = time.monotonic() - frame_at
+                frames += 1
+                if frames <= 3:
+                    print(f"[vision] frame={frames} inference_s={frame_age:.3f}", flush=True)
+                # CPU/model cold-start can exceed the freshness limit. Discard
+                # that frame while stationary; only a fresh result declares ready.
+                if frame_age > VISION_MAX_AGE_S:
+                    continue
                 boxes = [] if result.boxes is None else result.boxes.data.cpu().tolist()
                 # Standard detect models expose xyxy, confidence, class in six columns.
                 target = central_target(boxes, frame.shape[1], frame.shape[0], self.confidence)

@@ -1,0 +1,5 @@
+# CPU wheels for ROCK 5A / aarch64; use in the separate vision_env.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+ultralytics==8.4.174

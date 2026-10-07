@@ -12,6 +12,8 @@ from components.pose_fusion import FusedPoseEstimate, PoseFusionState
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_config
+from hal.pwm import PWMBackendError
+from tools.run_center_target_route import park_servo
 
 
 class CenterTargetTests(unittest.TestCase):
@@ -46,6 +48,21 @@ class CenterTargetTests(unittest.TestCase):
             self.assertAlmostEqual(math.dist(*route[index].args), distance)
         self.assertAlmostEqual(route[1].args[0] - start.yaw_rad, math.pi / 2)
         self.assertAlmostEqual(route[3].args[0] - route[1].args[0], math.pi / 2)
+
+    def test_pwm_export_permission_delay_is_bounded_and_retried(self):
+        servo = Mock()
+        failure = PWMBackendError("udev permissions pending")
+        failure.__cause__ = PermissionError("period")
+        servo.start.side_effect = [failure, None]
+        now = [0.]
+        park_servo(servo, 90, clock=lambda: now[0],
+                   sleep=lambda dt: now.__setitem__(0, now[0] + dt))
+        self.assertEqual(servo.start.call_count, 2)
+        servo.set_angle.assert_called_once_with(90, settle=True)
+        servo.start.side_effect = failure
+        with self.assertRaises(PWMBackendError):
+            park_servo(servo, 90, clock=lambda: now[0],
+                       sleep=lambda dt: now.__setitem__(0, now[0] + dt))
 
     def fixture(self):
         self.now = 10.0

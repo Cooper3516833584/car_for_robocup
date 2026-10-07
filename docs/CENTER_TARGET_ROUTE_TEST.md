@@ -22,6 +22,14 @@ YOLO 使用 `models/best_car.pt`（原有训练权重，red/blue/green/yellow �
 板端先启动新 SLAM 会话（参见 `SLAM_TOOLBOX_ROCK5A.md`），再使用同时具备
 ROS、pyrealsense2、OpenCV、PyTorch、Ultralytics 的 Python 环境启动：
 
+本次板端使用 `/home/radxa/robocup_ros/vision_env`，由已有 ROS Python 创建
+带 `--system-site-packages` 的独立 venv；CPU 依赖版本记录在
+`tools/requirements_center_target_route.txt`。不替换已有 ROS 环境的包。
+首次 PWM 导出后允许 udev 最多 2 s 赋予 `pwm` 组权限；仍拒绝则结束测试。
+冷启动慢帧会被丢弃，只有两秒以内的新鲜识别结果才允许开始运动。
+可先执行 `python tools/run_center_target_route.py --check-vision`，只检查
+摄像头/模型延迟，不打开运动、蜂鸣器或舵机。
+
 ```bash
 python tools/run_center_target_route.py --confirm-motor-test \
   --log-dir /home/radxa/car_test_logs/center-route-YYYYMMDD-HHMMSS
