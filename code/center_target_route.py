@@ -11,8 +11,10 @@ import math
 from pathlib import Path
 import threading
 import time
+import sys
 
 from components.basic_motion_controller import MotionActionState
+from components.payload_task import payload_channel, prepare_payload
 from components.yolo_cpu import (CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ,
                                  pin_vision_worker, select_fastest_cpus)
 from competition_task import _step, _usable_pose
@@ -262,7 +264,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
 
     try:
         if detour is not None and (runtime.relay is None
-                                  or runtime.relay.channel_count < detour.payload_slot):
+                                  or runtime.relay.channel_count < payload_channel(detour.payload_slot)):
             raise RuntimeError("payload relay must be configured before patrol starts")
         runtime.start()
         runtime.motion.stop()  # No implicit synthetic/default navigation goal.
@@ -289,6 +291,13 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                 raise RuntimeError("fused localization startup timed out")
             sleep(PERIOD_S)
         actions = route_from_pose(result.estimate.pose)
+        if detour is not None:
+            if not prepare_payload(runtime.relay, detour.payload_slot, verify=detour.verify_relay):
+                raise RuntimeError("payload holding state was not confirmed; patrol will not move")
+            runtime.record_event("payload_hold_ready", slot=detour.payload_slot,
+                                 channel=payload_channel(detour.payload_slot))
+            guard()
+            vision.observe(clock())  # Recheck freshness after relay verification.
         alarm_count = 0
         drop_count = 0
         for action in actions:
@@ -373,3 +382,13 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
         runtime.motion.drive = original_drive
         if alarm is not None:
             alarm.off()
+        if detour is not None and runtime.relay is not None and runtime.relay.connected:
+            primary_error = sys.exc_info()[0] is not None
+            try:
+                if runtime.relay.all_off(verify=detour.verify_relay) is False:
+                    raise RuntimeError("payload relay all_off was not confirmed")
+            except Exception as exc:
+                runtime.mission.request_safe_stop(str(exc))
+                runtime.record_event("test_route_cleanup_failed", reason=str(exc))
+                if not primary_error:
+                    raise

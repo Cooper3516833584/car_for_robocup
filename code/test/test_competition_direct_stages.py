@@ -1,6 +1,7 @@
 """Non-motion CLI tests: no localization startup, real result codes, cleanup."""
 
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
 from components.task_board_reader import TaskBoardResult, TaskCounts
 from components.yellow_yolo_adapter import YellowDetection
+from robocup_runtime import load_runtime_config
 from main_robocup import DIRECT_COMPETITION_STAGES, main
 
 
@@ -20,8 +22,7 @@ class DirectCompetitionStageTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.build = self.stack.enter_context(patch("main_robocup.build_runtime"))
         self.profile = self.stack.enter_context(patch("main_robocup.accepted_relative_slam_profile"))
-        self.config = SimpleNamespace(relay=SimpleNamespace(
-            verify_writes=True, disconnect_on_shutdown=True))
+        self.config = load_runtime_config()
         self.loader = self.stack.enter_context(patch("main_robocup.load_runtime_config", return_value=self.config))
         self.relay = Mock(connected=True)
         self.relay.all_off.return_value = True
@@ -170,10 +171,26 @@ class DirectCompetitionStageTests(unittest.TestCase):
             self.assertEqual(main(["--competition-stage", "drop"]), 1)
 
     def test_direct_drop_always_requests_all_off(self):
-        self.config.relay.disconnect_on_shutdown = False
+        self.config = replace(self.config, relay=replace(self.config.relay, disconnect_on_shutdown=False))
+        self.loader.return_value = self.config
         with patch.object(task, "drop_payload", return_value=True):
             self.assertEqual(main(["--competition-stage", "drop"]), 0)
         self.relay.all_off.assert_called_once()
+
+    def test_real_drop_uses_confirmed_channel_and_never_reenergizes_it(self):
+        self.relay.channel_count = 4
+        self.relay.turn_off.return_value = True
+        self.assertEqual(main(["--competition-stage", "drop", "--payload-slot", "3",
+                               "--relay-port", "/dev/confirmed-relay"]), 0)
+        configured = self.factory.call_args.args[0]
+        self.assertTrue(configured.relay.enabled)
+        self.assertEqual(configured.relay.port, "/dev/confirmed-relay")
+        self.relay.turn_on.assert_not_called()
+        self.assertTrue(all(call.args == (4,) for call in self.relay.turn_off.call_args_list))
+
+    def test_relay_port_override_rejected_for_unrelated_stage(self):
+        self.assertEqual(main(["--competition-stage", "task-board", "--relay-port", "/dev/confirmed"]), 2)
+        self.relay.open.assert_not_called()
 
 
 if __name__ == "__main__":

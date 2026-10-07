@@ -11,6 +11,7 @@ import sys
 from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal
 from config.relative_slam_profile import accepted_relative_slam_profile
+from config.v2_factory import configure_payload_relay
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
 
@@ -50,7 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yellow-camera", help="competition camera index or stable device path")
     parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
     parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=1,
-                        help="slot for the standalone drop stage; full mission uses slot 1")
+                        help="drop/full selection: 1=right-front CH2, 2=middle CH3, 3=left-front CH4")
+    parser.add_argument("--relay-port", help="explicit LCUS port; enables real relay only for drop/full")
     return parser
 
 
@@ -99,7 +101,7 @@ def run_direct_competition_stage(args) -> int:
     if stage == "drop":
         from config.v2_factory import build_relay
 
-        config = load_runtime_config(args.config)
+        config = configure_payload_relay(load_runtime_config(args.config), port=args.relay_port)
         relay = build_relay(config, fake=False)
         if relay is None:
             logging.error("payload relay is disabled/unavailable")
@@ -133,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
     direct_stage = args.competition_stage in DIRECT_COMPETITION_STAGES
+    if args.relay_port is not None and (not competition_enabled
+            or args.competition_stage not in (None, "full", "drop")):
+        logging.error("--relay-port requires competition full or drop")
+        return 2
     if competition_enabled and not direct_stage and args.mode != RuntimeMode.HARDWARE_MISSION.value:
         logging.error("competition requires --mode hardware-mission; use fake unit tests for software route validation")
         return 2
@@ -167,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_runtime_config(args.config)
+        if competition_enabled and args.competition_stage in (None, "full"):
+            config = configure_payload_relay(config, port=args.relay_port)
         mode = RuntimeMode(args.mode)
         if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
             config = accepted_relative_slam_profile(config)

@@ -5,7 +5,7 @@
 本次未改动 D500/T265/融合算法、C10B 帧发送器或底盘 watchdog。
 
 完整流程：等待融合定位 → 车道入口 → 任务板观察点 → OCR → HC 单发 → 第一转角
-→ 横向车道 → 黄色搜索 → 像素对齐 → 固定投放路线 → slot 1 投放 → 第二转角
+→ 横向车道 → 黄色搜索 → 像素对齐 → 固定投放路线 → 所选 slot 投放 → 第二转角
 → 终点坐标停车。
 
 正式车道使用现有 `follow_segment()`，按测定的线段方向运行和回线：
@@ -39,7 +39,7 @@
 | `YELLOW_IMGSZ / CAMERA_WIDTH / CAMERA_HEIGHT / CAMERA_FPS` | 共用 `components/yolo_cpu.py` 的 320 / 640 / 480 / 30；OCR 仍使用自己的采集设置 |
 | `ALIGN_PIXEL_TO_DRIVE_SIGN / ALIGN_STEP_M` | 当前 +1 / 0.02 m，实测前后移动对 cx 的影响 |
 | `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作临时缩小现有 3 cm 容差，动作后恢复 |
-| `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 当前 CH1/2/3、True、0.5 s，确认接线和释放极性 |
+| `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 选项1/2/3对应右前CH2/中间CH3/左前CH4、False（通电吸住/断电释放）、0.5 s；与组件及路线测试共用已确认接线 |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
 | `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
 | `HC_TASK_MESSAGE_TEMPLATE` | `TASK,{red},{blue},{green}\n`，需要无人机接收程序按此格式解析 |
@@ -64,10 +64,14 @@
 - 投放与串联：`run_fixed_drop_route`、`drop_payload`、`run_full_mission`、
   `run_competition_stage`。
 
-`drop_payload(relay, slot=1/2/3)` 返回 bool，当前整场仅调用 slot 1。
-投放组件在异常和键盘中断时也尝试恢复非释放状态；完整 runtime 负责继电器统一
+`drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认1。
+完整流程在首段移动前给所选电磁铁通电吸住；投放组件断电释放后保持 OFF，
+异常和键盘中断也尝试关闭所选路；完整 runtime 负责继电器统一
 退出。CLI 的独立 drop 阶段自己负责 `all_off()` 和关闭串口，包含失败/中断退出，
 且独立 drop 即使 `disconnect_on_shutdown=False` 也会请求 `all_off()`。
+独立 drop 不会先吸合电磁铁；吸持或投放回读未确认会停止任务。
+可在已启用的 `[devices.relay]` 配置上运行，也可用 `--relay-port` 显式启用已确认端口。
+主程序只在 `full/drop` 接受该端口覆盖，并强制状态回读和退出关闭全部触点。
 
 `detect_yellow_once` 接收已打开且有 `read()` 的 camera 以及 Ultralytics detector。
 搜索/对齐函数也支持相机索引或设备路径：内部打开的相机会释放，外部传入的
@@ -110,7 +114,7 @@ python3 code/main_robocup.py --mode hardware-mission --competition-stage yellow-
 python3 code/main_robocup.py --mode hardware-mission --competition-stage drop-route
 
 # 只释放指定仓位，不执行路线。
-python3 code/main_robocup.py --competition-stage drop --config configs/robocup_diffdrive.toml --payload-slot 1
+python3 code/main_robocup.py --competition-stage drop --config configs/robocup_diffdrive.toml --payload-slot 1 --relay-port /dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0
 
 # 整场：先填写路线常量，再完成单项验收后使用。
 python3 code/main_robocup.py --mode hardware-mission --competition --yellow-model /absolute/path/best_car.pt

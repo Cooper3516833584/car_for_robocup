@@ -110,7 +110,8 @@ DEFAULT_BAUDRATE = 9600
 DEFAULT_CHANNEL_COUNT = 4
 # 本车电磁铁接线（2026-10-07 操作者实测确认）：
 # CH1：未连接电磁铁；CH2：右前方电磁铁。
-# CH3：中间电磁铁；CH4：对应位置尚未确认。
+# CH3：中间电磁铁；CH4：左前电磁铁。
+# 电磁铁通电吸住、断电释放；投放选项由 components.payload_task 映射到 CH2/CH3/CH4。
 # 这些注释不改变通道编号或控制逻辑。
 MAX_CHANNEL_COUNT = 8
 MIN_CHANNEL = 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable
+from dataclasses import replace
 
 from .v2_models import DifferentialRobotConfig
 
@@ -78,6 +79,20 @@ def build_t265_source(config: DifferentialRobotConfig, *, fake: bool = False, sa
     from components.t265_driver import RealSenseT265PoseSource
 
     return RealSenseT265PoseSource(config.t265.serial)
+
+
+def configure_payload_relay(config: DifferentialRobotConfig, *, port: str | None = None):
+    """Explicit CLI enablement and cleanup policy; never opens hardware."""
+    relay = config.relay
+    if port is not None:
+        if not port.strip():
+            raise ValueError("payload relay port must not be empty")
+        relay = replace(relay, enabled=True, port=port)
+    if not relay.enabled:
+        return config
+    if relay.channel_count < 4:
+        raise ValueError("payload magnets require relay channels 2, 3 and 4")
+    return replace(config, relay=replace(relay, verify_writes=True, disconnect_on_shutdown=True))
 
 
 def build_relay(config: DifferentialRobotConfig, *, fake: bool = False):

@@ -12,6 +12,9 @@ import time
 from components.basic_motion_controller import MotionActionState
 from components.hc_task_sender import build_task_message, send_task_once
 from components.payload_task import drop_payload as release_payload
+from components.payload_task import (PAYLOAD_ACTIVE_ON as DEFAULT_PAYLOAD_ACTIVE_ON,
+                                     PAYLOAD_SLOT_TO_RELAY as DEFAULT_PAYLOAD_SLOT_TO_RELAY,
+                                     payload_channel, prepare_payload)
 from components.pose_fusion import PoseFusionState
 from components.yellow_yolo_adapter import load_detector, select_yellow
 from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
@@ -90,10 +93,10 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 # TODO(field): measure this sequence from the aligned camera pose to release.
 # Only ("drive", m), ("rotate", deg), ("rotate_to", deg) are supported.
 FIXED_DROP_ROUTE = [("drive", 0.00)]
-PAYLOAD_SLOT_TO_RELAY = {1: 1, 2: 2, 3: 3}
-PAYLOAD_ACTIVE_ON = True
+PAYLOAD_SLOT_TO_RELAY = dict(DEFAULT_PAYLOAD_SLOT_TO_RELAY)  # 1=右前CH2，2=中间CH3，3=左前CH4。
+PAYLOAD_ACTIVE_ON = DEFAULT_PAYLOAD_ACTIVE_ON  # False: 通电吸住，断电释放后保持 OFF。
 PAYLOAD_RELEASE_HOLD_S = 0.50
-PAYLOAD_VERIFY_RELAY = False
+PAYLOAD_VERIFY_RELAY = True
 # ===== END FIELD / COMPETITION QUICK TUNING =====
 
 LOG = logging.getLogger(__name__)
@@ -469,10 +472,18 @@ def _stage(runtime, name, action):
     return result
 
 
-def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None):
+def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None, slot=1):
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     wait_for_fused_localization(runtime)
+    channel = payload_channel(slot, PAYLOAD_SLOT_TO_RELAY)
+    if runtime.relay is not None:
+        if not prepare_payload(runtime.relay, slot, slot_to_relay=PAYLOAD_SLOT_TO_RELAY,
+                               active_on=PAYLOAD_ACTIVE_ON, verify=PAYLOAD_VERIFY_RELAY):
+            runtime.drive.stop()
+            runtime.mission.request_safe_stop("payload holding state was not confirmed")
+            raise RuntimeError("payload holding state was not confirmed; mission will not move")
+        runtime.record_event("payload_hold_ready", slot=slot, channel=channel)
     _stage(runtime, "lane", lambda: go_to_lane(runtime))
     _stage(runtime, "task-board-position", lambda: go_to_task_board(runtime))
     counts = _stage(runtime, "task-board", lambda: read_task_board(task_camera, runtime=runtime))
@@ -486,10 +497,14 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         runtime, yellow_camera, detector, initial_detection=detection))
     if aligned is not None:
         _stage(runtime, "drop-route", lambda: run_fixed_drop_route(runtime))
-        ok = _stage(runtime, "drop", lambda: drop_payload(runtime.relay, 1))
-        runtime.record_event("payload_drop", slot=1, success=ok)
+        ok = _stage(runtime, "drop", lambda: drop_payload(runtime.relay, slot))
+        runtime.record_event("payload_drop", slot=slot, channel=channel, success=ok)
+        if not ok:
+            runtime.drive.stop()
+            runtime.mission.request_safe_stop("payload release was not confirmed")
+            raise RuntimeError("payload release was not confirmed; mission stopped")
     else:
-        runtime.record_event("payload_drop", slot=1, success=False, skipped=True,
+        runtime.record_event("payload_drop", slot=slot, channel=channel, success=False, skipped=True,
                              reason="yellow search or alignment failed")
     _stage(runtime, "corner2", lambda: go_to_second_corner(runtime))
     return _stage(runtime, "finish", lambda: go_to_finish(runtime))
@@ -515,7 +530,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     runtime.drive.stop()
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
-                                yellow_camera=yellow_camera, detector=detector)
+                                yellow_camera=yellow_camera, detector=detector, slot=slot)
     if stage == "hc-send":
         from components.task_board_reader import TaskCounts
         return _stage(runtime, stage, lambda: send_task_to_drone_once(

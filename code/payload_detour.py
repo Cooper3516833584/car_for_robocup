@@ -6,7 +6,7 @@ import sys
 import time
 
 from components.basic_motion_controller import MotionActionState
-from components.payload_task import drop_payload
+from components.payload_task import drop_payload, payload_channel
 from competition_task import _step
 from robocup_runtime import RobocupMissionState
 
@@ -15,7 +15,7 @@ PERIOD_S = 0.05
 
 @dataclass(frozen=True)
 class DetourSettings:
-    payload_slot: int = 1  # Slots 1/2/3 select relay CH1/CH2/CH3.
+    payload_slot: int = 1  # 1=右前CH2，2=中间CH3，3=左前CH4；CH1无电磁铁。
     advance_m: float = 0.07
     approach_m: float = 0.47
     release_hold_s: float = 0.5
@@ -82,7 +82,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             raise
 
     try:
-        if relay is None or not relay.connected or relay.channel_count < settings.payload_slot:
+        channel = payload_channel(settings.payload_slot)
+        if relay is None or not relay.connected or relay.channel_count < channel:
             raise RuntimeError("payload relay unavailable or selected channel is missing")
         runtime.motion.navigation = replace(original, position_tolerance_m=min(
             original.position_tolerance_m, settings.position_tolerance_m))
@@ -95,14 +96,14 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.motion.stop()
         runtime.drive.stop()
         check()
-        runtime.record_event("payload_release_start", slot=settings.payload_slot)
+        runtime.record_event("payload_release_start", slot=settings.payload_slot, channel=channel)
         released = drop_payload(relay, settings.payload_slot, hold_s=settings.release_hold_s,
                                 verify=settings.verify_relay, sleep=hold)
         if hold_failure is not None:
             raise hold_failure
         if not released:
             raise RuntimeError("payload release or relay deactivation failed")
-        runtime.record_event("payload_release_done", slot=settings.payload_slot)
+        runtime.record_event("payload_release_done", slot=settings.payload_slot, channel=channel)
         motion("reverse_47cm", "drive_distance", -settings.approach_m)
         returned = motion("right_90deg", "rotate_to", road_yaw)
         runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
@@ -116,14 +117,13 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.drive.stop()
         runtime.motion.stop()
         runtime.motion.navigation = original
-        # LCUS contacts latch after port closure. Runtime close retries cleanup.
-        if relay is not None and relay.connected:
-            primary_error = sys.exc_info()[0] is not None
+        # On success only the selected magnet is released; preserve other loads.
+        # On failure disconnect all contacts; runtime close retries cleanup.
+        primary_error = sys.exc_info()[0] is not None
+        if primary_error and relay is not None and relay.connected:
             try:
                 if relay.all_off(verify=settings.verify_relay) is False:
                     raise RuntimeError("payload relay all_off was not confirmed")
             except Exception as exc:
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
                 runtime.mission.request_safe_stop(str(exc))
-                if not primary_error:
-                    raise

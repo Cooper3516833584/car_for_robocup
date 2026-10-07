@@ -20,7 +20,7 @@ from components.diagnostics_log import JsonlEventLogger
 from components.sound_light_alarm import SoundLightAlarm
 from components.relay_lcus import FakeLCUSRelay
 from config.relative_slam_profile import accepted_relative_slam_profile
-from config.v2_factory import build_servo
+from config.v2_factory import build_servo, configure_payload_relay
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import build_runtime
@@ -48,10 +48,10 @@ def payload_config(config, *, action, release_mode="simulate", relay_port=None, 
         relay = replace(relay, channel_count=relay_channels)
     if not relay.enabled:
         raise ValueError("drop mode requires an enabled relay in config or explicit --relay-port")
-    if relay.channel_count < 3:
-        raise ValueError("drop mode requires relay channels 1, 2 and 3")
+    if relay.channel_count < 4:
+        raise ValueError("drop mode requires relay channels 2, 3 and 4")
     # Exiting a program must disconnect latched contacts even if a profile opted out.
-    return replace(config, relay=replace(relay, disconnect_on_shutdown=True))
+    return configure_payload_relay(replace(config, relay=relay))
 
 
 def park_servo(servo, angle, *, clock=time.monotonic, sleep=time.sleep):
@@ -78,7 +78,7 @@ def main(argv=None):
     parser.add_argument("--target-region", choices=("frame", "center"),
                         help="default: entire frame for drop, middle 50%% for beep")
     parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=1,
-                        help="select relay CH1, CH2 or CH3 for this run")
+                        help="1=right-front CH2, 2=middle CH3, 3=left-front CH4; powered hold, OFF release")
     parser.add_argument("--release-hold-s", type=float, default=0.5)
     parser.add_argument("--release-mode", choices=("simulate", "relay"), default="simulate",
                         help="default: simulate release without opening a physical relay")
