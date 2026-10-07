@@ -248,12 +248,12 @@ class CompetitionTaskTests(unittest.TestCase):
         reader.assert_called_once_with("/dev/camera", runtime=self.runtime)
         go.assert_not_called()
 
-    def test_main_routes_camera_without_legacy_turn_and_always_closes(self):
+    def test_main_motion_stage_routes_camera_without_legacy_turn_and_always_closes(self):
         with patch("main_robocup.build_runtime", return_value=self.runtime), \
              patch.object(task, "run_competition_stage", return_value=True) as run:
-            self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", "drop",
+            self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", "lane",
                                    "--task-board-camera", "1", "--payload-slot", "2"]), 0)
-        self.assertEqual(run.call_args.args, (self.runtime, "drop"))
+        self.assertEqual(run.call_args.args, (self.runtime, "lane"))
         self.assertEqual(run.call_args.kwargs["task_board_camera"], 1)
         self.assertFalse(self.runtime.is_running)
 

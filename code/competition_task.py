@@ -309,6 +309,16 @@ def _open_yellow_camera(camera):
         raise
 
 
+def detect_yellow_from_camera(camera, detector):
+    """One stationary detection; no runtime or motion, release owned capture."""
+    capture, owned = _open_yellow_camera(YELLOW_CAMERA if camera is None else camera)
+    try:
+        return detect_yellow_once(capture, detector)
+    finally:
+        if owned:
+            capture.release()
+
+
 def _detect_stopped(runtime, camera, detector):
     runtime.drive.stop()
     detection = detect_yellow_once(camera, detector)
@@ -512,20 +522,14 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     if stage == "yellow-detect":
         if detector is None:
             return None
-        capture, owned = None, False
         try:
-            try:
-                capture, owned = _open_yellow_camera(yellow_camera)
-            except Exception:
-                LOG.exception("yellow camera unavailable")
-                return None
-            detection = _stage(runtime, stage, lambda: detect_yellow_once(capture, detector))
-            runtime.record_event("yellow_detect", found=detection is not None,
-                                 **({} if detection is None else vars(detection)))
-            return detection
-        finally:
-            if owned:
-                capture.release()
+            detection = _stage(runtime, stage, lambda: detect_yellow_from_camera(yellow_camera, detector))
+        except Exception:
+            LOG.exception("yellow camera unavailable")
+            return None
+        runtime.record_event("yellow_detect", found=detection is not None,
+                             **({} if detection is None else vars(detection)))
+        return detection
     actions = {
         "lane": lambda: go_to_lane(runtime),
         "corner1": lambda: go_to_first_corner(runtime),

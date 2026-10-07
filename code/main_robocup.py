@@ -15,6 +15,9 @@ from config.v2_runtime import RuntimeMode
 from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
 
 
+DIRECT_COMPETITION_STAGES = {"task-board", "hc-send", "yellow-detect", "drop"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RoboCup differential robot runtime")
     parser.add_argument("--config", help="schema-v2 TOML configuration")
@@ -43,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--competition-stage", choices=(
         "full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
         "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop", "corner2", "finish"),
-        help="run only this competition stage (implies --competition)")
+        help="run only this stage; task-board/hc-send/yellow-detect/drop use direct hardware without localization runtime")
     parser.add_argument("--yellow-camera", help="competition camera index or stable device path")
     parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
     parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=1,
@@ -63,11 +66,74 @@ def configure_logging(log_dir: str | None) -> None:
     )
 
 
+def camera_value(value):
+    return int(value) if value is not None and value.isdigit() else value
+
+
+def run_direct_competition_stage(args) -> int:
+    """Four non-motion tests only; each owns just its required device."""
+    import competition_task as task
+
+    stage = args.competition_stage
+    if stage == "task-board":
+        from components.task_board_reader import TaskBoardConfig, TaskBoardReader
+
+        counts = task.read_task_board(camera_value(args.task_board_camera), reader=TaskBoardReader(
+            TaskBoardConfig(debug_directory=args.task_board_debug_dir)))
+        logging.info("task-board result: red=%d blue=%d green=%d", counts.red, counts.blue, counts.green)
+        return 0  # The existing fallback warns and remains a valid task.
+    if stage == "hc-send":
+        from components.task_board_reader import TaskCounts
+
+        ok = task.send_task_to_drone_once(TaskCounts(*task.TASK_BOARD_FALLBACK))
+        return 0 if ok is True else 1
+    if stage == "yellow-detect":
+        detector = task.load_detector(args.yellow_model or task.YELLOW_MODEL_PATH)
+        detection = task.detect_yellow_from_camera(camera_value(args.yellow_camera), detector)
+        if detection is None:
+            logging.error("yellow target not detected")
+            return 1
+        logging.info("yellow: cx=%.1f cy=%.1f w=%.1f h=%.1f conf=%.3f", detection.cx_px,
+                     detection.cy_px, detection.width_px, detection.height_px, detection.confidence)
+        return 0
+    if stage == "drop":
+        from config.v2_factory import build_relay
+
+        config = load_runtime_config(args.config)
+        relay = build_relay(config, fake=False)
+        if relay is None:
+            logging.error("payload relay is disabled/unavailable")
+            return 1
+        ok = False
+        try:
+            relay.open()
+            ok = task.drop_payload(relay, args.payload_slot)
+        finally:
+            # A direct test always requests all_off before closing an opened
+            # relay, including when disconnect_on_shutdown is disabled.
+            try:
+                if relay.connected and relay.all_off(verify=config.relay.verify_writes) is False:
+                    logging.error("direct drop all_off was not confirmed")
+                    ok = False
+            except Exception:
+                logging.exception("direct drop all_off failed")
+                ok = False
+            finally:
+                try:
+                    relay.close()
+                except Exception:
+                    logging.exception("direct drop close failed")
+                    ok = False
+        return 0 if ok is True else 1
+    raise ValueError(f"unsupported direct competition stage: {stage}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
-    if competition_enabled and args.mode != RuntimeMode.HARDWARE_MISSION.value:
+    direct_stage = args.competition_stage in DIRECT_COMPETITION_STAGES
+    if competition_enabled and not direct_stage and args.mode != RuntimeMode.HARDWARE_MISSION.value:
         logging.error("competition requires --mode hardware-mission; use fake unit tests for software route validation")
         return 2
     if competition_enabled and (args.goal_x is not None or args.goal_y is not None
@@ -88,6 +154,16 @@ def main(argv: list[str] | None = None) -> int:
                                or not math.isfinite(args.task_board_turn_deg)):
         logging.error("task-board startup requires hardware-mission and a finite measured turn")
         return 2
+
+    if direct_stage:
+        try:
+            return run_direct_competition_stage(args)
+        except KeyboardInterrupt:
+            logging.warning("direct competition stage interrupted")
+            return 130
+        except Exception:
+            logging.exception("direct competition stage failed: %s", args.competition_stage)
+            return 1
 
     try:
         config = load_runtime_config(args.config)
@@ -127,9 +203,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if competition_enabled:
             from competition_task import run_competition_stage
-
-            def camera_value(value):
-                return int(value) if value is not None and value.isdigit() else value
 
             result = run_competition_stage(
                 runtime, args.competition_stage or "full",
