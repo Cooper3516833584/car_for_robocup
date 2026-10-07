@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import math
 import os
 from pathlib import Path
 import signal
@@ -19,6 +20,7 @@ from center_target_route import MODEL_PATH, YoloVision, run_route
 from components.diagnostics_log import JsonlEventLogger
 from components.sound_light_alarm import SoundLightAlarm
 from components.relay_lcus import FakeLCUSRelay
+from components.payload_task import prepare_payload
 from config.relative_slam_profile import accepted_relative_slam_profile
 from config.v2_factory import build_servo, configure_payload_relay
 from config.v2_loader import load_v2_config
@@ -68,6 +70,40 @@ def park_servo(servo, angle, *, clock=time.monotonic, sleep=time.sleep):
     servo.set_angle(angle, settle=True)
 
 
+def startup_countdown(relay, alarm, slot, seconds, *, verify=True, abort=lambda: False,
+                      clock=time.monotonic, sleep=time.sleep):
+    """Hold only the selected magnet, sound a bounded alarm, leave motion unopened."""
+    if not math.isfinite(seconds) or not 0 < seconds <= 60:
+        raise ValueError("startup alarm must be between 0 and 60 seconds")
+    try:
+        relay.open()
+        if relay.all_off(verify=verify) is False or not prepare_payload(relay, slot, verify=verify):
+            raise RuntimeError("startup relay state was not confirmed")
+        alarm.initialize(active=False)
+        try:
+            if abort():
+                raise RuntimeError("startup countdown interrupted")
+            alarm.on()
+            if not alarm.is_active:
+                raise RuntimeError("startup alarm active level was not confirmed")
+            deadline = clock() + seconds
+            while clock() < deadline:
+                if abort():
+                    raise RuntimeError("startup countdown interrupted")
+                sleep(min(.1, max(0, deadline - clock())))
+            if abort():
+                raise RuntimeError("startup countdown interrupted")
+        finally:
+            if alarm.is_initialized:
+                alarm.off()
+        if alarm.is_active:
+            raise RuntimeError("startup alarm inactive level was not confirmed")
+    except BaseException:
+        if relay.connected:
+            relay.all_off(verify=verify)
+        raise
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=str(ROOT / "configs/robocup_diffdrive.toml"))
@@ -95,8 +131,14 @@ def main(argv=None):
     parser.add_argument("--check-vision", action="store_true",
                         help="check camera/model freshness without opening motion, GPIO or servo")
     parser.add_argument("--max-seconds", type=float, default=300)
+    parser.add_argument("--startup-alarm-seconds", type=float, default=0,
+                        help="drop mode: hold selected magnet, alarm for this duration, then start (0=disabled)")
     parser.add_argument("--confirm-motor-test", action="store_true")
     args = parser.parse_args(argv)
+    if not math.isfinite(args.startup_alarm_seconds) or not 0 <= args.startup_alarm_seconds <= 60:
+        parser.error("--startup-alarm-seconds must be between 0 and 60")
+    if args.startup_alarm_seconds and args.target_action != "drop":
+        parser.error("--startup-alarm-seconds requires --target-action drop")
     region = args.target_region or ("frame" if args.target_action == "drop" else "center")
     if args.check_vision:
         vision = YoloVision(args.weights, args.camera, target_region=region,
@@ -151,7 +193,7 @@ def main(argv=None):
     runtime = None
     vision = YoloVision(args.weights, args.camera, target_region=region,
                         drop_center_width_ratio=args.drop_center_width_ratio)
-    alarm = SoundLightAlarm() if args.target_action == "beep" else None
+    alarm = SoundLightAlarm() if args.target_action == "beep" or args.startup_alarm_seconds else None
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
         if detour is not None and args.release_mode == "simulate":
@@ -159,6 +201,14 @@ def main(argv=None):
         if detour is not None:
             runtime.record_event("test_route_release_mode", mode=args.release_mode, slot=args.payload_slot)
             print(f"[route] RELEASE MODE {args.release_mode}; slot={args.payload_slot}", flush=True)
+        if args.startup_alarm_seconds:
+            runtime.record_event("startup_countdown_start", slot=args.payload_slot, seconds=args.startup_alarm_seconds)
+            print(f"[route] STARTUP: hold slot={args.payload_slot}, alarm {args.startup_alarm_seconds:g}s", flush=True)
+            startup_countdown(runtime.relay, alarm, args.payload_slot, args.startup_alarm_seconds,
+                              verify=config.relay.verify_writes,
+                              abort=lambda: aborted.is_set() or stop_file.exists())
+            runtime.record_event("startup_countdown_done", slot=args.payload_slot)
+            print("[route] STARTUP DONE; alarm OFF", flush=True)
         # Park at the requested calibrated angle and leave PWM enabled throughout.
         park_servo(servo, args.servo_angle_deg)
         print(f"[route] SERVO HOLD {args.servo_angle_deg:g}deg, {servo.pulse_us}us", flush=True)

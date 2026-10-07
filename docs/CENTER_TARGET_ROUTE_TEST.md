@@ -75,6 +75,11 @@ python tools/run_center_target_route.py --confirm-motor-test \
 ```
 
 这条命令仍会真实运行小车的路线和投放往返动作，只有继电器为模拟。
+`--startup-alarm-seconds 10` 在运动设备启动前先确认全部继电器关闭，
+给所选电磁铁通电吸持，再鸣叫10 s并关闭蜂鸣器，之后准备视觉/定位并开始路线。
+它只适用于drop模式，默认0（不鸣叫）。中间电磁铁使用 `--payload-slot 2`；
+真实投放同时显式传入 `--release-mode relay --relay-port <已确认路径> --relay-channels 4`。
+STOP或信号可中断鸣叫，异常会关闭蜂鸣器和全部继电器。
 本次接线与释放逻辑变更进行软件模拟验收后，通过 GitHub 同步到板端，
 未启动此运动命令。可先执行 `--check-vision` 检查当前视觉状态。
 
