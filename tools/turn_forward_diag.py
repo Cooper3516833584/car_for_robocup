@@ -34,9 +34,11 @@ MAX_FROM_START_M = 0.50
 
 
 def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
-        settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False):
+        settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False, turn_direction="left"):
     if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
         raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
+    if turn_direction not in {"left", "right"}:
+        raise ValueError("turn direction must be left or right")
     runtime.start()
     ready_until = clock() + 30.0
     origin = None
@@ -66,28 +68,30 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         runtime.drive.stop()
         runtime.record_event("turn_forward_diag_turn_skipped", pose=start)
     else:
-        target_yaw = normalize_angle_rad(start.yaw_rad + math.pi / 2.0)
+        stage = "%s_90deg" % turn_direction
+        sign = 1.0 if turn_direction == "left" else -1.0
+        target_yaw = normalize_angle_rad(start.yaw_rad + sign * math.pi / 2.0)
         runtime.motion.rotate_to(target_yaw)
-        runtime.record_event("turn_forward_diag_stage_start", stage="left_90deg", pose=start)
+        runtime.record_event("turn_forward_diag_stage_start", stage=stage, pose=start)
         deadline = clock() + TURN_TIMEOUT_S
         while clock() < deadline:
             if abort():
-                raise RuntimeError("operator aborted during left turn")
+                raise RuntimeError("operator aborted during %s turn" % turn_direction)
             step, sample = _checked_step(runtime, config, allow_pending=True)
             if sample is None:
-                raise RuntimeError("fused pose lost during left turn")
+                raise RuntimeError("fused pose lost during %s turn" % turn_direction)
             _check_step(previous, sample, start)
             previous = sample
             turn_samples.append(sample)
             if step.motion is not None and step.motion.state is MotionActionState.SUCCEEDED:
                 runtime.drive.stop()
-                runtime.record_event("turn_forward_diag_stage_done", stage="left_90deg", pose=sample)
+                runtime.record_event("turn_forward_diag_stage_done", stage=stage, pose=sample)
                 break
             if step.motion is not None and step.motion.state is not MotionActionState.RUNNING:
-                raise RuntimeError("left turn ended in %s" % step.motion.state.value)
+                raise RuntimeError("%s turn ended in %s" % (turn_direction, step.motion.state.value))
             sleep(PERIOD_S)
         else:
-            raise TimeoutError("left turn exceeded its bounded deadline")
+            raise TimeoutError("%s turn exceeded its bounded deadline" % turn_direction)
 
     # Match the production detour's stopped interval, while continuing sensor updates.
     hold_until = clock() + settle_after_turn_s
@@ -163,6 +167,8 @@ def main(argv=None) -> int:
                         help="bounded zero-output interval for transition A/B diagnostics (0.20..3.0 s)")
     parser.add_argument("--skip-turn", action="store_true",
                         help="straight-only baseline with identical forward control and limits")
+    parser.add_argument("--turn-direction", choices=("left", "right"), default="left",
+                        help="turn before forward motion; ignored with --skip-turn")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("this diagnostic must run on the car's Linux host")
@@ -195,7 +201,8 @@ def main(argv=None) -> int:
     result, error = None, None
     try:
         result = run(runtime, config, abort=lambda: aborted[0],
-                     settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn)
+                     settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn,
+                     turn_direction=args.turn_direction)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         runtime.mission.request_safe_stop(error)
@@ -204,6 +211,7 @@ def main(argv=None) -> int:
         logger.close()
     summary = {"valid": error is None, "error": error, "result": result,
                "parameters": {"skip_turn": args.skip_turn,
+                              "turn_direction": args.turn_direction,
                               "settle_after_turn_s": args.settle_after_turn_s},
                "dropped_events": logger.dropped_events, "log_write_error": logger.write_error}
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -25,7 +25,11 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
     def test_straight_only_baseline_never_commands_a_turn(self):
         self.exercise_handoff(1.0, skip_turn=True)
 
-    def exercise_handoff(self, settle_s, skip_turn=False):
+    def test_right_turn_comparison_resumes_forward_and_stops(self):
+        self.exercise_handoff(1.0, turn_direction="right")
+
+    def exercise_handoff(self, settle_s, skip_turn=False, turn_direction="left"):
+        turn_stage = "%s_90deg" % turn_direction
         now = [10.0]
         pose = [0.0, 0.0, 0.0]
         events = []
@@ -53,7 +57,7 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
             twist = runtime.drive.last_limited_twist
             if skip_turn:
                 self.assertAlmostEqual(twist.angular_z_rad_s, 0.0)
-            if events and events[-1][1].get("stage") == "left_90deg" and events[-1][0].endswith("done"):
+            if events and events[-1][1].get("stage") == turn_stage and events[-1][0].endswith("done"):
                 self.assertEqual(twist.linear_x_m_s, 0.0)
                 self.assertEqual(twist.angular_z_rad_s, 0.0)
             if twist.linear_x_m_s > 0:
@@ -66,24 +70,28 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
 
         result = run(runtime, config, abort=lambda: False,
                      clock=lambda: now[0], sleep=advance,
-                     settle_after_turn_s=settle_s, skip_turn=skip_turn)
+                     settle_after_turn_s=settle_s, skip_turn=skip_turn,
+                     turn_direction=turn_direction)
         self.assertTrue(forward_commands)
         self.assertGreater(result["straight_along_m"], 0.17)
         self.assertLessEqual(result["straight_along_m"], 0.20)
         self.assertLess(abs(result["straight_lateral_m"]), 0.005)
         self.assertEqual([data["stage"] for event, data in events
                           if event == "turn_forward_diag_stage_done"],
-                         (["forward_20cm"] if skip_turn else ["left_90deg", "forward_20cm"]))
+                         (["forward_20cm"] if skip_turn else [turn_stage, "forward_20cm"]))
         self.assertEqual(runtime.drive.last_limited_twist.linear_x_m_s, 0.0)
         self.assertEqual(runtime.drive.last_limited_twist.angular_z_rad_s, 0.0)
         turn_done = next(data["time_s"] for event, data in events
                          if (event == "turn_forward_diag_turn_skipped" if skip_turn else
-                             event.endswith("done") and data.get("stage") == "left_90deg"))
+                             event.endswith("done") and data.get("stage") == turn_stage))
         forward_start = next(data["time_s"] for event, data in events
                              if event.endswith("start") and data.get("stage") == "forward_20cm")
         self.assertAlmostEqual(forward_start-turn_done, settle_s)
         if skip_turn:
             self.assertEqual(result["turn_yaw_rad"], 0.0)
+        else:
+            turn_sign = 1.0 if turn_direction == "left" else -1.0
+            self.assertGreater(turn_sign * result["turn_yaw_rad"], math.radians(85))
 
 
 if __name__ == "__main__":
