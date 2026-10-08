@@ -34,7 +34,7 @@ MAX_FROM_START_M = 0.50
 
 
 def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
-        settle_after_turn_s=SETTLE_AFTER_TURN_S):
+        settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False):
     if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
         raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
     runtime.start()
@@ -59,30 +59,35 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         raise TimeoutError("fresh T265+SLAM pose did not stay stable for 5 seconds")
 
     start = sample
-    target_yaw = normalize_angle_rad(start.yaw_rad + math.pi / 2.0)
-    runtime.motion.rotate_to(target_yaw)
-    runtime.record_event("turn_forward_diag_stage_start", stage="left_90deg", pose=start)
-    deadline = clock() + TURN_TIMEOUT_S
     previous = start
     turn_samples = [start]
-    while clock() < deadline:
-        if abort():
-            raise RuntimeError("operator aborted during left turn")
-        step, sample = _checked_step(runtime, config, allow_pending=True)
-        if sample is None:
-            raise RuntimeError("fused pose lost during left turn")
-        _check_step(previous, sample, start)
-        previous = sample
-        turn_samples.append(sample)
-        if step.motion is not None and step.motion.state is MotionActionState.SUCCEEDED:
-            runtime.drive.stop()
-            runtime.record_event("turn_forward_diag_stage_done", stage="left_90deg", pose=sample)
-            break
-        if step.motion is not None and step.motion.state is not MotionActionState.RUNNING:
-            raise RuntimeError("left turn ended in %s" % step.motion.state.value)
-        sleep(PERIOD_S)
+    if skip_turn:
+        runtime.motion.stop()
+        runtime.drive.stop()
+        runtime.record_event("turn_forward_diag_turn_skipped", pose=start)
     else:
-        raise TimeoutError("left turn exceeded its bounded deadline")
+        target_yaw = normalize_angle_rad(start.yaw_rad + math.pi / 2.0)
+        runtime.motion.rotate_to(target_yaw)
+        runtime.record_event("turn_forward_diag_stage_start", stage="left_90deg", pose=start)
+        deadline = clock() + TURN_TIMEOUT_S
+        while clock() < deadline:
+            if abort():
+                raise RuntimeError("operator aborted during left turn")
+            step, sample = _checked_step(runtime, config, allow_pending=True)
+            if sample is None:
+                raise RuntimeError("fused pose lost during left turn")
+            _check_step(previous, sample, start)
+            previous = sample
+            turn_samples.append(sample)
+            if step.motion is not None and step.motion.state is MotionActionState.SUCCEEDED:
+                runtime.drive.stop()
+                runtime.record_event("turn_forward_diag_stage_done", stage="left_90deg", pose=sample)
+                break
+            if step.motion is not None and step.motion.state is not MotionActionState.RUNNING:
+                raise RuntimeError("left turn ended in %s" % step.motion.state.value)
+            sleep(PERIOD_S)
+        else:
+            raise TimeoutError("left turn exceeded its bounded deadline")
 
     # Match the production detour's stopped interval, while continuing sensor updates.
     hold_until = clock() + settle_after_turn_s
@@ -156,6 +161,8 @@ def main(argv=None) -> int:
     parser.add_argument("--confirm-estop-ready", action="store_true")
     parser.add_argument("--settle-after-turn-s", type=float, default=SETTLE_AFTER_TURN_S,
                         help="bounded zero-output interval for transition A/B diagnostics (0.20..3.0 s)")
+    parser.add_argument("--skip-turn", action="store_true",
+                        help="straight-only baseline with identical forward control and limits")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("this diagnostic must run on the car's Linux host")
@@ -188,7 +195,7 @@ def main(argv=None) -> int:
     result, error = None, None
     try:
         result = run(runtime, config, abort=lambda: aborted[0],
-                     settle_after_turn_s=args.settle_after_turn_s)
+                     settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         runtime.mission.request_safe_stop(error)
@@ -196,6 +203,8 @@ def main(argv=None) -> int:
         runtime.close()
         logger.close()
     summary = {"valid": error is None, "error": error, "result": result,
+               "parameters": {"skip_turn": args.skip_turn,
+                              "settle_after_turn_s": args.settle_after_turn_s},
                "dropped_events": logger.dropped_events, "log_write_error": logger.write_error}
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
