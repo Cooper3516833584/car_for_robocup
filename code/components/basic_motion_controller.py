@@ -22,6 +22,7 @@ SEGMENT_RECOVERY_MAX_SPEED_M_S = 0.10
 SEGMENT_STRONG_GAIN_MULTIPLIER = 2.0
 SEGMENT_MAX_CORRECTION_RAD = math.radians(35.0)
 REVERSE_DISTANCE_MAX_HEADING_DRIFT_RAD = math.radians(20.0)
+STRAIGHT_STARTUP_MAX_COUNTER_DRIFT_RAD = math.radians(2.0)
 # Stop-at-target actions must not command below the drivetrain's effective
 # minimum speed: the deceleration profile reaches zero at the target, and the
 # 2026-10-05 session measured that a reverse move stalls there (a 0.027 m/s
@@ -99,6 +100,7 @@ class _Action:
     started_at_s: float | None = None
     startup_yaw_bias_rad_s: float = 0.0
     startup_duration_s: float = 0.0
+    startup_finished: bool = False
 
 
 def _finite(value: float) -> float:
@@ -271,7 +273,11 @@ class BasicMotionController:
             command, diagnostics = self._step_drive_distance(pose, action)
             if (self._state is MotionActionState.RUNNING and action.startup_yaw_bias_rad_s != 0.0):
                 elapsed = max(0.0, now_s - action.started_at_s)
-                weight = max(0.0, 1.0 - elapsed / action.startup_duration_s)
+                drift = diagnostics.get("heading_drift_rad", 0.0)
+                if (action.startup_yaw_bias_rad_s * drift > 0.0
+                        and abs(drift) >= STRAIGHT_STARTUP_MAX_COUNTER_DRIFT_RAD):
+                    action.startup_finished = True
+                weight = 0.0 if action.startup_finished else max(0.0, 1.0 - elapsed / action.startup_duration_s)
                 bias = action.startup_yaw_bias_rad_s * weight
                 # Keep both targets forward: compensation must not introduce
                 # another wheel reversal while synchronizing the straight start.
@@ -280,7 +286,8 @@ class BasicMotionController:
                 if weight > 0.0:
                     command = Twist2D(command.linear_x_m_s,
                                       _clamp(command.angular_z_rad_s + bias, limit))
-                diagnostics.update(startup_yaw_bias_rad_s=bias, startup_elapsed_s=elapsed)
+                diagnostics.update(startup_yaw_bias_rad_s=bias, startup_elapsed_s=elapsed,
+                                   startup_finished=action.startup_finished)
         elif kind is MotionActionType.DRIVE_TO:
             command, diagnostics = self._step_drive_to(pose, action)
         else:

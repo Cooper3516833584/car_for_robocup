@@ -14,7 +14,7 @@ def summarize(directory):
         encoding="utf-8").splitlines()]
     summary = json.loads((directory / "action/summary.json").read_text(encoding="utf-8"))
     start = next((r for r in rows if r["type"] == "turn_forward_diag_stage_start"
-                  and r["stage"] == "forward_20cm"), None)
+                  and r["stage"].startswith("forward_")), None)
     result = {"directory": str(directory), "valid": summary["valid"],
               "error": summary["error"], "parameters": summary.get("parameters")}
     if start is None:
@@ -23,10 +23,13 @@ def summarize(directory):
     if not motion:
         return result
     reference = {r.get("pose_reference") for r in motion}
+    headings = [math.degrees(r["diagnostics"].get("heading_drift_rad", 0.0)) for r in motion]
+    peak = max(motion, key=lambda r: abs(r["diagnostics"].get("heading_drift_rad", 0.0)))
     result.update({
         "pose_reference": sorted(str(v) for v in reference),
-        "max_abs_heading_deg": max(abs(math.degrees(r["diagnostics"].get(
-            "heading_drift_rad", 0.0))) for r in motion),
+        "max_abs_heading_deg": max(abs(h) for h in headings),
+        "min_heading_deg": min(headings), "max_heading_deg": max(headings),
+        "peak_elapsed_s": peak["t"] - start["t"],
         "max_abs_cross_cm": max(abs(r["diagnostics"].get(
             "cross_track_error_m", 0.0)) * 100 for r in motion),
         "last_motion": motion[-1],

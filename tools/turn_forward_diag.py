@@ -35,11 +35,13 @@ MAX_FROM_START_M = 0.50
 
 def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False, turn_direction="left",
-        startup_bias_rad_s=0.0, startup_duration_s=0.0):
+        startup_bias_rad_s=0.0, startup_duration_s=0.0, distance_m=0.20):
     if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
         raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
     if turn_direction not in {"left", "right"}:
         raise ValueError("turn direction must be left or right")
+    if distance_m not in {0.20, 0.47}:
+        raise ValueError("diagnostic distance must be 0.20 or 0.47 metres")
     runtime.start()
     ready_until = clock() + 30.0
     origin = None
@@ -112,10 +114,11 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
     runtime.motion.stop()
     if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
         runtime.mission.on_payload_action_done()
-    runtime.record_event("turn_forward_diag_stage_start", stage="forward_20cm",
+    straight_stage = "forward_%dcm" % round(distance_m * 100)
+    runtime.record_event("turn_forward_diag_stage_start", stage=straight_stage,
                          pose=straight_start, heading_reference_rad=straight_start.yaw_rad)
     runtime.motion.drive_distance(
-        0.20,
+        distance_m,
         lateral_tolerance_m=config.navigation.position_tolerance_m,
         heading_yaw_rad=straight_start.yaw_rad,
         startup_yaw_bias_rad_s=(0.0 if skip_turn else
@@ -138,13 +141,13 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         straight_samples.append(sample)
         if step.motion is not None and step.motion.state is MotionActionState.SUCCEEDED:
             runtime.drive.stop()
-            runtime.record_event("turn_forward_diag_stage_done", stage="forward_20cm", pose=sample)
+            runtime.record_event("turn_forward_diag_stage_done", stage=straight_stage, pose=sample)
             break
         if step.motion is not None and step.motion.state is not MotionActionState.RUNNING:
             raise RuntimeError("forward pulse ended in %s" % step.motion.state.value)
         sleep(PERIOD_S)
     else:
-        raise TimeoutError("20 cm forward pulse exceeded its bounded deadline")
+        raise TimeoutError("%d cm forward pulse exceeded its bounded deadline" % round(distance_m * 100))
 
     dx, dy = sample.x_m-straight_start.x_m, sample.y_m-straight_start.y_m
     c, s = math.cos(straight_start.yaw_rad), math.sin(straight_start.yaw_rad)
@@ -179,6 +182,9 @@ def main(argv=None) -> int:
                         help="counter-turn startup bias magnitude (0..0.4 rad/s)")
     parser.add_argument("--startup-duration-s", type=float, default=0.0,
                         help="linearly fading startup bias interval (0..2 s)")
+    parser.add_argument("--distance-m", type=float, choices=(0.20, 0.47), default=0.20)
+    parser.add_argument("--position-tolerance-m", type=float, choices=(0.005, 0.03),
+                        help="along-track completion tolerance; lateral guard retains measured profile")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("this diagnostic must run on the car's Linux host")
@@ -213,6 +219,9 @@ def main(argv=None) -> int:
     output.mkdir(parents=True, exist_ok=False)
     logger = JsonlEventLogger(output / "events.jsonl")
     runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
+    if args.position_tolerance_m is not None:
+        runtime.motion.navigation = replace(runtime.motion.navigation,
+                                            position_tolerance_m=args.position_tolerance_m)
     aborted = [False]
     for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if sig is not None:
@@ -222,7 +231,7 @@ def main(argv=None) -> int:
         result = run(runtime, config, abort=lambda: aborted[0],
                      settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn,
                      turn_direction=args.turn_direction, startup_bias_rad_s=args.startup_bias_rad_s,
-                     startup_duration_s=args.startup_duration_s)
+                     startup_duration_s=args.startup_duration_s, distance_m=args.distance_m)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         runtime.mission.request_safe_stop(error)
@@ -234,6 +243,8 @@ def main(argv=None) -> int:
                               "path_yaw_gain": config.navigation.path_yaw_gain,
                               "startup_bias_rad_s": args.startup_bias_rad_s,
                               "startup_duration_s": args.startup_duration_s,
+                              "distance_m": args.distance_m,
+                              "position_tolerance_m": runtime.motion.navigation.position_tolerance_m,
                               "turn_direction": args.turn_direction,
                               "settle_after_turn_s": args.settle_after_turn_s},
                "dropped_events": logger.dropped_events, "log_write_error": logger.write_error}

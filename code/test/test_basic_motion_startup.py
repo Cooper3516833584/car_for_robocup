@@ -63,6 +63,16 @@ class StraightStartupTests(unittest.TestCase):
         self.assertGreaterEqual(v - half_track * w, -1e-12)
         self.assertGreaterEqual(v + half_track * w, -1e-12)
 
+    def test_counter_drift_ends_compensation_without_rearming(self):
+        self.start()
+        self.motion.step(Pose2D(0, 0, 0, 10), now_s=10)
+        output = self.motion.step(Pose2D(0, 0, math.radians(-3), 10.1), now_s=10.1)
+        self.assertTrue(output.diagnostics["startup_finished"])
+        self.assertEqual(output.diagnostics["startup_yaw_bias_rad_s"], 0.0)
+        self.assertGreater(output.command.angular_z_rad_s, 0.0)
+        recovered = self.motion.step(Pose2D(0, 0, 0, 10.2), now_s=10.2)
+        self.assertEqual(recovered.command.angular_z_rad_s, 0.0)
+
     def test_invalid_or_unbounded_bias_is_rejected_before_motion(self):
         for bias, duration in ((float("nan"), 1), (float("inf"), 1), (0.1, 0), (0.1, 2.01)):
             with self.subTest(bias=bias, duration=duration), self.assertRaises(ValueError):
