@@ -169,6 +169,8 @@ def main(argv=None) -> int:
                         help="straight-only baseline with identical forward control and limits")
     parser.add_argument("--turn-direction", choices=("left", "right"), default="left",
                         help="turn before forward motion; ignored with --skip-turn")
+    parser.add_argument("--path-yaw-gain", type=float,
+                        help="diagnostic-only straight feedback gain (0.5..8.0); retains turn gain")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("this diagnostic must run on the car's Linux host")
@@ -176,12 +178,17 @@ def main(argv=None) -> int:
         parser.error("motor, clear-area and physical-estop confirmations are required")
     if not math.isfinite(args.settle_after_turn_s) or not 0.20 <= args.settle_after_turn_s <= 3.0:
         parser.error("--settle-after-turn-s must be between 0.20 and 3.0 seconds")
+    if args.path_yaw_gain is not None and (
+            not math.isfinite(args.path_yaw_gain) or not 0.5 <= args.path_yaw_gain <= 8.0):
+        parser.error("--path-yaw-gain must be between 0.5 and 8.0")
     config_path, output = Path(args.config).resolve(), Path(args.output).resolve()
     if config_path == DEFAULT_V2_CONFIG.resolve():
         parser.error("example configuration is not a measured car profile")
     if output == ROOT or ROOT in output.parents or output.exists():
         parser.error("output must be a new directory outside the checkout")
     config = accepted_relative_slam_profile(load_v2_config(config_path))
+    if args.path_yaw_gain is not None:
+        config = replace(config, navigation=replace(config.navigation, path_yaw_gain=args.path_yaw_gain))
     if config.relay.enabled:
         parser.error("disable the payload relay for this drive test")
     limits = runtime_constraints(config, RuntimeMode.HARDWARE_MISSION)
@@ -211,6 +218,7 @@ def main(argv=None) -> int:
         logger.close()
     summary = {"valid": error is None, "error": error, "result": result,
                "parameters": {"skip_turn": args.skip_turn,
+                              "path_yaw_gain": config.navigation.path_yaw_gain,
                               "turn_direction": args.turn_direction,
                               "settle_after_turn_s": args.settle_after_turn_s},
                "dropped_events": logger.dropped_events, "log_write_error": logger.write_error}
