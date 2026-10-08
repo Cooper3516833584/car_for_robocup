@@ -33,7 +33,10 @@ SETTLE_AFTER_TURN_S = 0.20
 MAX_FROM_START_M = 0.50
 
 
-def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep):
+def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
+        settle_after_turn_s=SETTLE_AFTER_TURN_S):
+    if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
+        raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
     runtime.start()
     ready_until = clock() + 30.0
     origin = None
@@ -82,7 +85,7 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep):
         raise TimeoutError("left turn exceeded its bounded deadline")
 
     # Match the production detour's stopped interval, while continuing sensor updates.
-    hold_until = clock() + SETTLE_AFTER_TURN_S
+    hold_until = clock() + settle_after_turn_s
     while clock() < hold_until:
         if abort():
             raise RuntimeError("operator aborted while settling after turn")
@@ -151,11 +154,15 @@ def main(argv=None) -> int:
     parser.add_argument("--confirm-motor-test", action="store_true")
     parser.add_argument("--confirm-area-clear", action="store_true")
     parser.add_argument("--confirm-estop-ready", action="store_true")
+    parser.add_argument("--settle-after-turn-s", type=float, default=SETTLE_AFTER_TURN_S,
+                        help="bounded zero-output interval for transition A/B diagnostics (0.20..3.0 s)")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("this diagnostic must run on the car's Linux host")
     if not (args.confirm_motor_test and args.confirm_area_clear and args.confirm_estop_ready):
         parser.error("motor, clear-area and physical-estop confirmations are required")
+    if not math.isfinite(args.settle_after_turn_s) or not 0.20 <= args.settle_after_turn_s <= 3.0:
+        parser.error("--settle-after-turn-s must be between 0.20 and 3.0 seconds")
     config_path, output = Path(args.config).resolve(), Path(args.output).resolve()
     if config_path == DEFAULT_V2_CONFIG.resolve():
         parser.error("example configuration is not a measured car profile")
@@ -180,7 +187,8 @@ def main(argv=None) -> int:
             signal.signal(sig, lambda *_: aborted.__setitem__(0, True))
     result, error = None, None
     try:
-        result = run(runtime, config, abort=lambda: aborted[0])
+        result = run(runtime, config, abort=lambda: aborted[0],
+                     settle_after_turn_s=args.settle_after_turn_s)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         runtime.mission.request_safe_stop(error)

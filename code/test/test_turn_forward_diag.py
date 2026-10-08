@@ -17,6 +17,12 @@ from tools.turn_forward_diag import run
 
 class TurnForwardDiagnosticTests(unittest.TestCase):
     def test_completed_turn_resumes_mission_and_actually_drives_forward(self):
+        self.exercise_handoff(0.20)
+
+    def test_configurable_hold_keeps_drive_stopped_and_sensors_live(self):
+        self.exercise_handoff(1.0)
+
+    def exercise_handoff(self, settle_s):
         now = [10.0]
         pose = [0.0, 0.0, 0.0]
         events = []
@@ -31,7 +37,7 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
             ("t265", "slam", "fused"), 0.0, 0.0, None, None, True,
             anchor_initialized=True, t265_confidence=1.0,
         )
-        runtime.record_event = lambda event, **data: events.append((event, data))
+        runtime.record_event = lambda event, **data: events.append((event, {**data, "time_s": now[0]}))
         start_runtime = runtime.start
 
         def start_without_default_dry_run_goal():
@@ -42,6 +48,9 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
 
         def advance(dt):
             twist = runtime.drive.last_limited_twist
+            if events and events[-1][1].get("stage") == "left_90deg" and events[-1][0].endswith("done"):
+                self.assertEqual(twist.linear_x_m_s, 0.0)
+                self.assertEqual(twist.angular_z_rad_s, 0.0)
             if twist.linear_x_m_s > 0:
                 forward_commands.append(twist.linear_x_m_s)
             yaw = pose[2] + twist.angular_z_rad_s * dt / 2
@@ -51,7 +60,8 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
             now[0] += dt
 
         result = run(runtime, config, abort=lambda: False,
-                     clock=lambda: now[0], sleep=advance)
+                     clock=lambda: now[0], sleep=advance,
+                     settle_after_turn_s=settle_s)
         self.assertTrue(forward_commands)
         self.assertGreater(result["straight_along_m"], 0.17)
         self.assertLessEqual(result["straight_along_m"], 0.20)
@@ -61,6 +71,11 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
                          ["left_90deg", "forward_20cm"])
         self.assertEqual(runtime.drive.last_limited_twist.linear_x_m_s, 0.0)
         self.assertEqual(runtime.drive.last_limited_twist.angular_z_rad_s, 0.0)
+        turn_done = next(data["time_s"] for event, data in events
+                         if event.endswith("done") and data.get("stage") == "left_90deg")
+        forward_start = next(data["time_s"] for event, data in events
+                             if event.endswith("start") and data.get("stage") == "forward_20cm")
+        self.assertAlmostEqual(forward_start-turn_done, settle_s)
 
 
 if __name__ == "__main__":
