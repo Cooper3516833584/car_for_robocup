@@ -31,7 +31,11 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
     def test_47cm_comparison_keeps_same_bounded_sequence(self):
         self.exercise_handoff(1.0, distance_m=0.47)
 
-    def exercise_handoff(self, settle_s, skip_turn=False, turn_direction="left", distance_m=0.20):
+    def test_turn_only_speed_cap_restores_forward_limits(self):
+        self.exercise_handoff(1.0, turn_max_angular_speed_rad_s=0.40)
+
+    def exercise_handoff(self, settle_s, skip_turn=False, turn_direction="left", distance_m=0.20,
+                         turn_max_angular_speed_rad_s=None):
         turn_stage = "%s_90deg" % turn_direction
         straight_stage = "forward_%dcm" % round(distance_m * 100)
         now = [10.0]
@@ -40,6 +44,7 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
         forward_commands = []
         config = load_runtime_config()
         runtime = build_runtime(config, RuntimeMode.DRY_RUN, clock=lambda: now[0])
+        original_motion_drive = runtime.motion.drive
         self.addCleanup(runtime.close)
         runtime._consume_t265 = lambda *_a, **_k: None
         runtime._consume_d500 = lambda *_a, **_k: None
@@ -59,6 +64,8 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
 
         def advance(dt):
             twist = runtime.drive.last_limited_twist
+            if turn_max_angular_speed_rad_s is not None and not forward_commands:
+                self.assertLessEqual(abs(twist.angular_z_rad_s), turn_max_angular_speed_rad_s + 1e-9)
             if skip_turn:
                 self.assertAlmostEqual(twist.angular_z_rad_s, 0.0)
             if events and events[-1][1].get("stage") == turn_stage and events[-1][0].endswith("done"):
@@ -75,7 +82,9 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
         result = run(runtime, config, abort=lambda: False,
                      clock=lambda: now[0], sleep=advance,
                      settle_after_turn_s=settle_s, skip_turn=skip_turn,
-                     turn_direction=turn_direction, distance_m=distance_m)
+                     turn_direction=turn_direction, distance_m=distance_m,
+                     turn_max_angular_speed_rad_s=turn_max_angular_speed_rad_s)
+        self.assertIs(runtime.motion.drive, original_motion_drive)
         self.assertTrue(forward_commands)
         self.assertGreater(result["straight_along_m"], distance_m-0.03)
         self.assertLessEqual(result["straight_along_m"], distance_m)

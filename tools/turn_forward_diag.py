@@ -35,13 +35,18 @@ MAX_FROM_START_M = 0.50
 
 def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False, turn_direction="left",
-        startup_bias_rad_s=0.0, startup_duration_s=0.0, distance_m=0.20):
+        startup_bias_rad_s=0.0, startup_duration_s=0.0, distance_m=0.20,
+        turn_max_angular_speed_rad_s=None):
     if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
         raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
     if turn_direction not in {"left", "right"}:
         raise ValueError("turn direction must be left or right")
     if distance_m not in {0.20, 0.47}:
         raise ValueError("diagnostic distance must be 0.20 or 0.47 metres")
+    if (turn_max_angular_speed_rad_s is not None
+            and (not math.isfinite(turn_max_angular_speed_rad_s)
+                 or not 0.20 <= turn_max_angular_speed_rad_s <= runtime.motion.drive.max_angular_speed_rad_s)):
+        raise ValueError("turn speed cap must be between 0.20 rad/s and the existing limit")
     runtime.start()
     ready_until = clock() + 30.0
     origin = None
@@ -74,27 +79,35 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         stage = "%s_90deg" % turn_direction
         sign = 1.0 if turn_direction == "left" else -1.0
         target_yaw = normalize_angle_rad(start.yaw_rad + sign * math.pi / 2.0)
-        runtime.motion.rotate_to(target_yaw)
-        runtime.record_event("turn_forward_diag_stage_start", stage=stage, pose=start)
-        deadline = clock() + TURN_TIMEOUT_S
-        while clock() < deadline:
-            if abort():
-                raise RuntimeError("operator aborted during %s turn" % turn_direction)
-            step, sample = _checked_step(runtime, config, allow_pending=True)
-            if sample is None:
-                raise RuntimeError("fused pose lost during %s turn" % turn_direction)
-            _check_step(previous, sample, start)
-            previous = sample
-            turn_samples.append(sample)
-            if step.motion is not None and step.motion.state is MotionActionState.SUCCEEDED:
-                runtime.drive.stop()
-                runtime.record_event("turn_forward_diag_stage_done", stage=stage, pose=sample)
-                break
-            if step.motion is not None and step.motion.state is not MotionActionState.RUNNING:
-                raise RuntimeError("%s turn ended in %s" % (turn_direction, step.motion.state.value))
-            sleep(PERIOD_S)
-        else:
-            raise TimeoutError("%s turn exceeded its bounded deadline" % turn_direction)
+        original_motion_drive = runtime.motion.drive
+        if turn_max_angular_speed_rad_s is not None:
+            runtime.motion.drive = replace(original_motion_drive,
+                                            max_angular_speed_rad_s=turn_max_angular_speed_rad_s)
+        try:
+            runtime.motion.rotate_to(target_yaw)
+            runtime.record_event("turn_forward_diag_stage_start", stage=stage, pose=start,
+                                 max_angular_speed_rad_s=runtime.motion.drive.max_angular_speed_rad_s)
+            deadline = clock() + TURN_TIMEOUT_S
+            while clock() < deadline:
+                if abort():
+                    raise RuntimeError("operator aborted during %s turn" % turn_direction)
+                step, sample = _checked_step(runtime, config, allow_pending=True)
+                if sample is None:
+                    raise RuntimeError("fused pose lost during %s turn" % turn_direction)
+                _check_step(previous, sample, start)
+                previous = sample
+                turn_samples.append(sample)
+                if step.motion is not None and step.motion.state is MotionActionState.SUCCEEDED:
+                    runtime.drive.stop()
+                    runtime.record_event("turn_forward_diag_stage_done", stage=stage, pose=sample)
+                    break
+                if step.motion is not None and step.motion.state is not MotionActionState.RUNNING:
+                    raise RuntimeError("%s turn ended in %s" % (turn_direction, step.motion.state.value))
+                sleep(PERIOD_S)
+            else:
+                raise TimeoutError("%s turn exceeded its bounded deadline" % turn_direction)
+        finally:
+            runtime.motion.drive = original_motion_drive
 
     # Match the production detour's stopped interval, while continuing sensor updates.
     hold_until = clock() + settle_after_turn_s
@@ -178,6 +191,8 @@ def main(argv=None) -> int:
                         help="turn before forward motion; ignored with --skip-turn")
     parser.add_argument("--path-yaw-gain", type=float,
                         help="diagnostic-only straight feedback gain (0.5..8.0); retains turn gain")
+    parser.add_argument("--turn-max-angular-speed-rad-s", type=float,
+                        help="lower the turn-only command cap (0.20 rad/s..existing limit)")
     parser.add_argument("--startup-bias-rad-s", type=float, default=0.0,
                         help="counter-turn startup bias magnitude (0..0.4 rad/s)")
     parser.add_argument("--startup-duration-s", type=float, default=0.0,
@@ -231,7 +246,8 @@ def main(argv=None) -> int:
         result = run(runtime, config, abort=lambda: aborted[0],
                      settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn,
                      turn_direction=args.turn_direction, startup_bias_rad_s=args.startup_bias_rad_s,
-                     startup_duration_s=args.startup_duration_s, distance_m=args.distance_m)
+                     startup_duration_s=args.startup_duration_s, distance_m=args.distance_m,
+                     turn_max_angular_speed_rad_s=args.turn_max_angular_speed_rad_s)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         runtime.mission.request_safe_stop(error)
@@ -246,6 +262,7 @@ def main(argv=None) -> int:
                               "distance_m": args.distance_m,
                               "position_tolerance_m": runtime.motion.navigation.position_tolerance_m,
                               "turn_direction": args.turn_direction,
+                              "turn_max_angular_speed_rad_s": args.turn_max_angular_speed_rad_s,
                               "settle_after_turn_s": args.settle_after_turn_s},
                "dropped_events": logger.dropped_events, "log_write_error": logger.write_error}
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
