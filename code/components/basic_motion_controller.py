@@ -96,6 +96,9 @@ class _Action:
     recovery_started: bool = False
     lateral_tolerance_m: float | None = None
     heading_reference_rad: float | None = None
+    started_at_s: float | None = None
+    startup_yaw_bias_rad_s: float = 0.0
+    startup_duration_s: float = 0.0
 
 
 def _finite(value: float) -> float:
@@ -120,10 +123,14 @@ def _clamp(value: float, limit: float) -> float:
 class BasicMotionController:
     """Turn one task action into a Twist2D on each runtime cycle."""
 
-    def __init__(self, navigator: DifferentialNavigator, navigation: NavigationConfig, drive: DifferentialDriveConfig) -> None:
+    def __init__(self, navigator: DifferentialNavigator, navigation: NavigationConfig, drive: DifferentialDriveConfig,
+                 *, track_width_m: float | None = None) -> None:
         self.navigator = navigator
         self.navigation = navigation
         self.drive = drive
+        self.track_width_m = None if track_width_m is None else _finite(track_width_m)
+        if self.track_width_m is not None and self.track_width_m <= 0.0:
+            raise ValueError("physical track width must be positive")
         self._active: _Action | None = None
         self._state = MotionActionState.IDLE
         self._phase: MotionPhase | None = None
@@ -159,7 +166,8 @@ class BasicMotionController:
             self.navigator.set_goal(NavigationGoal(*args))
 
     def drive_distance(self, distance_m: float, *, lateral_tolerance_m: float | None = None,
-                       heading_yaw_rad: float | None = None) -> None:
+                       heading_yaw_rad: float | None = None,
+                       startup_yaw_bias_rad_s: float = 0.0, startup_duration_s: float = 0.0) -> None:
         """Drive a signed distance; an explicit lateral bound selects straight travel.
 
         Straight travel stops on along-track distance and never pivots toward an
@@ -169,13 +177,21 @@ class BasicMotionController:
         distance = _finite(distance_m)
         lateral = None if lateral_tolerance_m is None else _finite(lateral_tolerance_m)
         heading = None if heading_yaw_rad is None else normalize_angle_rad(_finite(heading_yaw_rad))
+        bias, duration = _finite(startup_yaw_bias_rad_s), _finite(startup_duration_s)
         if lateral is not None and lateral <= 0:
             raise ValueError("lateral tolerance must be positive")
         if heading is not None and lateral is None:
             raise ValueError("a saved distance heading requires an explicit lateral tolerance")
+        if not 0.0 <= duration <= 2.0 or abs(bias) > self.drive.max_angular_speed_rad_s:
+            raise ValueError("startup compensation must fit the angular limit and 0..2 second window")
+        if bias != 0.0 and (duration <= 0.0 or distance <= 0.0 or heading is None or lateral is None
+                            or self.track_width_m is None):
+            raise ValueError("startup compensation requires a positive straight move with saved heading")
         self._begin(MotionActionType.DRIVE_DISTANCE, distance)
         self._active.lateral_tolerance_m = lateral
         self._active.heading_reference_rad = heading
+        self._active.startup_yaw_bias_rad_s = bias
+        self._active.startup_duration_s = duration
 
     def rotate(self, angle_rad: float) -> None:
         self._begin(MotionActionType.ROTATE_RELATIVE, _finite(angle_rad))
@@ -234,6 +250,7 @@ class BasicMotionController:
         if action.kind in {MotionActionType.NAVIGATE_TO, MotionActionType.NAVIGATE_TO_POSE}:
             return self._step_navigation(pose, now_s, pose_state)
         if not action.initialized:
+            action.started_at_s = now_s
             action.start = (pose.x_m, pose.y_m)
             action.start_yaw = pose.yaw_rad
             if action.heading_reference_rad is not None:
@@ -252,6 +269,18 @@ class BasicMotionController:
             command, diagnostics = self._turn_to(pose, math.atan2(dy, dx))
         elif kind is MotionActionType.DRIVE_DISTANCE:
             command, diagnostics = self._step_drive_distance(pose, action)
+            if (self._state is MotionActionState.RUNNING and action.startup_yaw_bias_rad_s != 0.0):
+                elapsed = max(0.0, now_s - action.started_at_s)
+                weight = max(0.0, 1.0 - elapsed / action.startup_duration_s)
+                bias = action.startup_yaw_bias_rad_s * weight
+                # Keep both targets forward: compensation must not introduce
+                # another wheel reversal while synchronizing the straight start.
+                limit = min(self.drive.max_angular_speed_rad_s,
+                            2.0 * abs(command.linear_x_m_s) / self.track_width_m)
+                if weight > 0.0:
+                    command = Twist2D(command.linear_x_m_s,
+                                      _clamp(command.angular_z_rad_s + bias, limit))
+                diagnostics.update(startup_yaw_bias_rad_s=bias, startup_elapsed_s=elapsed)
         elif kind is MotionActionType.DRIVE_TO:
             command, diagnostics = self._step_drive_to(pose, action)
         else:

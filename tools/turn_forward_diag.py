@@ -34,7 +34,8 @@ MAX_FROM_START_M = 0.50
 
 
 def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
-        settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False, turn_direction="left"):
+        settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False, turn_direction="left",
+        startup_bias_rad_s=0.0, startup_duration_s=0.0):
     if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
         raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
     if turn_direction not in {"left", "right"}:
@@ -117,6 +118,9 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         0.20,
         lateral_tolerance_m=config.navigation.position_tolerance_m,
         heading_yaw_rad=straight_start.yaw_rad,
+        startup_yaw_bias_rad_s=(0.0 if skip_turn else
+                               -startup_bias_rad_s if turn_direction == "left" else startup_bias_rad_s),
+        startup_duration_s=startup_duration_s,
     )
     deadline = clock() + STRAIGHT_TIMEOUT_S
     previous = straight_start
@@ -171,6 +175,10 @@ def main(argv=None) -> int:
                         help="turn before forward motion; ignored with --skip-turn")
     parser.add_argument("--path-yaw-gain", type=float,
                         help="diagnostic-only straight feedback gain (0.5..8.0); retains turn gain")
+    parser.add_argument("--startup-bias-rad-s", type=float, default=0.0,
+                        help="counter-turn startup bias magnitude (0..0.4 rad/s)")
+    parser.add_argument("--startup-duration-s", type=float, default=0.0,
+                        help="linearly fading startup bias interval (0..2 s)")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("this diagnostic must run on the car's Linux host")
@@ -181,6 +189,10 @@ def main(argv=None) -> int:
     if args.path_yaw_gain is not None and (
             not math.isfinite(args.path_yaw_gain) or not 0.5 <= args.path_yaw_gain <= 8.0):
         parser.error("--path-yaw-gain must be between 0.5 and 8.0")
+    if (not math.isfinite(args.startup_bias_rad_s) or not 0.0 <= args.startup_bias_rad_s <= 0.4
+            or not math.isfinite(args.startup_duration_s) or not 0.0 <= args.startup_duration_s <= 2.0
+            or (args.startup_bias_rad_s > 0.0 and args.startup_duration_s <= 0.0)):
+        parser.error("startup bias requires a magnitude in 0..0.4 and positive duration up to 2 seconds")
     config_path, output = Path(args.config).resolve(), Path(args.output).resolve()
     if config_path == DEFAULT_V2_CONFIG.resolve():
         parser.error("example configuration is not a measured car profile")
@@ -209,7 +221,8 @@ def main(argv=None) -> int:
     try:
         result = run(runtime, config, abort=lambda: aborted[0],
                      settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn,
-                     turn_direction=args.turn_direction)
+                     turn_direction=args.turn_direction, startup_bias_rad_s=args.startup_bias_rad_s,
+                     startup_duration_s=args.startup_duration_s)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
         runtime.mission.request_safe_stop(error)
@@ -219,6 +232,8 @@ def main(argv=None) -> int:
     summary = {"valid": error is None, "error": error, "result": result,
                "parameters": {"skip_turn": args.skip_turn,
                               "path_yaw_gain": config.navigation.path_yaw_gain,
+                              "startup_bias_rad_s": args.startup_bias_rad_s,
+                              "startup_duration_s": args.startup_duration_s,
                               "turn_direction": args.turn_direction,
                               "settle_after_turn_s": args.settle_after_turn_s},
                "dropped_events": logger.dropped_events, "log_write_error": logger.write_error}

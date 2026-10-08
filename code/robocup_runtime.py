@@ -269,7 +269,8 @@ class RobocupRuntime:
         self.radar_adapter = radar_adapter
         self.fusion = fusion
         self.navigator = navigator
-        self.motion = motion or BasicMotionController(navigator, config.navigation, config.drive)
+        self.motion = motion or BasicMotionController(navigator, config.navigation, config.drive,
+                                                      track_width_m=config.geometry.drive_track_width_m)
         self._distance_control_T_t265 = None
         self._distance_pose_mode = None
         self.mission = RobocupMission(navigator, mission_profile, self.motion)

@@ -187,4 +187,5 @@ def build_basic_motion_controller(config: DifferentialRobotConfig, navigator):
 
     from components.basic_motion_controller import BasicMotionController
 
-    return BasicMotionController(navigator, config.navigation, config.drive)
+    return BasicMotionController(navigator, config.navigation, config.drive,
+                                 track_width_m=config.geometry.drive_track_width_m)
