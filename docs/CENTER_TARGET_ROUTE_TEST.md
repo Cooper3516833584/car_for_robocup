@@ -95,3 +95,50 @@ STOP或信号可中断鸣叫，异常会关闭蜂鸣器和全部继电器。
 
 紧急停止可在 SSH 中执行 `touch <本次日志目录>/STOP`；运行输出、事件和
 `result.txt` 可用于核对动作与报警。执行测试已由用户明确授权。
+
+## 临时黄色投放演示（2026-10-08）
+
+为拍摄演示显式使用 `--demo-no-position-checks`。该选项独立执行整段
+280cm→左90°→420cm→左90°→250cm路线，不启动T265、D500、SLAM或位置融合，
+不因横向偏差、航向偏差、位置跳变或定位丢失中断。运动量由驱动限幅后的
+速度指令及时间估算，包括指令加速阶段；不是实测距离或角度，不主动纠偏。
+不能用演示完成结果判断定位精度或宣布起步滞后修复。未加此选项时仍运行
+原定位控制与保护流程；无需修改配置即可切回。
+
+演示只处理YOLO权重中类别名为 `yellow` 的目标，按权重的实际类别映射查找，
+不写死数字类别ID。红、蓝、绿不会引起减速或投放。缺少yellow类别、摄像头
+错误或结果过期会停车。黄色目标出现在画面中开始减速，进入水平中间10%
+后（不限制上下位置）前进7cm、停车左90°、前进47cm、断电投放、后退47cm、
+右90°，然后继续剩余路线；额外7cm计入本段巡线路程。转后停顿1秒。
+持续出现的同一目标不会连续触发，返回后需要三个连续无遮挡新帧再重新武装。
+
+演示模式默认真实继电器投放，使用已确认的by-path串口和4路板；
+默认仅吸持中间电磁铁slot2/CH3，投放时断电，释放后不重新吸合。
+其他通道保持关闭；`--payload-slot 1/2/3`仍分别选择右前CH2/中间CH3/左前CH4。
+若需只看动作而不操作真实继电器，可显式加 `--release-mode simulate`。
+舵机先转90°并保持；默认巡航15cm/s，看到黄色时8cm/s，转弯请求0.4rad/s，
+全部指令仍经过原驱动限速、加速度、串口看门狗和独占硬件锁。
+`--demo-speed-cm-s`及`--demo-turn-rad-s`可以调整估算速度，但不能超过配置上限。
+
+无需启动SLAM，使用已有视觉环境启动。日志目录每次必须新建：
+
+```bash
+cd /home/radxa/car
+PYTHONPATH=/home/radxa/car/code /home/radxa/robocup_ros/vision_env/bin/python \
+  tools/run_yellow_payload_demo.py \
+  --confirm-motor-test --servo-angle-deg 90 --payload-slot 2 \
+  --log-dir /home/radxa/car_test_logs/yellow-payload-demo-YYYYMMDD-HHMMSS
+```
+
+仅检查黄色识别、不开电机/舵机/继电器：
+
+```bash
+PYTHONPATH=/home/radxa/car/code /home/radxa/robocup_ros/vision_env/bin/python \
+  tools/run_yellow_payload_demo.py --check-vision
+```
+
+演示仍保留STOP文件、SIGINT/SIGTERM、摄像头新鲜度、继电器状态确认和
+默认300秒总时限（可配置1–600秒）。完成、异常或取消都先停车并关闭全部继电器。
+本模式不负责录制视频，供外部拍摄；本次只修改并部署代码，没有自动启动实车。
+`tools/run_yellow_payload_demo.py`是同一路线入口的薄包装，自动选择演示选项；
+也可直接给原入口 `tools/run_center_target_route.py` 加 `--demo-no-position-checks`。

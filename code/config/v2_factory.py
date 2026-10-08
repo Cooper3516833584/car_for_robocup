@@ -81,6 +81,23 @@ def build_t265_source(config: DifferentialRobotConfig, *, fake: bool = False, sa
     return RealSenseT265PoseSource(config.t265.serial)
 
 
+def build_payload_demo_session(config: DifferentialRobotConfig, *, event_logger=None,
+                               fake=False, clock=None):
+    """Explicit filming entry; validate static hardware settings, open no sensors."""
+    from .v2_runtime import RuntimeMode, validate_runtime_readiness
+    from payload_demo import PayloadDemoSession
+
+    errors = validate_runtime_readiness(config, RuntimeMode.HARDWARE_MISSION)
+    if errors and not fake:
+        raise ValueError("; ".join(errors))
+    if not config.drive.allow_in_place_rotation:
+        raise ValueError("payload demo requires verified in-place rotation")
+    kwargs = {} if clock is None else {"clock": clock}
+    return PayloadDemoSession(build_differential_drive(config, fake=fake, clock=clock),
+                              build_relay(config, fake=fake), event_logger=event_logger,
+                              verify_relay=config.relay.verify_writes, **kwargs)
+
+
 def configure_payload_relay(config: DifferentialRobotConfig, *, port: str | None = None):
     """Explicit CLI enablement and cleanup policy; never opens hardware."""
     relay = config.relay

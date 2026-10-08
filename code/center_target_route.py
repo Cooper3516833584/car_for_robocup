@@ -59,6 +59,18 @@ def horizontal_target(boxes, width, min_conf=0.5, *, center_width_ratio=0.1):
     return None
 
 
+def filter_target_boxes(boxes, names, class_name=None):
+    """Resolve by the weights' class names, never assume yellow's numeric ID."""
+    if class_name is None:
+        return boxes
+    mapping = names if isinstance(names, dict) else dict(enumerate(names))
+    ids = {int(index) for index, name in mapping.items() if name == class_name}
+    if not ids:
+        raise ValueError(f"YOLO weights have no class named {class_name!r}")
+    return [box for box in boxes if len(box) >= 6 and math.isfinite(float(box[5]))
+            and float(box[5]).is_integer() and int(box[5]) in ids]
+
+
 class EntryLatch:
     """One alarm per occupancy; re-arm after three consecutive clear frames."""
 
@@ -91,7 +103,7 @@ class YoloVision:
     """
 
     def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=IMGSZ, confidence=0.5,
-                 target_region="center", drop_center_width_ratio=0.1):
+                 target_region="center", drop_center_width_ratio=0.1, target_class_name=None):
         if target_region not in {"frame", "center"}:
             raise ValueError("target region must be frame or center")
         self.weights = Path(weights)
@@ -99,6 +111,7 @@ class YoloVision:
         self.imgsz = imgsz
         self.confidence = confidence
         self.target_region = target_region
+        self.target_class_name = target_class_name
         if not math.isfinite(drop_center_width_ratio) or not 0 < drop_center_width_ratio <= 1:
             raise ValueError("drop center width ratio must be in (0, 1]")
         self.drop_center_width_ratio = drop_center_width_ratio
@@ -158,6 +171,7 @@ class YoloVision:
                 if frames == 1 or frame_age > VISION_MAX_AGE_S:
                     continue
                 boxes = [] if result.boxes is None else result.boxes.data.cpu().tolist()
+                boxes = filter_target_boxes(boxes, result.names, self.target_class_name)
                 # Standard detect models expose xyxy, confidence, class in six columns.
                 target = visible_target(boxes, frame.shape[1], frame.shape[0], self.confidence,
                                         region=self.target_region)

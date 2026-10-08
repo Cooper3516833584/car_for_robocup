@@ -17,6 +17,17 @@ from tools.run_center_target_route import park_servo
 
 
 class CenterTargetTests(unittest.TestCase):
+    def test_yellow_only_resolves_model_names_and_ignores_other_colours(self):
+        boxes = [(290, 0, 350, 40, .9, i) for i in range(4)]
+        # Deliberately move yellow away from its current trained index.
+        names = {0: "red", 1: "yellow", 2: "blue", 3: "green"}
+        self.assertEqual(task.filter_target_boxes(boxes, names, "yellow"), [boxes[1]])
+        self.assertEqual(task.filter_target_boxes(boxes, list(names.values()), "yellow"), [boxes[1]])
+        self.assertEqual(task.filter_target_boxes([boxes[0], boxes[2]], names, "yellow"), [])
+        self.assertIs(task.filter_target_boxes(boxes, names), boxes)
+        with self.assertRaisesRegex(ValueError, "no class"):
+            task.filter_target_boxes([], {0: "red"}, "yellow")
+
     def test_all_classes_and_actual_frame_dimensions(self):
         for cls in range(4):
             box = (240, 160, 400, 320, 0.9, cls)
