@@ -124,6 +124,26 @@ class PayloadDemoTests(unittest.TestCase):
         self.assertFalse(self.session.drive.is_running)
         self.assert_stopped()
 
+    def test_startup_preserves_preheld_load_until_the_release_stage(self):
+        self.fixture()
+        self.session.relay.open()
+        self.session.relay.turn_on(3)
+        self.session.relay.close()  # Closing the port leaves the contact latched.
+        initial_commands = len(self.session.relay.commands)
+        release_command_index = []
+        original_record = self.record
+
+        def record(event, **data):
+            if event == "payload_release_start":
+                release_command_index.append(len(self.session.relay.commands))
+                self.assertTrue(self.session.relay.get_channel_state(3))
+            original_record(event, **data)
+
+        self.session.record_event = record
+        self.assertEqual(self.run_demo(), 1)
+        ch3_off = bytes.fromhex("A0 03 00 A3")
+        self.assertNotIn(ch3_off, self.session.relay.commands[initial_commands:release_command_index[0]])
+
     def test_filming_cli_defaults_to_real_middle_magnet_without_starting_regular_runtime(self):
         self.fixture()
         with tempfile.TemporaryDirectory() as tmp:

@@ -142,8 +142,12 @@ def run_payload_demo(session, vision, settings, *, abort=lambda: False,
         guard()
         if not relay.connected:
             relay.open()
-            if relay.all_off(verify=settings.verify_relay) is False:
-                raise RuntimeError("demo initial relay all_off was not confirmed")
+        # The operator may already have attached a load to the energized magnet.
+        # Keep that contact ON while disabling only unused channels.
+        selected = payload_channel(settings.payload_slot)
+        for channel in range(1, relay.channel_count + 1):
+            if channel != selected and relay.turn_off(channel, verify=settings.verify_relay) is False:
+                raise RuntimeError("demo unused relay deactivation was not confirmed")
         if not prepare_payload(relay, settings.payload_slot, verify=settings.verify_relay):
             raise RuntimeError("demo payload holding state was not confirmed")
         guard()
