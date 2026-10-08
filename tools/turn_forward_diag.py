@@ -94,6 +94,11 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep):
         sleep(min(PERIOD_S, max(0.0, hold_until-clock())))
 
     straight_start = sample
+    # A completed motion leaves the mission in TARGET_OPERATION. Resume it
+    # before submitting the next action, as the production payload detour does.
+    runtime.motion.stop()
+    if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
+        runtime.mission.on_payload_action_done()
     runtime.record_event("turn_forward_diag_stage_start", stage="forward_20cm",
                          pose=straight_start, heading_reference_rad=straight_start.yaw_rad)
     runtime.motion.drive_distance(
