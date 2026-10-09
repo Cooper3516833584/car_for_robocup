@@ -22,13 +22,12 @@ from components.sound_light_alarm import SoundLightAlarm
 from components.relay_lcus import DEFAULT_RELAY_PORT, FakeLCUSRelay
 from components.payload_task import prepare_payload
 from config.relative_slam_profile import accepted_relative_slam_profile
-from config.v2_factory import build_payload_demo_session, build_servo, configure_payload_relay
+from config.v2_factory import build_servo, configure_payload_relay
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import build_runtime
 from hal.pwm import PWMBackendError
 from payload_detour import DetourSettings
-from payload_demo import run_payload_demo
 
 
 def payload_config(config, *, action, release_mode="simulate", relay_port=None, relay_channels=None):
@@ -119,10 +118,7 @@ def main(argv=None):
     parser.add_argument("--release-hold-s", type=float, default=0.5)
     parser.add_argument("--release-mode", choices=("simulate", "relay"),
                         help="default: simulate; explicit filming mode defaults to real relay release")
-    parser.add_argument("--demo-no-position-checks", action="store_true",
-                        help="temporary filming mode: command/time travel without T265/SLAM position checks")
-    parser.add_argument("--demo-speed-cm-s", type=float, default=15)
-    parser.add_argument("--demo-turn-rad-s", type=float, default=0.4)
+    parser.add_argument("--target-class-name", default=None)
     parser.add_argument("--target-speed-cm-s", type=float, default=8,
                         help="patrol speed cap while a target is visible; normal acceleration limits apply")
     parser.add_argument("--drop-center-width-ratio", type=float, default=0.1,
@@ -140,12 +136,8 @@ def main(argv=None):
                         help="drop mode: hold selected magnet, alarm for this duration, then start (0=disabled)")
     parser.add_argument("--confirm-motor-test", action="store_true")
     args = parser.parse_args(argv)
-    if args.demo_no_position_checks and args.target_action != "drop":
-        parser.error("--demo-no-position-checks requires --target-action drop")
-    args.payload_slot = args.payload_slot or (2 if args.demo_no_position_checks else 1)
-    args.release_mode = args.release_mode or ("relay" if args.demo_no_position_checks else "simulate")
-    if args.demo_no_position_checks and args.release_mode == "relay" and args.relay_port is None:
-        args.relay_port = DEFAULT_RELAY_PORT
+    args.payload_slot = args.payload_slot or 1
+    args.release_mode = args.release_mode or "simulate"
     if not math.isfinite(args.startup_alarm_seconds) or not 0 <= args.startup_alarm_seconds <= 60:
         parser.error("--startup-alarm-seconds must be between 0 and 60")
     if args.startup_alarm_seconds and args.target_action != "drop":
@@ -154,7 +146,7 @@ def main(argv=None):
     if args.check_vision:
         vision = YoloVision(args.weights, args.camera, target_region=region,
                             drop_center_width_ratio=args.drop_center_width_ratio,
-                            target_class_name="yellow" if args.demo_no_position_checks else None)
+                            target_class_name=args.target_class_name)
         try:
             vision.start()
             deadline = time.monotonic() + 60
@@ -187,11 +179,6 @@ def main(argv=None):
                                  verify_relay=config.relay.verify_writes,
                                  patrol_slow_speed_m_s=args.target_speed_cm_s / 100)
                   if args.target_action == "drop" else None)
-        if args.demo_no_position_checks:
-            if not math.isfinite(args.demo_speed_cm_s) or not 0 < args.demo_speed_cm_s / 100 <= config.drive.max_linear_speed_m_s:
-                raise ValueError("demo speed must be positive and within the configured drive limit")
-            if not math.isfinite(args.demo_turn_rad_s) or not 0 < args.demo_turn_rad_s <= config.drive.max_angular_speed_rad_s:
-                raise ValueError("demo turn speed must be positive and within the configured drive limit")
     except ValueError as exc:
         parser.error(str(exc))
     servo = build_servo(config)
@@ -210,12 +197,10 @@ def main(argv=None):
     runtime = None
     vision = YoloVision(args.weights, args.camera, target_region=region,
                         drop_center_width_ratio=args.drop_center_width_ratio,
-                        target_class_name="yellow" if args.demo_no_position_checks else None)
+                        target_class_name=args.target_class_name)
     alarm = SoundLightAlarm() if args.target_action == "beep" or args.startup_alarm_seconds else None
     try:
-        runtime = (build_payload_demo_session(config, event_logger=logger)
-                   if args.demo_no_position_checks else
-                   build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger))
+        runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
         if detour is not None and args.release_mode == "simulate":
             runtime.relay = FakeLCUSRelay(4)
         if detour is not None:
@@ -235,16 +220,9 @@ def main(argv=None):
         if alarm is not None:
             alarm.initialize(active=False)
         vision.start()
-        if args.demo_no_position_checks:
-            print("[demo] YELLOW ONLY; POSITION CHECKS OFF; travel is estimated from command/time", flush=True)
-            run_payload_demo(runtime, vision, detour,
-                             abort=lambda: aborted.is_set() or stop_file.exists(),
-                             max_seconds=args.max_seconds, speed_m_s=args.demo_speed_cm_s / 100,
-                             turn_rad_s=args.demo_turn_rad_s)
-        else:
-            run_route(runtime, vision, alarm,
-                      abort=lambda: aborted.is_set() or stop_file.exists(),
-                      max_seconds=args.max_seconds, detour=detour)
+        run_route(runtime, vision, alarm,
+                  abort=lambda: aborted.is_set() or stop_file.exists(),
+                  max_seconds=args.max_seconds, detour=detour)
         (args.log_dir / "result.txt").write_text("FINISHED\n")
         return 0
     except BaseException as exc:
