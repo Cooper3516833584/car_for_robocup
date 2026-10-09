@@ -107,6 +107,18 @@ class DifferentialNavigationTests(unittest.TestCase):
             normal.command.linear_x_m_s * self.config.navigation.degraded_speed_scale,
         )
 
+    def test_alignment_and_tracking_respect_angular_and_wheel_limits(self):
+        navigator=self.make_navigator(drive_changes={"max_angular_speed_rad_s":.12,"max_wheel_speed_m_s":.05})
+        p=Pose2D(0,0,3.,1.)
+        out=navigator.controller.compute_line(p,(0,0),(1,0))
+        self.assertLessEqual(abs(out.command.angular_z_rad_s),.12)
+        p=Pose2D(.1,.1,0,1.)
+        out=navigator.controller.compute_line(p,(0,0),(1,0))
+        v,w=out.command.linear_x_m_s,out.command.angular_z_rad_s
+        for speed in (v-w*.198/2,v+w*.198/2):
+            self.assertGreaterEqual(speed,0)
+            self.assertLessEqual(speed,.05+1e-9)
+
     def test_factory_builds_navigator_without_hardware(self) -> None:
         self.assertIsInstance(build_differential_navigator(self.config), DifferentialNavigator)
 

@@ -151,13 +151,6 @@ class DifferentialPathController:
                 info["reason"] = status
             return ControllerOutput(Twist2D(v, omega), state, info)
 
-        # Stop based on un-clamped physical along-track progress, never on
-        # monotonic carrot progress alone. Do not pivot toward a lateral endpoint.
-        if remaining <= stop_tolerance_m:
-            if abs(cross) > terminal_lateral_m:
-                return result(0.0, 0.0, NavigationState.BLOCKED, "terminal_lateral_error")
-            return result(0.0, 0.0, NavigationState.GOAL_REACHED, "arrived")
-
         carrot_s = min(length, progress + lookahead_m)
         cx, cy = ax + ux * carrot_s, ay + uy * carrot_s
         wx, wy = cx - px, cy - py
@@ -167,6 +160,16 @@ class DifferentialPathController:
         lookahead_sq = local_x * local_x + local_y * local_y
         info.update(carrot_x_m=cx, carrot_y_m=cy,
                     carrot_local_x_m=local_x, carrot_local_y_m=local_y)
+        curvature = 2.0 * local_y / max(lookahead_sq, 1e-9)
+        info.update(curvature_inv_m=curvature,carrot_progress_m=carrot_s,
+                    target_yaw_rad=normalize_angle_rad(math.atan2(dy,dx)+(math.pi if reverse else 0)))
+        # Stop based on un-clamped physical along-track progress, never on
+        # monotonic carrot progress alone. Do not pivot toward a lateral endpoint.
+        if remaining <= stop_tolerance_m:
+            if abs(cross) > terminal_lateral_m:
+                return result(0.0, 0.0, NavigationState.BLOCKED, "terminal_lateral_error")
+            return result(0.0, 0.0, NavigationState.GOAL_REACHED, "arrived")
+
         if lookahead_sq < 1e-8:
             return result(0.0, 0.0, NavigationState.BLOCKED, "carrot_degenerate")
 
@@ -179,10 +182,13 @@ class DifferentialPathController:
             # Rotate in place toward the FORWARD travel-facing angle. This is not
             # a backwards path recovery; the separate turn/stable-stop controller
             # should own actual completion on hardware.
-            omega = clamp(1.5 * heading_error, -0.30, 0.30)
+            if not self.drive.allow_in_place_rotation:
+                return result(0.0,0.0,NavigationState.BLOCKED,"in_place_rotation_unavailable")
+            limit = min(.30,max_omega_rad_s,
+                        math.sqrt(2*self.drive.max_angular_accel_rad_s2*abs(heading_error)))
+            omega = clamp(1.5*heading_error,-limit,limit)
             return result(0.0, omega, NavigationState.ROTATING_TO_PATH, "align_forward")
 
-        curvature = 2.0 * local_y / lookahead_sq
         # A 0.045 m/s floor reflects prior car tests; not a universal motor value.
         speed = min(speed_limit_m_s, math.sqrt(2.0 * decel_m_s2 * max(remaining, 0.0)))
         speed = max(0.045, speed / (1.0 + 0.5 * abs(curvature)))
@@ -264,9 +270,11 @@ class DifferentialNavigator:
             raise ValueError("now_s must be finite")
         state_name = getattr(pose_state, "value", pose_state)
         if pose is None or state_name not in {"ok", "t265_degraded", "d500_degraded"}:
+            self.controller.turn.reset()
             self._state = NavigationState.POSE_LOST
             return self._output(Twist2D(0.0, 0.0), {"pose_state": str(state_name)})
         if not all(math.isfinite(value) for value in (pose.x_m, pose.y_m, pose.yaw_rad, pose.timestamp_s)):
+            self.controller.turn.reset()
             self._state = NavigationState.POSE_LOST
             return self._output(Twist2D(0.0, 0.0), {"reason": "non_finite_pose"})
         if self.goal is None:
