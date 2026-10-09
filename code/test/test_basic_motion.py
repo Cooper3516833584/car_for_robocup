@@ -132,5 +132,15 @@ class BasicMotionTests(unittest.TestCase):
 
 
 
+    def test_retired_cli_entries_fail_before_building_hardware(self):
+        from unittest.mock import patch
+        from tools import basic_motion, square_run, drive_calibration, drive_actuation_probe, auto_motion_diag, yaw_wall_crosscheck
+        from config import v2_factory
+        with patch.object(v2_factory,'build_differential_drive',side_effect=AssertionError('hardware opened')):
+            for module in (basic_motion,square_run,drive_calibration,drive_actuation_probe,auto_motion_diag):
+                with self.subTest(entry=module.__name__):
+                    self.assertEqual(module.main([]),1)
+            self.assertEqual(yaw_wall_crosscheck.main(),1)
+
 if __name__ == "__main__":
     unittest.main()

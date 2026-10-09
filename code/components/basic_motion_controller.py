@@ -45,7 +45,7 @@ class MotionOutput:
     state: MotionActionState
     action_type: MotionActionType | None
     phase: MotionPhase | None
-    diagnostics: dict[str, float | str | bool]
+    diagnostics: dict[str, float | str | bool | None]
 
 @dataclass
 class _Action:

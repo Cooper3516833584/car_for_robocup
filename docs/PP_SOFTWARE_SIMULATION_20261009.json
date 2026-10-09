@@ -1,0 +1,64 @@
+{
+  "scope": "offline software simulation only",
+  "dt_s": 0.05,
+  "physical_track_m": 0.198,
+  "firmware_protocol_track_m": 0.164,
+  "cases": {
+    "2.8m_initial_y_-0.08": {
+      "steps": 411,
+      "elapsed_s": 20.55,
+      "final_pose": [
+        2.7971092667373436,
+        -3.4293267206104287e-09,
+        1.1837481980989507e-06
+      ],
+      "raw_progress_m": 2.7971092667373436,
+      "cross_track_m": -3.4293267206104287e-09,
+      "min_v_m_s": 0.055063291139240515,
+      "max_v_m_s": 0.14999999474625964,
+      "status": "arrived"
+    },
+    "2.8m_initial_y_+0.08": {
+      "steps": 411,
+      "elapsed_s": 20.55,
+      "final_pose": [
+        2.7971092667373436,
+        3.4293267206104287e-09,
+        -1.1837481980989507e-06
+      ],
+      "raw_progress_m": 2.7971092667373436,
+      "cross_track_m": 3.4293267206104287e-09,
+      "min_v_m_s": 0.055063291139240515,
+      "max_v_m_s": 0.14999999474625964,
+      "status": "arrived"
+    },
+    "47cm_post_turn_disturbance": {
+      "steps": 72,
+      "elapsed_s": 3.6,
+      "final_pose": [
+        0.46582969950887315,
+        0.0001417121278625623,
+        -0.03376219896247791
+      ],
+      "raw_progress_m": 0.46582969950887315,
+      "cross_track_m": 0.0001417121278625623,
+      "min_v_m_s": 0.06318850931019512,
+      "max_v_m_s": 0.15,
+      "status": "arrived"
+    },
+    "47cm_reverse_original_endpoints": {
+      "steps": 66,
+      "elapsed_s": 3.3,
+      "final_pose": [
+        0.004694349379354911,
+        4.760439634054893e-05,
+        0.01010335154986982
+      ],
+      "raw_progress_m": 0.46530565062064505,
+      "cross_track_m": -4.760439634054893e-05,
+      "min_v_m_s": -0.1488242749483241,
+      "max_v_m_s": -0.06945172173512415,
+      "status": "arrived"
+    }
+  }
+}

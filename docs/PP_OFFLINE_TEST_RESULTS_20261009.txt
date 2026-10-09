@@ -1,0 +1,17 @@
+Scope: offline software only; no robot, serial port, relay or sensor SDK opened.
+
+Commands:
+py -3 -m compileall -q code tools
+py -3 -m unittest discover -s code/test -p "test_*.py"
+git diff --check
+py -3 tools/simulate_pure_pursuit.py
+
+Final unittest output:
+----------------------------------------------------------------------
+Ran 870 tests in 14.230s
+
+OK (skipped=7)
+
+Baseline: 888 tests, OK (skipped=7).
+Reference package: 10 tests, OK.
+Old controller and retired executor tests were replaced with PP, measured settle, frame safety and retirement regressions. Test counts are not directly comparable.

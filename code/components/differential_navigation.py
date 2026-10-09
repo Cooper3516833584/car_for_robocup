@@ -1,4 +1,4 @@
-"""Grid planning and pose-based navigation for the differential platform."""
+"""One directed-line Pure Pursuit kernel and measured yaw settling, without motor I/O."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ class NavigationOutput:
     command: Twist2D
     state: NavigationState
     path: tuple[tuple[float, float], ...]
-    diagnostics: dict[str, float | str | bool]
+    diagnostics: dict[str, float | str | bool | None]
 
 
 @dataclass(frozen=True, slots=True)
 class ControllerOutput:
     command: Twist2D
     state: NavigationState
-    diagnostics: dict[str, float | str | bool]
+    diagnostics: dict[str, float | str | bool | None]
 
 
 def clamp(value, lo, hi):
@@ -137,7 +137,7 @@ class DifferentialPathController:
         progress = max(clamp(previous_progress_m, 0.0, length),
                        clamp(raw_s, 0.0, length))
         remaining = length - raw_s
-        info: dict[str, float | str | bool] = {
+        info: dict[str, float | str | bool | None] = {
             "progress_m": progress, "reverse": reverse,
             "raw_progress_m": raw_s,
             "remaining_m": remaining,
@@ -300,5 +300,5 @@ class DifferentialNavigator:
         self._state = result.state
         return self._output(command, result.diagnostics)
 
-    def _output(self, command: Twist2D, diagnostics: dict[str, float | str | bool]) -> NavigationOutput:
+    def _output(self, command: Twist2D, diagnostics: dict[str, float | str | bool | None]) -> NavigationOutput:
         return NavigationOutput(command, self._state, self._path, diagnostics)
