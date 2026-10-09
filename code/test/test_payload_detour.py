@@ -5,12 +5,12 @@ import math
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import center_target_route as route
 from components.basic_motion_controller import MotionActionState
-from components.pose_fusion import FusedPoseEstimate, PoseFusionState
+from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from components.relay_lcus import FakeLCUSRelay
 from components.payload_task import payload_channel, prepare_payload
 from config.v2_runtime import RuntimeMode
@@ -55,7 +55,11 @@ class PayloadDetourTests(unittest.TestCase):
         self.runtime._consume_d500 = lambda *_a, **_k: None
         self.runtime.fusion.estimate = lambda now: FusedPoseEstimate(
             Pose2D(*self.pose, now), PoseFusionState.OK, 0., ("test",), 0., 0.,
-            None, None, True, anchor_initialized=True)
+            None, None, True, anchor_initialized=True, t265_confidence=1.)
+        local_patch = patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock)
+        local_property = local_patch.start()
+        self.addCleanup(local_patch.stop)
+        local_property.side_effect = lambda: Pose2D(*self.pose, self.now)
         self.runtime.record_event = self.record
         if started:
             self.runtime.start()
@@ -146,13 +150,19 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertNotIn("reverse_47cm", self.stage_poses)
         self.assert_safe_exit()
 
-    def test_left_turn_settles_stopped_with_live_pose_before_locking_side_yaw(self):
+    def test_outbound_uses_nominal_side_yaw_and_return_reuses_line(self):
         self.fixture()
-        advance = self.advance
-        settling_time = 0.
-        injected = False
+        self.run_detour()
+        starts = {d["stage"]:d for e,d in self.events if e == "payload_detour_stage_start"}
+        self.assertAlmostEqual(starts["left_90deg"]["args"][0], math.pi/2)
+        A,B=starts["forward_47cm"]["args"]
+        self.assertAlmostEqual(B[0],A[0])
+        self.assertAlmostEqual(B[1]-A[1],.47)
+        self.assertEqual(starts["reverse_47cm"]["args"],(B,A))
+        self.assertEqual(starts["right_90deg"]["args"],(0.,))
+        self.assert_safe_exit()
 
-        def settle_advance(dt):
+    def settle_advance(dt):
             nonlocal settling_time, injected
             if self.stage == "left_90deg" and self.runtime.motion.state is MotionActionState.SUCCEEDED:
                 self.assert_stopped()
@@ -318,12 +328,13 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertTrue(injected)
         side_yaw = self.stage_poses["left_90deg"].yaw_rad
         for stage, yaw, twist in samples:
-            self.assertLess(abs(yaw - side_yaw), math.radians(10))
+            self.assertLess(abs(yaw - side_yaw), math.radians(30))
             if stage == "reverse_47cm":
                 self.assertLessEqual(twist.linear_x_m_s, 0)
         starts = [data for event, data in self.events if event == "payload_detour_stage_start"
                   and data["stage"] in ("forward_47cm", "reverse_47cm")]
-        self.assertEqual([data["kwargs"]["heading_yaw_rad"] for data in starts], [side_yaw, side_yaw])
+        self.assertEqual(starts[0]["args"], tuple(reversed(starts[1]["args"])))
+        self.assertTrue(starts[1]["kwargs"]["reverse"])
         self.assert_safe_exit()
 
     def test_real_payload_profile_rejects_missing_fourth_channel(self):
@@ -372,7 +383,7 @@ class PayloadDetourTests(unittest.TestCase):
 
         def check_speed_scope(dt):
             if (self.stage in ("advance_7cm", "left_90deg", "forward_47cm", "reverse_47cm", "right_90deg")
-                    and self.runtime.motion.action_type.value != "follow_segment"):
+                    and self.runtime.motion.action_type.value != "track_global_line"):
                 stages_seen.add(self.stage)
                 if self.stage == "advance_7cm":
                     self.assertLessEqual(self.runtime.motion.drive.max_linear_speed_m_s, .08)

@@ -56,8 +56,6 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.motion.stop()
         if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
             runtime.mission.on_payload_action_done()
-        if method == "drive_distance":
-            kwargs["lateral_tolerance_m"] = original.position_tolerance_m
         getattr(runtime.motion, method)(*args, **kwargs)
         runtime.record_event("payload_detour_stage_start", stage=label, args=args, kwargs=kwargs)
         while True:
@@ -67,7 +65,10 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 runtime.drive.stop()
                 runtime.record_event("payload_detour_stage_done", stage=label,
                                      pose=result.estimate.pose)
-                return result.estimate.pose
+                local = runtime.current_local_pose(result.estimate, now_s=result.now_s)
+                if local is None:
+                    raise RuntimeError("payload local pose unavailable")
+                return local
             if runtime.motion.state not in {MotionActionState.RUNNING, MotionActionState.POSE_LOST}:
                 raise RuntimeError(f"{label}: motion failed: {runtime.motion.state.value}")
             sleep(PERIOD_S)
@@ -91,21 +92,25 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             raise RuntimeError("payload relay unavailable or selected channel is missing")
         runtime.motion.navigation = replace(original, position_tolerance_m=min(
             original.position_tolerance_m, settings.position_tolerance_m))
-        # Replace the patrol command directly; do not pause before the extra 7cm.
-        road_pose = motion("advance_7cm", "drive_distance", settings.advance_m)
-        road_yaw = road_pose.yaw_rad
-        runtime.record_event("payload_detour_road_pose", pose=road_pose)
-        # The visible-target cap belongs to patrol and the extra 7cm only.
-        runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
-        side_pose = motion("left_90deg", "rotate_to", road_yaw + math.pi / 2)
-        runtime.drive.stop()
-        hold(0.20)  # Keep fusion live while the completed turn settles.
         check()
-        side_pose = _step(runtime).estimate.pose
-        if side_pose is None:
-            raise RuntimeError("payload turn settling pose unavailable")
-        side_yaw = side_pose.yaw_rad
-        motion("forward_47cm", "drive_distance", settings.approach_m, heading_yaw_rad=side_yaw)
+        runtime.motion.stop()
+        entry = _step(runtime)
+        road_pose = runtime.current_local_pose(entry.estimate, now_s=entry.now_s)
+        if road_pose is None:
+            raise RuntimeError("payload entry T265 local pose unavailable")
+        road_yaw = road_pose.yaw_rad
+        start = (road_pose.x_m, road_pose.y_m)
+        road_end = (start[0] + settings.advance_m * math.cos(road_yaw),
+                    start[1] + settings.advance_m * math.sin(road_yaw))
+        motion("advance_7cm", "track_local_line", start, road_end)
+        runtime.record_event("payload_detour_road_pose", pose=road_pose)
+        runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
+        side_yaw = road_yaw + math.pi / 2
+        side_pose = motion("left_90deg", "rotate_local_to", side_yaw)
+        A2 = (side_pose.x_m, side_pose.y_m)
+        B2 = (A2[0] + settings.approach_m * math.cos(side_yaw),
+              A2[1] + settings.approach_m * math.sin(side_yaw))
+        motion("forward_47cm", "track_local_line", A2, B2)
         runtime.motion.stop()
         runtime.drive.stop()
         check()
@@ -117,8 +122,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if not released:
             raise RuntimeError("payload release or relay deactivation failed")
         runtime.record_event("payload_release_done", slot=settings.payload_slot, channel=channel)
-        motion("reverse_47cm", "drive_distance", -settings.approach_m, heading_yaw_rad=side_yaw)
-        returned = motion("right_90deg", "rotate_to", road_yaw)
+        motion("reverse_47cm", "track_local_line", B2, A2, reverse=True)
+        returned = motion("right_90deg", "rotate_local_to", road_yaw)
         runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
         return returned
     except BaseException as exc:
