@@ -249,25 +249,24 @@ def main(argv=None):
         return 0
     except BaseException as exc:
         if runtime is not None:
-            runtime.drive.stop()
+            try:
+                runtime.drive.stop()
+            except Exception as stop_error:
+                print(f"[route] cleanup failed: {stop_error}", file=sys.stderr)
         (args.log_dir / "result.txt").write_text(f"FAILED: {type(exc).__name__}: {exc}\n")
         print(f"[route] FAILED: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return 1
     finally:
-        if runtime is not None:
-            runtime.drive.stop()
-        try:
-            if alarm is not None and alarm.is_initialized:
-                alarm.off()
-        finally:
+        for cleanup in (runtime.drive.stop if runtime is not None else lambda: None,
+                        alarm.off if alarm is not None and alarm.is_initialized else lambda: None,
+                        runtime.close if runtime is not None else lambda: None,
+                        vision.close, lambda: servo.close(hold=True) if servo.is_running else None):
             try:
-                if runtime is not None:
-                    runtime.close()
-            finally:
-                vision.close()
-                if servo.is_running:
-                    servo.close(hold=True)
-                logger.close()
+                cleanup()
+            except Exception as exc:
+                print(f"[route] cleanup failed: {exc}", file=sys.stderr, flush=True)
+        logger.close()
+
 
 
 if __name__ == "__main__":

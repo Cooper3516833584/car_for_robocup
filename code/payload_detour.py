@@ -122,22 +122,28 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
         return returned
     except BaseException as exc:
-        runtime.drive.stop()
-        runtime.motion.stop()
         runtime.mission.request_safe_stop(str(exc))
         raise
     finally:
-        runtime.drive.stop()
-        runtime.motion.stop()
+        primary_error = sys.exc_info()[0] is not None
+        cleanup_error = None
+        for stop in (runtime.drive.stop, runtime.motion.stop):
+            try:
+                stop()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+                runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
+                runtime.mission.request_safe_stop(str(exc))
         runtime.motion.navigation = original
         runtime.motion.drive = entry_drive
         # On success only the selected magnet is released; preserve other loads.
         # On failure disconnect all contacts; runtime close retries cleanup.
-        primary_error = sys.exc_info()[0] is not None
-        if primary_error and relay is not None and relay.connected:
+        if (primary_error or cleanup_error) and relay is not None and relay.connected:
             try:
                 if relay.all_off(verify=settings.verify_relay) is False:
                     raise RuntimeError("payload relay all_off was not confirmed")
             except Exception as exc:
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
                 runtime.mission.request_safe_stop(str(exc))
+        if cleanup_error is not None and not primary_error:
+            raise cleanup_error

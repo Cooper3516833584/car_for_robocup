@@ -24,6 +24,21 @@ CENTER_BOX = (290, 0, 350, 40, .9, 0)  # Horizontally centred, near the image to
 
 
 class PayloadDetourTests(unittest.TestCase):
+    def test_stop_failure_preserves_primary_error_and_disconnects_relay(self):
+        from components.rear_motor import DriverStateError
+        self.fixture()
+        self.relay.turn_on(2)
+        original_stop = self.runtime.drive.stop
+        self.runtime.drive.stop = Mock(side_effect=DriverStateError("USB stop failed"))
+        try:
+            with self.assertRaisesRegex(ValueError, "original failure"):
+                self.run_detour(guard=lambda: (_ for _ in ()).throw(ValueError("original failure")))
+            self.assertGreater(self.relay.off_requests, 0)
+            self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+            self.assertTrue(any(event == "payload_detour_cleanup_failed" for event, _ in self.events))
+        finally:
+            self.runtime.drive.stop = original_stop
+
     def fixture(self, pose=(0., 0., 0.), *, started=True):
         self.now, self.steps = 10., 0
         self.pose = list(pose)

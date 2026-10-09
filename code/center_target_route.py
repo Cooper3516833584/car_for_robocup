@@ -387,22 +387,27 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
         print(f"[route] FINISHED; alarms={alarm_count}; drops={drop_count}", flush=True)
         return drop_count if detour is not None else alarm_count
     except BaseException as exc:
-        runtime.drive.stop()
         runtime.mission.request_safe_stop(str(exc))
         raise
     finally:
         # Drive stops before worker joins/log close; alarm is silenced on all exits.
-        runtime.drive.stop()
+        primary_error = sys.exc_info()[0] is not None
+        cleanup_error = None
+        for cleanup in (runtime.drive.stop, alarm.off if alarm is not None else lambda: None):
+            try:
+                cleanup()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+                runtime.record_event("test_route_cleanup_failed", reason=str(exc))
+                runtime.mission.request_safe_stop(str(exc))
         runtime.motion.drive = original_drive
-        if alarm is not None:
-            alarm.off()
         if detour is not None and runtime.relay is not None and runtime.relay.connected:
-            primary_error = sys.exc_info()[0] is not None
             try:
                 if runtime.relay.all_off(verify=detour.verify_relay) is False:
                     raise RuntimeError("payload relay all_off was not confirmed")
             except Exception as exc:
                 runtime.mission.request_safe_stop(str(exc))
                 runtime.record_event("test_route_cleanup_failed", reason=str(exc))
-                if not primary_error:
-                    raise
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and not primary_error:
+            raise cleanup_error

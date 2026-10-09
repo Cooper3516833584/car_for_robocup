@@ -188,13 +188,19 @@ def run_payload_demo(session, vision, settings, *, abort=lambda: False,
         session.record_event("demo_stopped", reason=str(exc))
         raise
     finally:
-        drive.stop()
+        primary_error = sys.exc_info()[0] is not None
+        cleanup_error = None
+        try:
+            drive.stop()
+        except Exception as exc:
+            cleanup_error = exc
+            session.record_event("demo_cleanup_failed", reason=str(exc))
         if relay is not None and relay.connected:
-            primary_error = sys.exc_info()[0] is not None
             try:
                 if relay.all_off(verify=settings.verify_relay) is False:
                     raise RuntimeError("demo final relay all_off was not confirmed")
             except Exception as exc:
                 session.record_event("demo_cleanup_failed", reason=str(exc))
-                if not primary_error:
-                    raise
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and not primary_error:
+            raise cleanup_error
