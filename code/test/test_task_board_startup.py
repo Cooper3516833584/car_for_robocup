@@ -6,12 +6,12 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, PropertyMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from components.basic_motion_controller import MotionActionState
-from components.pose_fusion import FusedPoseEstimate, PoseFusionState
+from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from components.task_board_reader import TaskBoardConfig, TaskBoardResult, TaskCounts
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
@@ -37,6 +37,11 @@ class TaskBoardStartupTests(unittest.TestCase):
         self.pose_patch = patch.object(self.runtime.fusion, "estimate", side_effect=self.estimate)
         self.pose_patch.start()
         self.addCleanup(self.pose_patch.stop)
+        local_patch=patch.object(PoseFusion,"continuous_t265_pose",new_callable=PropertyMock)
+        local=local_patch.start()
+        self.addCleanup(local_patch.stop)
+        local.side_effect=lambda: None if self.never_ready or self.lose_pose else Pose2D(
+            0,0,min(max(0,self.turn_steps-1)*math.pi/4,math.pi/2),self.now)
         self.reader = SimpleNamespace(
             config=TaskBoardConfig(), recognize_camera=Mock(side_effect=self.read),
         )
@@ -58,7 +63,7 @@ class TaskBoardStartupTests(unittest.TestCase):
             state=PoseFusionState.LOST if lost else PoseFusionState.OK,
             age_s=0, source_flags=("fused",), t265_age_s=0, d500_age_s=0,
             last_d500_innovation_m=0, last_d500_innovation_yaw_rad=0, d500_accepted=True,
-            anchor_initialized=True,
+            anchor_initialized=True, t265_confidence=1.,
         )
 
     def assert_stopped(self):
@@ -247,7 +252,7 @@ class TaskBoardStartupTests(unittest.TestCase):
         self.reader.recognize_camera.assert_not_called()
 
     def test_existing_motion_is_not_replaced(self):
-        self.runtime.motion.drive_distance(1)
+        self.runtime.motion.track_global_line((0,0),(1,0))
         self.assert_fatal(self.acquire())
         self.reader.recognize_camera.assert_not_called()
 

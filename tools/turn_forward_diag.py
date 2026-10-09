@@ -35,7 +35,7 @@ MAX_FROM_START_M = 0.50
 
 def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
         settle_after_turn_s=SETTLE_AFTER_TURN_S, skip_turn=False, turn_direction="left",
-        startup_bias_rad_s=0.0, startup_duration_s=0.0, distance_m=0.20,
+        distance_m=0.20,
         turn_max_angular_speed_rad_s=None):
     if not math.isfinite(settle_after_turn_s) or not 0.20 <= settle_after_turn_s <= 3.0:
         raise ValueError("turn settle interval must be between 0.20 and 3.0 seconds")
@@ -68,6 +68,11 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
     else:
         raise TimeoutError("fresh T265+SLAM pose did not stay stable for 5 seconds")
 
+    local_entry = runtime.current_local_pose()
+    if local_entry is None:
+        raise RuntimeError("fresh T265 local pose unavailable")
+    nominal_local_yaw = local_entry.yaw_rad + (0 if skip_turn else
+        (1 if turn_direction == "left" else -1)*math.pi/2)
     start = sample
     previous = start
     turn_samples = [start]
@@ -130,14 +135,14 @@ def run(runtime, config, *, abort, clock=time.monotonic, sleep=time.sleep,
     straight_stage = "forward_%dcm" % round(distance_m * 100)
     runtime.record_event("turn_forward_diag_stage_start", stage=straight_stage,
                          pose=straight_start, heading_reference_rad=straight_start.yaw_rad)
-    runtime.motion.drive_distance(
-        distance_m,
-        lateral_tolerance_m=config.navigation.position_tolerance_m,
-        heading_yaw_rad=straight_start.yaw_rad,
-        startup_yaw_bias_rad_s=(0.0 if skip_turn else
-                               -startup_bias_rad_s if turn_direction == "left" else startup_bias_rad_s),
-        startup_duration_s=startup_duration_s,
-    )
+    local = runtime.current_local_pose()
+    if local is None:
+        raise RuntimeError("fresh T265 local pose required for diagnostic line")
+    A = (local.x_m, local.y_m)
+    # Keep the nominal turn target, never adopt an overshot measured heading.
+    yaw = nominal_local_yaw
+    B = (A[0]+distance_m*math.cos(yaw), A[1]+distance_m*math.sin(yaw))
+    runtime.motion.track_local_line(A, B)
     deadline = clock() + STRAIGHT_TIMEOUT_S
     previous = straight_start
     straight_samples = [straight_start]
@@ -193,10 +198,6 @@ def main(argv=None) -> int:
                         help="diagnostic-only straight feedback gain (0.5..8.0); retains turn gain")
     parser.add_argument("--turn-max-angular-speed-rad-s", type=float,
                         help="lower the turn-only command cap (0.20 rad/s..existing limit)")
-    parser.add_argument("--startup-bias-rad-s", type=float, default=0.0,
-                        help="counter-turn startup bias magnitude (0..0.4 rad/s)")
-    parser.add_argument("--startup-duration-s", type=float, default=0.0,
-                        help="linearly fading startup bias interval (0..2 s)")
     parser.add_argument("--distance-m", type=float, choices=(0.20, 0.47), default=0.20)
     parser.add_argument("--position-tolerance-m", type=float, choices=(0.005, 0.03),
                         help="along-track completion tolerance; lateral guard retains measured profile")
@@ -210,10 +211,6 @@ def main(argv=None) -> int:
     if args.path_yaw_gain is not None and (
             not math.isfinite(args.path_yaw_gain) or not 0.5 <= args.path_yaw_gain <= 8.0):
         parser.error("--path-yaw-gain must be between 0.5 and 8.0")
-    if (not math.isfinite(args.startup_bias_rad_s) or not 0.0 <= args.startup_bias_rad_s <= 0.4
-            or not math.isfinite(args.startup_duration_s) or not 0.0 <= args.startup_duration_s <= 2.0
-            or (args.startup_bias_rad_s > 0.0 and args.startup_duration_s <= 0.0)):
-        parser.error("startup bias requires a magnitude in 0..0.4 and positive duration up to 2 seconds")
     config_path, output = Path(args.config).resolve(), Path(args.output).resolve()
     if config_path == DEFAULT_V2_CONFIG.resolve():
         parser.error("example configuration is not a measured car profile")
@@ -245,8 +242,7 @@ def main(argv=None) -> int:
     try:
         result = run(runtime, config, abort=lambda: aborted[0],
                      settle_after_turn_s=args.settle_after_turn_s, skip_turn=args.skip_turn,
-                     turn_direction=args.turn_direction, startup_bias_rad_s=args.startup_bias_rad_s,
-                     startup_duration_s=args.startup_duration_s, distance_m=args.distance_m,
+                     turn_direction=args.turn_direction, distance_m=args.distance_m,
                      turn_max_angular_speed_rad_s=args.turn_max_angular_speed_rad_s)
     except BaseException as exc:
         error = "%s: %s" % (type(exc).__name__, exc)
@@ -257,9 +253,7 @@ def main(argv=None) -> int:
     summary = {"valid": error is None, "error": error, "result": result,
                "parameters": {"skip_turn": args.skip_turn,
                               "path_yaw_gain": config.navigation.path_yaw_gain,
-                              "startup_bias_rad_s": args.startup_bias_rad_s,
-                              "startup_duration_s": args.startup_duration_s,
-                              "distance_m": args.distance_m,
+                                                                                          "distance_m": args.distance_m,
                               "position_tolerance_m": runtime.motion.navigation.position_tolerance_m,
                               "turn_direction": args.turn_direction,
                               "turn_max_angular_speed_rad_s": args.turn_max_angular_speed_rad_s,

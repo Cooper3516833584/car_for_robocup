@@ -105,40 +105,14 @@ class BasicMotionTests(unittest.TestCase):
             (0.0, 0.0, 0.0), (-0.5, 0.0, 0.0),
         ), -50.0)
 
-    def test_jog_commands_all_wheel_directions_and_always_stops(self) -> None:
-        for direction, expected_axis, expected_sign in (
-            ("forward", "linear", 1), ("backward", "linear", -1),
-            ("left", "angular", 1), ("right", "angular", -1),
-        ):
-            runner, drive, _ = self.runner()
-            runner.jog(direction, 0.1, 0.05, 0.35)
-            self.assertTrue(drive.commands)
-            if expected_axis == "linear":
-                self.assertTrue(all(cmd.linear_x_m_s * expected_sign > 0.0
-                                    and cmd.angular_z_rad_s == 0.0 for cmd in drive.commands))
-            else:
-                self.assertTrue(all(cmd.angular_z_rad_s * expected_sign > 0.0
-                                    and cmd.linear_x_m_s == 0.0 for cmd in drive.commands))
-            self.assertGreaterEqual(drive.stop_count, 1)
-        runner, drive, _ = self.runner(fail_drive=True)
-        with self.assertRaisesRegex(RuntimeError, "backend failed"):
-            runner.jog("forward", 0.1, 0.05, 0.35)
-        self.assertGreaterEqual(drive.stop_count, 1)
+    def test_retired_executor_stops_without_commanding_motion(self):
+        runner, drive, _ = self.runner()
+        for method,args in ((runner.distance,(10,.1)),(runner.rotate,(90,.3)),(runner.jog,('forward',.1,.05,.3))):
+            with self.assertRaisesRegex(RuntimeError,'Retired'):
+                method(*args)
+        self.assertFalse(drive.commands)
+        self.assertGreaterEqual(drive.stop_count,3)
 
-    def test_signed_distance_reaches_target_then_settles_stopped(self) -> None:
-        for target, sign in ((10.0, 1.0), (-10.0, -1.0)):
-            poses = [(sign * step * 0.01, 0.0, 0.0) for step in range(11)]
-            runner, drive, _ = self.runner(poses)
-            result = runner.distance(target, 0.10)
-            self.assertAlmostEqual(result.achieved, target)
-            self.assertTrue(drive.commands)
-            self.assertTrue(all(cmd.linear_x_m_s * sign > 0.0
-                                and cmd.angular_z_rad_s == 0.0 for cmd in drive.commands))
-            self.assertGreaterEqual(drive.stop_count, 2)
-            self.assertIn("stop", [row[-1] for row in runner.trace])
-            self.assertIn("settle", [row[-1] for row in runner.trace])
-            self.assertTrue(all(row[4] == 0.0 and row[5] == 0.0
-                                for row in runner.trace if row[-1] in {"stop", "settle"}))
 
     def test_trace_keeps_raw_camera_displacement_separate_from_base_pose(self) -> None:
         runner, _, reader = self.runner()
@@ -151,95 +125,11 @@ class BasicMotionTests(unittest.TestCase):
         self.assertEqual(runner.trace[1][-3:-1], (25.0, -25.0))
         self.assertEqual(runner.trace[1][1:3], (0.0, 0.0))
 
-    def test_one_thousand_cm_completes_in_virtual_time(self) -> None:
-        poses = [(step * 0.05, 0.0, 0.0) for step in range(201)]
-        runner, drive, _ = self.runner(poses)
-        result = runner.distance(1000.0, 0.10)
-        self.assertAlmostEqual(result.achieved, 1000.0)
-        self.assertTrue(drive.commands)
-        self.assertLess(result.elapsed_s, 205.0)
 
-    def test_relative_angle_reaches_both_directions_across_wrap(self) -> None:
-        for target, sign in ((360.0, 1.0), (-360.0, -1.0)):
-            poses = [
-                (0.0, 0.0, math.radians((sign * 10 * step + 180) % 360 - 180))
-                for step in range(37)
-            ]
-            runner, drive, _ = self.runner(poses)
-            result = runner.rotate(target, 0.35)
-            self.assertAlmostEqual(result.achieved, target)
-            self.assertAlmostEqual(result.center_shift_cm, 0.0)
-            self.assertTrue(all(cmd.linear_x_m_s == 0.0 and cmd.angular_z_rad_s * sign > 0.0
-                                for cmd in drive.commands))
-            self.assertGreaterEqual(drive.stop_count, 2)
 
-    def test_arbitrary_relative_angle_and_zero_are_safe(self) -> None:
-        for target, sign in ((37.0, 1.0), (-37.0, -1.0)):
-            poses = [
-                (0.0, 0.0, math.radians(sign * value))
-                for value in (0.0, 10.0, 20.0, 30.0, 37.0)
-            ]
-            runner, drive, _ = self.runner(poses)
-            result = runner.rotate(target, 0.35)
-            self.assertAlmostEqual(result.achieved, target)
-            self.assertTrue(drive.commands)
-        runner, drive, _ = self.runner()
-        result = runner.rotate(0.0, 0.35)
-        self.assertEqual(result.achieved, 0.0)
-        self.assertEqual(drive.commands, [])
-        self.assertGreaterEqual(drive.stop_count, 1)
 
-    def test_pose_loss_jump_wrong_direction_abort_and_timeout_stop(self) -> None:
-        runner, drive, reader = self.runner([(0.0, 0.0, 0.0)])
-        original = reader.latest_sample
-        calls = 0
 
-        def disappear():
-            nonlocal calls
-            calls += 1
-            return original() if calls == 1 else None
 
-        reader.latest_sample = disappear
-        with self.assertRaisesRegex(RuntimeError, "T265 pose stale"):
-            runner.distance(10.0, 0.1)
-        self.assertEqual(drive.commands, [])
-        self.assertGreaterEqual(drive.stop_count, 1)
-
-        for poses, error in (
-            ([(0, 0, 0), (0.11, 0, 0)], "T265 pose jumped"),
-            ([(0, 0, 0), (-0.06, 0, 0)], "opposes"),
-        ):
-            runner, drive, _ = self.runner(poses)
-            with self.assertRaisesRegex(RuntimeError, error):
-                runner.distance(10.0, 0.1)
-            self.assertGreaterEqual(drive.stop_count, 1)
-
-        runner, drive, _ = self.runner([(0.0, 0.0, 0.0)])
-        with self.assertRaises(TimeoutError):
-            runner.distance(10.0, 0.1)
-        self.assertGreaterEqual(drive.stop_count, 1)
-
-    def test_operator_abort_and_rotation_drift_stop(self) -> None:
-        runner, drive, _ = self.runner([(0.0, 0.0, 0.0)])
-        runner.aborted = True
-        with self.assertRaisesRegex(RuntimeError, "operator aborted"):
-            runner.rotate(90.0, 0.35)
-        self.assertGreaterEqual(drive.stop_count, 1)
-
-        runner, drive, _ = self.runner([
-            (0.0, 0.0, 0.0), (0.06, 0.0, 0.1), (0.11, 0.0, 0.2),
-        ])
-        with self.assertRaisesRegex(RuntimeError, "base_link moved"):
-            runner.rotate(90.0, 0.35)
-        self.assertGreaterEqual(drive.stop_count, 1)
-
-    def test_closed_loop_backend_failure_stops(self) -> None:
-        runner, drive, _ = self.runner(
-            [(0.0, 0.0, 0.0), (0.01, 0.0, 0.0)], fail_drive=True,
-        )
-        with self.assertRaisesRegex(RuntimeError, "backend failed"):
-            runner.distance(10.0, 0.10)
-        self.assertGreaterEqual(drive.stop_count, 1)
 
 
 if __name__ == "__main__":

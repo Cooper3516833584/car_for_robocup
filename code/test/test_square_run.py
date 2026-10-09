@@ -77,29 +77,14 @@ class SquareRunSafetyTests(unittest.TestCase):
         reader._sample = (time.monotonic() - 1.0, (0.0, 0.0, 0.0))
         self.assertIsNone(reader.latest())
 
-    def test_missing_pose_stops_before_a_motor_command(self) -> None:
-        drive = FakeDrive()
-        runner = Runner(drive, ScriptedReader([]), 50.0)
-        with self.assertRaisesRegex(RuntimeError, "T265 pose stale"):
-            runner.hold(100, 0, 1.0, start_pose=(0.0, 0.0, 0.0),
-                        mode="distance", target=10.0)
-        self.assertEqual(drive.commands, [])
-        self.assertGreaterEqual(drive.stop_count, 1)
+    def test_retired_executor_stops_without_commanding_motion(self):
+        drive=FakeDrive()
+        runner=Runner(drive,ScriptedReader([]),50.)
+        with self.assertRaisesRegex(RuntimeError,'Retired'):
+            runner.hold(100,0,1.,start_pose=(0,0,0),mode='distance',target=10.)
+        self.assertFalse(drive.commands)
+        self.assertGreaterEqual(drive.stop_count,1)
 
-    def test_trace_includes_zero_command_and_settle_samples(self) -> None:
-        drive = FakeDrive()
-        reader = ScriptedReader([
-            (0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.10, 0.0, 0.0),
-        ])
-        runner = Runner(drive, reader, 50.0)
-        runner.hold(100, 0, 1.0, start_pose=(0.0, 0.0, 0.0),
-                    mode="distance", target=10.0)
-        self.assertTrue(drive.commands)
-        self.assertGreaterEqual(drive.stop_count, 2)
-        self.assertIn("stop", [row[-1] for row in runner.trace])
-        self.assertIn("settle", [row[-1] for row in runner.trace])
-        self.assertTrue(all(row[4] == 0.0 and row[5] == 0.0
-                            for row in runner.trace if row[-1] in {"stop", "settle"}))
 
 
 if __name__ == "__main__":

@@ -81,38 +81,16 @@ class DriveCalibrationTests(unittest.TestCase):
             allow_pending=True))
         self.assertIsNone(accepted_fused_sample(replace(valid, source_flags=("t265",)), config, 1.0))
 
-    def test_linear_pulse_exposes_scale_error_and_stops(self):
-        clock, drive = FakeClock(), FakeDrive()
-        reader = FakeReader(clock, drive, scale=0.9)
-        result = PulseRunner(drive, reader, clock=clock, sleep=clock.sleep).run("distance", 0.10, 0.05)
-        self.assertGreaterEqual(drive.stop_count, 1)
-        self.assertAlmostEqual(result.predicted, 0.10, delta=0.001)
-        self.assertAlmostEqual(result.measured, 0.09, delta=0.002)
-        self.assertTrue(drive.commands)
+    def test_retired_executor_stops_without_commanding_motion(self):
+        clock,drive=FakeClock(),FakeDrive()
+        reader=FakeReader(clock,drive)
+        with self.assertRaisesRegex(RuntimeError,'Retired'):
+            PulseRunner(drive,reader,clock=clock,sleep=clock.sleep).run('distance',.1,.05)
+        self.assertFalse(drive.commands)
+        self.assertGreaterEqual(drive.stop_count,1)
 
-    def test_rotation_accumulates_yaw_and_stops(self):
-        clock, drive = FakeClock(), FakeDrive()
-        reader = FakeReader(clock, drive, scale=0.95)
-        result = PulseRunner(drive, reader, clock=clock, sleep=clock.sleep).run("rotate", math.pi / 2.0, 0.20)
-        self.assertAlmostEqual(result.predicted, math.pi / 2.0, delta=0.001)
-        self.assertAlmostEqual(result.measured, 0.95 * math.pi / 2.0, delta=0.002)
-        self.assertGreaterEqual(drive.stop_count, 1)
 
-    def test_reverse_pulse_keeps_signed_prediction_and_measurement(self):
-        clock, drive = FakeClock(), FakeDrive()
-        reader = FakeReader(clock, drive, scale=1.1)
-        result = PulseRunner(drive, reader, clock=clock, sleep=clock.sleep).run("distance", -0.10, 0.05)
-        self.assertAlmostEqual(result.predicted, -0.10, delta=0.001)
-        self.assertAlmostEqual(result.measured, -0.11, delta=0.002)
-        self.assertTrue(all(command.linear_x_m_s < 0.0 for command in drive.commands))
-        self.assertGreaterEqual(drive.stop_count, 1)
 
-    def test_pose_loss_aborts_and_stops(self):
-        clock, drive = FakeClock(), FakeDrive()
-        reader = FakeReader(clock, drive, lost_at=0.25)
-        with self.assertRaisesRegex(RuntimeError, "fresh fused"):
-            PulseRunner(drive, reader, clock=clock, sleep=clock.sleep).run("distance", 0.10, 0.05)
-        self.assertGreaterEqual(drive.stop_count, 1)
 
 
 if __name__ == "__main__":

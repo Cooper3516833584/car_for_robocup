@@ -4,11 +4,12 @@ import math
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import PropertyMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from components.pose_fusion import FusedPoseEstimate, PoseFusionState
+from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from robocup_runtime import build_runtime, load_runtime_config
@@ -53,6 +54,10 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
             ("t265", "slam", "fused"), 0.0, 0.0, None, None, True,
             anchor_initialized=True, t265_confidence=1.0,
         )
+        local_patch = patch.object(PoseFusion,"continuous_t265_pose",new_callable=PropertyMock)
+        local_property=local_patch.start()
+        self.addCleanup(local_patch.stop)
+        local_property.side_effect=lambda: Pose2D(*pose,now[0])
         runtime.record_event = lambda event, **data: events.append((event, {**data, "time_s": now[0]}))
         start_runtime = runtime.start
 
@@ -88,7 +93,12 @@ class TurnForwardDiagnosticTests(unittest.TestCase):
         self.assertTrue(forward_commands)
         self.assertGreater(result["straight_along_m"], distance_m-0.03)
         self.assertLessEqual(result["straight_along_m"], distance_m)
-        self.assertLess(abs(result["straight_lateral_m"]), 0.005)
+        # The saved nominal 90-degree line may differ from the measured stopped
+        # chassis heading within the accepted 3-degree yaw tolerance.
+        nominal_yaw = 0 if skip_turn else (1 if turn_direction == "left" else -1)*math.pi/2
+        dx=pose[0]-result["straight_start"]["x_m"]
+        dy=pose[1]-result["straight_start"]["y_m"]
+        self.assertLess(abs(-dx*math.sin(nominal_yaw)+dy*math.cos(nominal_yaw)),.005)
         self.assertEqual([data["stage"] for event, data in events
                           if event == "turn_forward_diag_stage_done"],
                          ([straight_stage] if skip_turn else [turn_stage, straight_stage]))

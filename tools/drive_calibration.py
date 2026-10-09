@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""One supervised, low-speed drive pulse measured by the runtime's fused pose.
-
-Start the separate SLAM sidecar first. Each invocation sends exactly one bounded
-straight or in-place command, stops the drive, then records the settled result.
-The requested displacement is predicted by integrating DifferentialDrive's
-limited Twist2D output; pose feedback does not correct the motor command.
-"""
+"""Retired motor entry; use closed_loop_motion.py. Read-only helpers remain available."""
 
 from __future__ import annotations
 
@@ -178,118 +172,12 @@ class PulseRunner:
         return sample
 
     def run(self, kind: str, target: float, speed: float) -> PulseResult:
-        if kind not in {"distance", "rotate"} or not math.isfinite(target) or target == 0.0:
-            raise ValueError("a nonzero distance or rotation is required")
-        if not math.isfinite(speed) or speed <= 0.0:
-            raise ValueError("speed must be positive and finite")
-        start = self._sample()
-        previous = start
-        yaw_total = 0.0
-        predicted = 0.0
-        direction = 1.0 if target > 0.0 else -1.0
-        requested = Twist2D(direction * speed, 0.0) if kind == "distance" else Twist2D(0.0, direction * speed)
-        started = self.clock()
-        deadline = started + min(MAX_PULSE_S, 2.0 * abs(target) / speed + 5.0)
-        last_send = started
-        last_limited = ZERO
-        last_progress_s = started
-        best_progress = 0.0
-        next_send = started
-        try:
-            while True:
-                now = self.clock()
-                if self.aborted:
-                    raise RuntimeError("operator aborted motion")
-                if now >= deadline:
-                    raise TimeoutError("drive pulse exceeded its finite deadline")
-                current = self._sample()
-                delta_yaw = unwrap_delta(previous.yaw_rad, current.yaw_rad)
-                if (math.hypot(current.x_m - previous.x_m, current.y_m - previous.y_m) > MAX_POSE_STEP_M
-                        or abs(delta_yaw) > MAX_YAW_STEP_RAD):
-                    raise RuntimeError("fused pose jumped during motion")
-                yaw_total += delta_yaw
-                previous = current
-                measured, lateral, center = _progress(start, current, kind, yaw_total)
-                directed = direction * measured
-                if directed < (-0.03 if kind == "distance" else -math.radians(5.0)):
-                    raise RuntimeError("measured motion opposes the request")
-                if kind == "rotate" and center > MAX_ROTATION_CENTER_DRIFT_M:
-                    raise RuntimeError("rotation center drift exceeded 10 cm")
-                if kind == "distance" and abs(lateral) > 0.10:
-                    raise RuntimeError("straight pulse strayed over 10 cm laterally")
-                if directed > abs(target) + (0.15 if kind == "distance" else math.radians(20.0)):
-                    raise RuntimeError("measured motion exceeded the pulse guard")
-                step_progress = 0.005 if kind == "distance" else math.radians(0.5)
-                if directed >= best_progress + step_progress:
-                    best_progress = directed
-                    last_progress_s = now
-                elif now - last_progress_s >= NO_PROGRESS_TIMEOUT_S:
-                    raise TimeoutError("no measured progress for 3 seconds")
-
-                predicted += (last_limited.linear_x_m_s if kind == "distance" else last_limited.angular_z_rad_s) * (now - last_send)
-                last_send = now
-                if direction * predicted >= abs(target):
-                    break
-                if now >= next_send:
-                    self.drive.command(requested)
-                    last_limited = self.drive.last_limited_twist
-                    next_send = now + SEND_PERIOD_S
-                    self.trace.append({
-                        "t_s": now - started, "phase": "pulse", "kind": kind,
-                        "target": target, "predicted": predicted,
-                        "measured": measured, "lateral_m": lateral, "yaw_rad": yaw_total,
-                        "base_x_m": current.x_m, "base_y_m": current.y_m,
-                        "center_shift_m": center,
-                        "requested_v_m_s": requested.linear_x_m_s,
-                        "requested_omega_rad_s": requested.angular_z_rad_s,
-                        "limited_v_m_s": last_limited.linear_x_m_s,
-                        "limited_omega_rad_s": last_limited.angular_z_rad_s,
-                        "t265_age_s": current.t265_age_s, "slam_age_s": current.slam_age_s,
-                        "t265_confidence": current.t265_confidence,
-                        "source_flags": "+".join(current.source_flags),
-                    })
-                self.sleep(0.005)
-        finally:
-            self.drive.stop()
-
-        final, final_yaw = self._wait_for_settle(previous, yaw_total)
-        measured, lateral, center = _progress(start, final, kind, final_yaw)
-        self.trace.append({
-            "t_s": self.clock() - started, "phase": "settled", "kind": kind,
-            "target": target, "predicted": predicted,
-            "measured": measured, "lateral_m": lateral, "yaw_rad": final_yaw,
-            "base_x_m": final.x_m, "base_y_m": final.y_m,
-            "center_shift_m": center,
-            "requested_v_m_s": 0.0, "requested_omega_rad_s": 0.0,
-            "limited_v_m_s": 0.0, "limited_omega_rad_s": 0.0,
-            "t265_age_s": final.t265_age_s, "slam_age_s": final.slam_age_s,
-            "t265_confidence": final.t265_confidence,
-            "source_flags": "+".join(final.source_flags),
-        })
-        return PulseResult(target, predicted, measured, lateral, center, self.clock() - started)
+        self.drive.stop()
+        raise RuntimeError("Retired motion executor; use tools/closed_loop_motion.py with localization")
 
     def _wait_for_settle(self, previous: PoseSample, yaw_total: float) -> tuple[PoseSample, float]:
-        deadline = self.clock() + SETTLE_TIMEOUT_S
-        still_since = None
-        while self.clock() < deadline:
-            if self.aborted:
-                raise RuntimeError("operator aborted during settle")
-            self.sleep(0.04)
-            current = self._sample()
-            distance = math.hypot(current.x_m - previous.x_m, current.y_m - previous.y_m)
-            turn = unwrap_delta(previous.yaw_rad, current.yaw_rad)
-            if distance > MAX_POSE_STEP_M or abs(turn) > MAX_YAW_STEP_RAD:
-                raise RuntimeError("fused pose jumped while settling")
-            yaw_total += turn
-            if distance < 0.003 and abs(turn) < math.radians(0.3):
-                if still_since is None:
-                    still_since = self.clock()
-                elif self.clock() - still_since >= 0.25:
-                    return current, yaw_total
-            else:
-                still_since = None
-            previous = current
-        raise TimeoutError("vehicle did not settle within 3 seconds")
+        self.drive.stop()
+        raise RuntimeError("Retired motion executor; use tools/closed_loop_motion.py with localization")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -318,104 +206,8 @@ def _write_trace(path: Path, rows: list[dict]) -> None:
 
 
 def main(argv=None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if not args.confirm_motor_test or not args.confirm_mount_checked:
-        parser.error("both --confirm-motor-test and --confirm-mount-checked are required")
-    if sys.platform != "linux":
-        parser.error("real drive calibration must run on the car's Linux host")
-    config_path = Path(args.config).resolve()
-    if config_path == DEFAULT_V2_CONFIG.resolve():
-        parser.error("the example profile is not a measured car profile")
-    trace_path = Path(args.trace).resolve()
-    if trace_path == ROOT or ROOT in trace_path.parents:
-        parser.error("write calibration traces outside the repository")
-    if trace_path.exists():
-        parser.error("trace path already exists; use a unique file for each run")
-    if not trace_path.parent.is_dir():
-        parser.error("trace directory does not exist")
-    config = load_v2_config(config_path)
-    if config.relay.enabled:
-        parser.error("disable the payload relay for drive calibration")
-    if config.drive.protocol_mode == "differential_vx_vz" and not config.calibration.c10b_diff_firmware_verified:
-        parser.error("C10B differential firmware mode is not verified")
-    if args.action == "distance":
-        target = float(args.cm) / 100.0
-        speed = float(args.speed_m_s)
-        if not math.isfinite(target) or not 0.10 <= abs(target) <= 0.50:
-            parser.error("distance must be signed 10..50 cm")
-    else:
-        target = math.radians(float(args.deg))
-        speed = float(args.speed_rad_s)
-        if not math.isfinite(target) or not math.radians(10.0) <= abs(target) <= math.pi / 2.0:
-            parser.error("rotation must be signed 10..90 degrees")
-        if not config.drive.allow_in_place_rotation:
-            parser.error("this profile disables in-place rotation")
-    limits = runtime_constraints(config, RuntimeMode.HARDWARE_PROBE)
-    speed_limit = limits.max_linear_speed_m_s if args.action == "distance" else limits.max_angular_speed_rad_s
-    if not math.isfinite(speed) or not 0.0 < speed <= speed_limit:
-        parser.error("speed exceeds the hardware-probe limit or is invalid")
-    try:
-        with trace_path.open("x", encoding="utf-8"):
-            pass
-    except OSError as exc:
-        parser.error("cannot reserve trace path: %s" % exc)
-
-    reader = FusedPoseReader(config)
-    drive = build_differential_drive(config)
-    runner = PulseRunner(drive, reader)
-
-    def on_signal(_signum, _frame):
-        runner.aborted = True
-
-    for signum in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)):
-        if signum is not None:
-            signal.signal(signum, on_signal)
-    status = 0
-    try:
-        reader.start()
-        if not reader.wait_ready():
-            raise RuntimeError(reader.error or "fresh fused T265+SLAM pose not ready within 30 seconds")
-        if runner.aborted:
-            raise RuntimeError("operator aborted before motor start")
-        with drive:
-            result = runner.run(args.action, target, speed)
-        unit = "m" if args.action == "distance" else "deg"
-        scale = 1.0 if args.action == "distance" else 180.0 / math.pi
-        print("target=%+.3f %s predicted=%+.3f %s measured=%+.3f %s error=%+.3f %s lateral=%.3f m center_shift=%.3f m" % (
-            result.target * scale, unit, result.predicted * scale, unit,
-            result.measured * scale, unit, (result.measured - result.target) * scale, unit,
-            result.lateral_m, result.center_shift_m,
-        ))
-    except Exception as exc:
-        print("ERROR: %s: %s" % (type(exc).__name__, exc))
-        status = 1
-    finally:
-        try:
-            drive.close()
-        except Exception as exc:
-            print("drive close failed: %s" % exc)
-            status = 1
-        finally:
-            reader.stop()
-            if reader.is_alive():
-                reader.join(timeout=2.0)
-                if reader.is_alive():
-                    print("sensor worker did not stop within 2 seconds")
-                    status = 1
-        try:
-            _write_trace(trace_path, runner.trace)
-            if runner.trace:
-                print("trace: %s" % trace_path)
-        except OSError as exc:
-            print("trace write failed: %s" % exc)
-            status = 1
-        if drive.is_running:
-            print("WARNING: drive still reports running; use the physical emergency stop")
-            status = 1
-        else:
-            print("drive closed")
-    return status
+    print("Retired motion entry; use tools/closed_loop_motion.py or run_center_target_route.py", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

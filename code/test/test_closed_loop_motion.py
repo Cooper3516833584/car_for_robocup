@@ -39,8 +39,8 @@ class FakeMotion:
     def __init__(self):
         self.calls = []
 
-    def drive_distance(self, distance):
-        self.calls.append(("drive_distance", distance))
+    def track_local_line(self, start, end, *, reverse=False):
+        self.calls.append(("track_local_line", start, end, reverse))
 
 
 class FakeDrive:
@@ -63,6 +63,9 @@ class FakeRuntime:
     def start(self):
         self.started = True
 
+    def current_local_pose(self):
+        return Pose2D(0,0,0,1.)
+
     def step(self):
         return next(self.steps)
 
@@ -77,12 +80,12 @@ class ClosedLoopMotionTests(unittest.TestCase):
     def test_all_eight_actions_use_start_pose_and_correct_target(self):
         start = Pose2D(1.0, 2.0, math.pi / 2, 1.0)
         cases = [
-            (tool.ActionRequest("drive-distance", distance_m=0.5), "drive_distance", (0.5,), 1.0, 2.5),
+            (tool.ActionRequest("drive-distance", distance_m=0.5), "track_local_line", ((1.,2.),(1.,2.5)), 1.0, 2.5),
             (tool.ActionRequest("rotate", angle_rad=-math.pi / 2), "rotate", (-math.pi / 2,), 1.0, 2.0),
             (tool.ActionRequest("rotate-to", angle_rad=-math.pi / 2), "rotate_to", (0.0,), 1.0, 2.0),
-            (tool.ActionRequest("face-point", forward_m=0.3, left_m=0.1), "face_point", (0.9, 2.3), 1.0, 2.0),
-            (tool.ActionRequest("drive-to", forward_m=0.3, left_m=0.1), "drive_to", (0.9, 2.3), 0.9, 2.3),
-            (tool.ActionRequest("follow-segment", forward_m=0.3, left_m=0.1), "follow_segment", ((1.0, 2.0), (0.9, 2.3)), 0.9, 2.3),
+            (tool.ActionRequest("face-point", forward_m=0.3, left_m=0.1), "rotate_to", (math.atan2(.3,-.1),), 1.0, 2.0),
+            (tool.ActionRequest("drive-to", forward_m=0.3, left_m=0.1), "track_global_line", ((1.,2.),(.9,2.3)), 0.9, 2.3),
+            (tool.ActionRequest("follow-segment", forward_m=0.3, left_m=0.1), "track_global_line", ((1.0, 2.0), (0.9, 2.3)), 0.9, 2.3),
             (tool.ActionRequest("navigate-to", forward_m=0.3, left_m=0.1), "navigate_to", (0.9, 2.3), 0.9, 2.3),
             (tool.ActionRequest("navigate-to-pose", forward_m=0.3, left_m=0.1, angle_rad=-math.pi / 2),
              "navigate_to_pose", (0.9, 2.3, 0.0), 0.9, 2.3),
@@ -162,7 +165,7 @@ class ClosedLoopMotionTests(unittest.TestCase):
                                   sleep=sleep, clock=clock)
         self.assertTrue(runtime.started)
         self.assertEqual(started_serials, ["t265-test"])
-        self.assertEqual(runtime.motion.calls, [("drive_distance", 0.05)])
+        self.assertEqual(runtime.motion.calls, [("track_local_line", (0.,0.), (.05,0.), False)])
         self.assertEqual(runtime.drive.stop_count, 1)
         self.assertAlmostEqual(result["metrics"]["distance_error_m"], 0.0)
         self.assertGreaterEqual(result["sample_count"], 3)

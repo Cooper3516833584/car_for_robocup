@@ -108,7 +108,7 @@ class RelativeSlamTaskTests(unittest.TestCase):
             self.assertFalse(runtime._hardware_global_localization_ready(1.55),
                              "pending candidates cannot pass startup readiness")
             runtime.mission.state = RobocupMissionState.READY
-            runtime.motion.drive_distance(0.5)
+            runtime.motion.track_local_line((0,0),(.5,0))
             starting = runtime.step(now_s=1.4)
             self.assertGreater(starting.command.linear_x_m_s, 0.0)
 

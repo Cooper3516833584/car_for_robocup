@@ -63,6 +63,7 @@ class ActionTarget:
     goal_x_m: float | None = None
     goal_y_m: float | None = None
     goal_yaw_rad: float | None = None
+    reverse: bool = False
 
 
 def _bounded(value: float, name: str, limit: float) -> float:
@@ -96,7 +97,7 @@ def target_from_start(pose, request: ActionRequest) -> ActionTarget:
     if request.name == "drive-distance":
         gx = pose.x_m + request.distance_m * c
         gy = pose.y_m + request.distance_m * s
-        return ActionTarget("drive_distance", (request.distance_m,), gx, gy)
+        return ActionTarget("track_local_line", ((pose.x_m,pose.y_m),(gx,gy)), gx, gy, reverse=request.distance_m < 0)
     if request.name == "rotate":
         gyaw = normalize_angle_rad(yaw + request.angle_rad)
         return ActionTarget("rotate", (request.angle_rad,), pose.x_m, pose.y_m, gyaw)
@@ -105,11 +106,11 @@ def target_from_start(pose, request: ActionRequest) -> ActionTarget:
         return ActionTarget("rotate_to", (gyaw,), pose.x_m, pose.y_m, gyaw)
     if request.name == "face-point":
         gyaw = math.atan2(y - pose.y_m, x - pose.x_m)
-        return ActionTarget("face_point", (x, y), pose.x_m, pose.y_m, gyaw)
+        return ActionTarget("rotate_to", (gyaw,), pose.x_m, pose.y_m, gyaw)
     if request.name == "drive-to":
-        return ActionTarget("drive_to", (x, y), x, y)
+        return ActionTarget("track_global_line", ((pose.x_m,pose.y_m),(x,y)), x, y)
     if request.name == "follow-segment":
-        return ActionTarget("follow_segment", ((pose.x_m, pose.y_m), (x, y)), x, y)
+        return ActionTarget("track_global_line", ((pose.x_m, pose.y_m), (x, y)), x, y)
     if request.name == "navigate-to":
         return ActionTarget("navigate_to", (x, y), x, y)
     if request.name == "navigate-to-pose":
@@ -205,8 +206,14 @@ def run_one(runtime, config, request: ActionRequest, *, abort, max_s: float,
         sleep(PERIOD_S)
     if ready is None:
         raise TimeoutError("stationary T265+SLAM fused pose did not stay healthy for %.1f seconds" % preflight_stable_s)
-    target = target_from_start(ready, request)
-    getattr(runtime.motion, target.method)(*target.args)
+    local = runtime.current_local_pose() if request.name in {"drive-distance","rotate"} else None
+    if request.name in {"drive-distance","rotate"} and local is None:
+        raise RuntimeError("fresh continuous T265 local pose unavailable")
+    target = target_from_start(local if request.name == "drive-distance" else ready, request)
+    if target.method == "track_local_line":
+        runtime.motion.track_local_line(*target.args,reverse=target.reverse)
+    else:
+        getattr(runtime.motion,target.method)(*target.args)
     action_started = clock()
     deadline = action_started + max_s
     samples = []
