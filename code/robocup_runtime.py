@@ -271,8 +271,6 @@ class RobocupRuntime:
         self.navigator = navigator
         self.motion = motion or BasicMotionController(navigator, config.navigation, config.drive,
                                                       track_width_m=config.geometry.drive_track_width_m)
-        self._distance_control_T_t265 = None
-        self._distance_pose_mode = None
         self.mission = RobocupMission(navigator, mission_profile, self.motion)
         self.clock = clock
         self.constraints = constraints or runtime_constraints(config, mode)
@@ -415,23 +413,22 @@ class RobocupRuntime:
                 RobocupMissionState.RETURNING,
             }:
                 motion_pose = self._motion_control_pose(estimate)
-                pose_reference = "t265_local_fixed" if self._distance_pose_mode == "local" else "fused"
+                pose_reference = ("t265_local" if self.motion.action_type in {MotionActionType.TRACK_LOCAL_LINE,
+                    MotionActionType.ROTATE_LOCAL_TO, MotionActionType.ROTATE_RELATIVE} else "fused")
                 motion_output = self.motion.step(
                     motion_pose,
                     now_s=now,
                     pose_state=estimate.state,
+                    t265_pose=self.current_local_pose(estimate, now_s=now),
+                    pose_reference=pose_reference,
                 )
                 navigation_output = self.motion.last_navigation_output
                 command = motion_output.command
                 if motion_output.state is MotionActionState.SUCCEEDED:
-                    self._distance_control_T_t265 = None
-                    self._distance_pose_mode = None
                     self._slam_action_started_with_fresh_anchor = False
                     self.mission.on_motion_done()
                     command = Twist2D(0.0, 0.0)
                 elif motion_output.state in {MotionActionState.BLOCKED, MotionActionState.POSE_LOST, MotionActionState.SAFE_STOPPED, MotionActionState.ERROR}:
-                    self._distance_control_T_t265 = None
-                    self._distance_pose_mode = None
                     self._slam_action_started_with_fresh_anchor = False
                     self.mission.request_safe_stop(
                         str(motion_output.diagnostics.get("reason", motion_output.state.value))
@@ -457,8 +454,6 @@ class RobocupRuntime:
                 RobocupMissionState.TARGET_OPERATION,
             }:
                 command = Twist2D(0.0, 0.0)
-                self._distance_control_T_t265 = None
-                self._distance_pose_mode = None
                 self._safe_stop_drive()
                 if self._last_safety_state is not self.mission.state:
                     self._emit(
@@ -490,9 +485,6 @@ class RobocupRuntime:
             elif self.drive.is_running:
                 self.drive.stop()
 
-            if self.motion.action_type is not MotionActionType.DRIVE_DISTANCE or self.motion.state is not MotionActionState.RUNNING:
-                self._distance_control_T_t265 = None
-                self._distance_pose_mode = None
             limited = self.drive.last_limited_twist
             wheels = self.drive.kinematics.twist_to_wheels(limited)
             encoded_wheels = (getattr(self.drive.backend, "last_encoded_wheel_speeds_m_s", None)
@@ -524,8 +516,6 @@ class RobocupRuntime:
 
             return RuntimeStep(now, estimate, self.mission.state, command, navigation_output, motion=motion_output)
         except Exception as exc:
-            self._distance_control_T_t265 = None
-            self._distance_pose_mode = None
             self._error = f"{type(exc).__name__}: {exc}"
             self.mission.request_error(self._error)
             self._safe_stop_drive()
@@ -536,31 +526,26 @@ class RobocupRuntime:
             estimate = self.fusion.estimate(now)
             return RuntimeStep(now, estimate, self.mission.state, Twist2D(0.0, 0.0), navigation_output, self._error, motion_output)
 
+    def current_local_pose(self, estimate=None, *, now_s=None):
+        """Fresh, confident, continuous base_link T265 odometry; never SLAM feed."""
+        now = float(self.clock()) if now_s is None else float(now_s)
+        estimate = self.fusion.estimate(now) if estimate is None else estimate
+        pose = self.fusion.continuous_t265_pose
+        if (pose is None or estimate.t265_continuity_broken
+                or estimate.t265_age_s is None or estimate.t265_confidence is None
+                or not 0 <= estimate.t265_age_s <= self.config.fusion.t265_max_age_s
+                or estimate.t265_confidence < self.config.fusion.t265_min_tracker_confidence / 3
+                or not all(math.isfinite(v) for v in (pose.x_m, pose.y_m, pose.yaw_rad, pose.timestamp_s))
+                or not 0 <= now - pose.timestamp_s <= self.config.fusion.t265_max_age_s):
+            return None
+        return pose
+
     def _motion_control_pose(self, estimate):
-        if self.motion.action_type is not MotionActionType.DRIVE_DISTANCE or self.motion.state is not MotionActionState.RUNNING:
-            self._distance_control_T_t265 = None
-            self._distance_pose_mode = None
-            return estimate.pose
-        # A cancelled action can be replaced before the next runtime step.
-        if self.motion.phase is MotionPhase.INITIALIZING:
-            self._distance_control_T_t265 = None
-            self._distance_pose_mode = None
-        local_pose = self.fusion.continuous_t265_pose
-        if self._distance_pose_mode is None:
-            if estimate.pose is None:
-                return None
-            if local_pose is None:
-                self._distance_pose_mode = "fused"
-            else:
-                # drive_distance is relative: freeze T265->control at action start
-                # so SLAM map/odom corrections are not vehicle cross-track motion.
-                self._distance_control_T_t265 = compose_pose2d(estimate.pose, inverse_pose2d(local_pose))
-                self._distance_pose_mode = "local"
-        if self._distance_pose_mode == "fused":
-            return estimate.pose
-        if local_pose is None:
-            return None  # Keep the existing pose-loss stop; never switch frames mid-action.
-        return compose_pose2d(self._distance_control_T_t265, local_pose)
+        if self.motion.action_type in {MotionActionType.TRACK_LOCAL_LINE,
+                                      MotionActionType.ROTATE_LOCAL_TO,
+                                      MotionActionType.ROTATE_RELATIVE}:
+            return self.current_local_pose(estimate, now_s=self._current_step_s)
+        return estimate.pose
 
     def run_steps(self, count: int, *, period_s: float = 0.05) -> list[RuntimeStep]:
         if count < 0 or period_s <= 0.0:
@@ -613,8 +598,6 @@ class RobocupRuntime:
     def close(self) -> None:
         if self._closed:
             return
-        self._distance_control_T_t265 = None
-        self._distance_pose_mode = None
         self._emit("runtime_closed", mission_state=self.mission.state.value, priority=True)
         # Stop the base first; source shutdown can block while joining workers.
         self._safe_stop_drive()

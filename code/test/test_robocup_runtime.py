@@ -44,7 +44,7 @@ class RobocupRuntimeTests(unittest.TestCase):
         self.estimate = FusedPoseEstimate(
             fused or Pose2D(10., 20., 0., self.now[0]), PoseFusionState.OK,
             0., ("t265", "slam", "fused"), 0., 0., None, None, True,
-            anchor_initialized=True)
+            anchor_initialized=True, t265_confidence=1.0)
         local_patch = patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock)
         local_property = local_patch.start()
         self.addCleanup(local_patch.stop)
@@ -66,161 +66,64 @@ class RobocupRuntimeTests(unittest.TestCase):
         return [call.args[0] for call in runtime.event_logger.emit.call_args_list
                 if call.args[0]["type"] == "motion_action"][-1]
 
-    def test_distance_slam_lateral_correction_does_not_steer_or_block(self):
+    def test_local_line_ignores_slam_anchor_correction(self):
         runtime = self.make_distance_reference_runtime()
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
-        with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-            runtime.step(now_s=self.now[0])
-            result = self.distance_reference_step(runtime, (.06, 0., 0.), (10.06, 20.03, 0.))
-            control_pose = step.call_args.args[0]
-        self.assertAlmostEqual(control_pose.x_m, 10.06)
-        self.assertAlmostEqual(control_pose.y_m, 20.)
-        self.assertEqual(result.motion.state, MotionActionState.RUNNING)
-        self.assertAlmostEqual(result.motion.diagnostics["cross_track_error_m"], 0.)
-        self.assertAlmostEqual(result.command.angular_z_rad_s, 0.)
-        self.assertIs(result.estimate, self.estimate)  # Global logging/mission pose remains fused.
-        self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "t265_local_fixed")
-
-    def test_distance_real_local_lateral_motion_still_blocks(self):
-        runtime = self.make_distance_reference_runtime()
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
+        runtime.motion.track_local_line((0,0),(.47,0))
         runtime.step(now_s=self.now[0])
-        result = self.distance_reference_step(runtime, (.06, .031, 0.), (10.06, 20.031, 0.))
-        self.assertAlmostEqual(result.motion.diagnostics["cross_track_error_m"], .031)
-        self.assertEqual(result.motion.diagnostics["reason"], "straight_distance_lateral_error_exceeded")
-        self.assertEqual(result.mission_state, RobocupMissionState.SAFE_STOP)
-        self.assertEqual(result.command, Twist2D(0., 0.))
-        self.assertIsNone(runtime._distance_pose_mode)
-        self.assertIsNone(runtime._distance_control_T_t265)
-        self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "t265_local_fixed")
+        result = self.distance_reference_step(runtime, (.06,0,0), (10.06,20.03,.1))
+        self.assertAlmostEqual(result.motion.diagnostics["cross_track_m"],0)
+        self.assertEqual(result.command.angular_z_rad_s,0)
+        self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "t265_local")
 
-    def test_distance_gradual_slam_blend_never_changes_fixed_reference(self):
+    def test_real_local_drift_is_corrected_without_blocking(self):
         runtime = self.make_distance_reference_runtime()
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
+        runtime.motion.track_local_line((0,0),(.47,0))
         runtime.step(now_s=self.now[0])
-        fixed = runtime._distance_control_T_t265
-        offsets = (0., .0107, .0177, .0223, .0253, .0273, .0305)
-        for i, offset in enumerate(offsets, 1):
-            result = self.distance_reference_step(runtime, (.01*i, 0., 0.), (10.+.01*i, 20.+offset, 0.))
-            self.assertIs(runtime._distance_control_T_t265, fixed)
-            self.assertAlmostEqual(result.motion.diagnostics["cross_track_error_m"], 0.)
-            self.assertAlmostEqual(result.command.angular_z_rad_s, 0.)
-            self.assertEqual(result.motion.state, MotionActionState.RUNNING)
+        result = self.distance_reference_step(runtime, (.06,.05,0), (10.06,20.05,0))
+        self.assertEqual(result.motion.state,MotionActionState.RUNNING)
+        self.assertGreater(result.command.linear_x_m_s,0)
+        self.assertLess(result.command.angular_z_rad_s,0)
 
-    def test_distance_fixed_alignment_handles_map_rotation_and_saved_heading(self):
-        start = Pose2D(10., 20., math.pi/2, 10.)
-        runtime = self.make_distance_reference_runtime(fused=start, local=Pose2D(2., 3., 0., 10.))
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03, heading_yaw_rad=math.pi/2)
-        with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-            runtime.step(now_s=self.now[0])
-            initial = step.call_args.args[0]
-            self.assertAlmostEqual(initial.x_m, start.x_m)
-            self.assertAlmostEqual(initial.y_m, start.y_m)
-            self.assertAlmostEqual(initial.yaw_rad, start.yaw_rad)
-            result = self.distance_reference_step(runtime, (2.06, 3., 0.), (10.03, 20.06, 1.8))
-            control = step.call_args.args[0]
-        self.assertAlmostEqual(control.x_m, 10.)
-        self.assertAlmostEqual(control.y_m, 20.06)
-        self.assertAlmostEqual(control.yaw_rad, math.pi/2)
-        self.assertAlmostEqual(result.motion.diagnostics["cross_track_error_m"], 0.)
-        self.assertAlmostEqual(result.command.angular_z_rad_s, 0.)
-
-    def test_non_distance_actions_keep_fused_pose_and_clear_reference(self):
-        actions = (("rotate", (.5,)), ("rotate_to", (.5,)),
-                   ("follow_segment", ((10., 20.), (11., 20.))),
-                   ("navigate_to", (11., 20.)), ("navigate_to_pose", (11., 20., .5)))
-        for method, args in actions:
-            with self.subTest(action=method):
-                runtime = self.make_distance_reference_runtime()
-                runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
+    def test_local_missing_stale_confidence_and_continuity_fail_closed(self):
+        for reason in ('missing','stale','confidence','continuity','future'):
+            with self.subTest(reason=reason):
+                runtime=self.make_distance_reference_runtime()
+                runtime.motion.track_local_line((0,0),(.47,0))
                 runtime.step(now_s=self.now[0])
-                runtime.motion.stop()
-                getattr(runtime.motion, method)(*args)
-                with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-                    self.distance_reference_step(runtime, (.06, 0., 0.), (10.06, 20.03, .1))
-                    self.assertIs(step.call_args.args[0], self.estimate.pose)
-                self.assertIsNone(runtime._distance_pose_mode)
-                self.assertIsNone(runtime._distance_control_T_t265)
-                self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "fused")
+                if reason == 'missing': self.local=None
+                if reason == 'stale': self.local=replace(self.local,timestamp_s=self.now[0]-1)
+                if reason == 'future': self.local=replace(self.local,timestamp_s=self.now[0]+1)
+                if reason == 'confidence': self.estimate=replace(self.estimate,t265_confidence=0)
+                if reason == 'continuity': self.estimate=replace(self.estimate,t265_continuity_broken=True)
+                result=runtime.step(now_s=self.now[0])
+                self.assertEqual(result.command,Twist2D(0,0))
+                self.assertEqual(result.mission_state,RobocupMissionState.SAFE_STOP)
 
-    def test_consecutive_distances_realign_after_success(self):
-        runtime = self.make_distance_reference_runtime()
-        runtime.motion.drive_distance(.07, lateral_tolerance_m=.03)
-        runtime.step(now_s=self.now[0])
-        fixed = runtime._distance_control_T_t265
-        done = self.distance_reference_step(runtime, (.07, 0., 0.), (10.07, 20.03, 0.))
-        self.assertEqual(done.motion.state, MotionActionState.SUCCEEDED)
-        self.assertIsNone(runtime._distance_pose_mode)
-        self.assertIsNone(runtime._distance_control_T_t265)
-        self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "t265_local_fixed")
-        runtime.mission.on_payload_action_done()
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
-        with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-            self.distance_reference_step(runtime, (.07, 0., 0.), (11.07, 21.03, .1))
-            self.assertAlmostEqual(step.call_args.args[0].x_m, 11.07)
-            self.assertAlmostEqual(step.call_args.args[0].y_m, 21.03)
-        self.assertNotEqual(runtime._distance_control_T_t265, fixed)
+    def test_global_actions_use_fused_and_local_turns_use_t265(self):
+        for name,args,local in [('track_global_line',((10,20),(11,20)),False),
+                               ('navigate_to',(11,20),False),('rotate_to',(.5,),False),
+                               ('rotate_local_to',(.5,),True),('rotate',(.5,),True)]:
+            runtime=self.make_distance_reference_runtime()
+            getattr(runtime.motion,name)(*args)
+            runtime._current_step_s=self.now[0]
+            self.assertIs(runtime._motion_control_pose(self.estimate),self.local if local else self.estimate.pose)
 
-    def test_cancel_and_replace_distance_before_runtime_tick_realigns(self):
-        runtime = self.make_distance_reference_runtime()
-        runtime.motion.drive_distance(.07, lateral_tolerance_m=.03)
+    def test_cancel_and_resume_reprojects_original_local_line(self):
+        runtime=self.make_distance_reference_runtime()
+        runtime.motion.track_local_line((0,0),(.47,0))
         runtime.step(now_s=self.now[0])
         runtime.motion.stop()
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
-        with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-            self.distance_reference_step(runtime, (.02, 0., 0.), (12.02, 23., .2))
-            self.assertAlmostEqual(step.call_args.args[0].x_m, 12.02)
-            self.assertAlmostEqual(step.call_args.args[0].y_m, 23.)
+        runtime.motion.track_local_line((0,0),(.47,0))
+        result=self.distance_reference_step(runtime,(.2,0,0),(12,23,.2))
+        self.assertAlmostEqual(result.motion.diagnostics['progress_m'],.2)
 
-    def test_local_distance_pose_loss_stops_without_fused_fallback(self):
-        runtime = self.make_distance_reference_runtime()
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
+    def test_terminal_lateral_error_stops_mission(self):
+        runtime=self.make_distance_reference_runtime()
+        runtime.motion.track_local_line((0,0),(.47,0))
         runtime.step(now_s=self.now[0])
-        with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-            result = self.distance_reference_step(runtime, None, (10.06, 20.03, 0.))
-            self.assertIsNone(step.call_args.args[0])
-        self.assertEqual(result.motion.state, MotionActionState.POSE_LOST)
-        self.assertEqual(result.command, Twist2D(0., 0.))
-        self.assertEqual(result.mission_state, RobocupMissionState.SAFE_STOP)
-        self.assertIsNone(runtime._distance_pose_mode)
-        self.assertIsNone(runtime._distance_control_T_t265)
-
-    def test_distance_fused_start_keeps_fused_when_t265_appears(self):
-        runtime = self.make_distance_reference_runtime()
-        self.local = None
-        runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
-        runtime.step(now_s=self.now[0])
-        self.assertEqual(runtime._distance_pose_mode, "fused")
-        with patch.object(runtime.motion, "step", wraps=runtime.motion.step) as step:
-            self.distance_reference_step(runtime, (.06, 0., 0.), (10.06, 20.01, 0.))
-            self.assertIs(step.call_args.args[0], self.estimate.pose)
-        self.assertEqual(runtime._distance_pose_mode, "fused")
-        self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "fused")
-
-    def test_distance_forward_reverse_endpoint_residuals_still_stop_without_pivot(self):
-        for distance in (.47, -.47):
-            with self.subTest(distance=distance):
-                runtime = self.make_distance_reference_runtime()
-                runtime.motion.drive_distance(distance, lateral_tolerance_m=.03, heading_yaw_rad=0.)
-                runtime.step(now_s=self.now[0])
-                result = self.distance_reference_step(runtime, (distance, .02, 0.),
-                                                      (10.+distance, 20.05, 0.))
-                self.assertEqual(result.motion.state, MotionActionState.SUCCEEDED)
-                self.assertEqual(result.command, Twist2D(0., 0.))
-
-    def test_distance_terminal_outputs_clear_reference_and_log_used_frame(self):
-        for state in (MotionActionState.SUCCEEDED, MotionActionState.BLOCKED,
-                      MotionActionState.POSE_LOST, MotionActionState.SAFE_STOPPED, MotionActionState.ERROR):
-            with self.subTest(state=state):
-                runtime = self.make_distance_reference_runtime()
-                runtime.motion.drive_distance(.47, lateral_tolerance_m=.03)
-                output = MotionOutput(Twist2D(0., 0.), state, MotionActionType.DRIVE_DISTANCE,
-                                      MotionPhase.DONE, {"reason": "test terminal"})
-                with patch.object(runtime.motion, "step", return_value=output):
-                    runtime.step(now_s=self.now[0])
-                self.assertIsNone(runtime._distance_pose_mode)
-                self.assertIsNone(runtime._distance_control_T_t265)
-                self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "t265_local_fixed")
+        result=self.distance_reference_step(runtime,(.47,.04,0),(10.47,20.04,0))
+        self.assertEqual(result.command,Twist2D(0,0))
+        self.assertEqual(result.mission_state,RobocupMissionState.SAFE_STOP)
 
     def test_dry_run_builds_full_fake_runtime_and_closes(self) -> None:
         runtime = self.make_runtime()
@@ -235,13 +138,13 @@ class RobocupRuntimeTests(unittest.TestCase):
 
     def test_direct_motion_reaches_fake_drive_without_map_navigation(self) -> None:
         runtime = self.make_runtime()
-        runtime.motion.drive_distance(1.0)
+        runtime.motion.track_global_line((0,0),(1,0))
         runtime.start()
         try:
             result = runtime.step(now_s=10.0)
             self.assertIsNone(result.navigation)
             self.assertIsNotNone(result.motion)
-            self.assertEqual(result.motion.action_type.value, "drive_distance")
+            self.assertEqual(result.motion.action_type.value, "track_global_line")
             self.assertGreater(result.command.linear_x_m_s, 0.0)
             self.assertIsNone(runtime.navigator.goal)
         finally:
@@ -249,7 +152,7 @@ class RobocupRuntimeTests(unittest.TestCase):
 
     def test_direct_motion_completion_advances_mission(self) -> None:
         runtime = self.make_runtime()
-        runtime.motion.drive_distance(0.0)
+        runtime.motion.track_global_line((-.1,0),(0,0))
         runtime.start()
         try:
             result = runtime.step(now_s=10.0)
