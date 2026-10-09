@@ -196,7 +196,7 @@ def build_differential_navigator(config: DifferentialRobotConfig):
 
     from components.differential_navigation import DifferentialNavigator
 
-    return DifferentialNavigator(config.drive, config.navigation)
+    return DifferentialNavigator(config.drive, config.navigation, track_width_m=config.geometry.drive_track_width_m)
 
 
 def build_basic_motion_controller(config: DifferentialRobotConfig, navigator):

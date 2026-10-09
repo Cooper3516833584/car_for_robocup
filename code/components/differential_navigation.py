@@ -39,106 +39,130 @@ class ControllerOutput:
     diagnostics: dict[str, float | str | bool]
 
 
+def clamp(value, lo, hi):
+    return max(lo, min(hi, value))
+
+
 class DifferentialPathController:
-    """Pure pursuit/rotate-first controller returning only body ``Twist2D``."""
+    """The only translation kernel: directed line Pure Pursuit, no motor I/O."""
 
-    def __init__(
-        self,
-        navigation: NavigationConfig,
-        drive: DifferentialDriveConfig,
-    ) -> None:
-        self.navigation = navigation
-        self.drive = drive
-        self._path_index = 0
+    def __init__(self, navigation, drive, *, track_width_m=0.198):
+        self.navigation, self.drive = navigation, drive
+        self.track_width_m = track_width_m
+        self.reset_path()
 
-    def reset_path(self) -> None:
-        self._path_index = 0
+    def reset_path(self):
+        self.progress_m = 0.0
 
-    def compute(
-        self,
-        pose: Pose2D,
-        path: tuple[tuple[float, float], ...],
-        goal: NavigationGoal,
-        *,
-        protocol_compat: bool = False,
-    ) -> ControllerOutput:
-        dx_goal, dy_goal = goal.x_m - pose.x_m, goal.y_m - pose.y_m
-        distance_goal = math.hypot(dx_goal, dy_goal)
-        if distance_goal <= self.navigation.position_tolerance_m:
-            if goal.yaw_rad is None:
-                return ControllerOutput(Twist2D(0.0, 0.0), NavigationState.GOAL_REACHED, {"goal_distance_m": distance_goal})
-            yaw_error = normalize_angle_rad(goal.yaw_rad - pose.yaw_rad)
-            if abs(yaw_error) <= self.navigation.yaw_tolerance_rad:
-                return ControllerOutput(Twist2D(0.0, 0.0), NavigationState.GOAL_REACHED, {"goal_distance_m": distance_goal, "yaw_error_rad": yaw_error})
-            if not self.drive.allow_in_place_rotation:
-                return ControllerOutput(Twist2D(0.0, 0.0), NavigationState.BLOCKED, {"reason": "final_yaw_requires_in_place_rotation", "yaw_error_rad": yaw_error})
-            omega = self._clamp(
-                self.navigation.final_yaw_gain * yaw_error,
-                self.drive.max_angular_speed_rad_s,
-            )
-            return ControllerOutput(Twist2D(0.0, omega), NavigationState.FINAL_ALIGN, {"goal_distance_m": distance_goal, "yaw_error_rad": yaw_error})
+    def compute_line(self, pose, start, end, previous_progress_m=0.0, *, reverse=False,
+                     position_tolerance_m=None, terminal_lateral_m=0.03):
+        lookahead_m = self.navigation.lookahead_m
+        speed_limit_m_s = self.drive.max_linear_speed_m_s
+        stop_tolerance_m = (self.navigation.position_tolerance_m if position_tolerance_m is None
+                            else position_tolerance_m)
+        max_omega_rad_s = self.drive.max_angular_speed_rad_s
+        track_width_m = self.track_width_m
+        decel_m_s2 = self.drive.max_linear_accel_m_s2
+        px, py, yaw = pose.x_m, pose.y_m, pose.yaw_rad
+        ax, ay = start
+        bx, by = end
+        values = (px, py, yaw, ax, ay, bx, by, previous_progress_m, lookahead_m,
+                  speed_limit_m_s, stop_tolerance_m, terminal_lateral_m,
+                  max_omega_rad_s, track_width_m, decel_m_s2)
+        if not all(math.isfinite(x) for x in values):
+            raise ValueError("non-finite Pure Pursuit input")
+        if min(lookahead_m, speed_limit_m_s, stop_tolerance_m, terminal_lateral_m,
+               max_omega_rad_s, track_width_m, decel_m_s2) <= 0.0:
+            raise ValueError("positive limits required")
 
-        target = self._lookahead_point(pose, path)
-        dx, dy = target[0] - pose.x_m, target[1] - pose.y_m
-        heading = math.atan2(dy, dx)
-        heading_error = normalize_angle_rad(heading - pose.yaw_rad)
-        if protocol_compat:
-            if abs(heading_error) > self.navigation.yaw_tolerance_rad:
-                if not self.drive.allow_in_place_rotation:
-                    return ControllerOutput(Twist2D(0.0, 0.0), NavigationState.BLOCKED, {"reason": "compatibility_path_requires_in_place_rotation", "heading_error_rad": heading_error})
-                omega = self._clamp(self.navigation.path_yaw_gain * heading_error, self.drive.max_angular_speed_rad_s)
-                return ControllerOutput(Twist2D(0.0, omega), NavigationState.ROTATING_TO_PATH, {"heading_error_rad": heading_error, "compatibility_rotate_first": True})
-            speed = self._forward_speed(distance_goal, heading_error)
-            return ControllerOutput(Twist2D(speed, 0.0), NavigationState.TRACKING, {"heading_error_rad": heading_error, "compatibility_rotate_first": True})
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            raise ValueError("line endpoints must be different")
+        ux, uy = dx / length, dy / length
+        raw_s = (px - ax) * ux + (py - ay) * uy
+        cross = ux * (py - ay) - uy * (px - ax)
+        progress = max(clamp(previous_progress_m, 0.0, length),
+                       clamp(raw_s, 0.0, length))
+        remaining = length - raw_s
+        info: dict[str, float | str | bool] = {
+            "progress_m": progress, "reverse": reverse,
+            "raw_progress_m": raw_s,
+            "remaining_m": remaining,
+            "cross_track_m": cross,
+            "segment_length_m": length,
+        }
 
-        if abs(heading_error) > self.navigation.rotate_in_place_threshold_rad:
-            if not self.drive.allow_in_place_rotation:
-                return ControllerOutput(Twist2D(0.0, 0.0), NavigationState.BLOCKED, {"reason": "path_heading_requires_in_place_rotation", "heading_error_rad": heading_error})
-            omega = self._clamp(self.navigation.path_yaw_gain * heading_error, self.drive.max_angular_speed_rad_s)
-            return ControllerOutput(Twist2D(0.0, omega), NavigationState.ROTATING_TO_PATH, {"heading_error_rad": heading_error})
+        def result(v, omega, state, status):
+            info.update(line_state=status, command_v_m_s=v, command_omega_rad_s=omega)
+            if state is NavigationState.BLOCKED:
+                info["reason"] = status
+            return ControllerOutput(Twist2D(v, omega), state, info)
 
-        local_x = math.cos(pose.yaw_rad) * dx + math.sin(pose.yaw_rad) * dy
-        local_y = -math.sin(pose.yaw_rad) * dx + math.cos(pose.yaw_rad) * dy
-        lookahead_sq = max(dx * dx + dy * dy, 1e-9)
+        # Stop based on un-clamped physical along-track progress, never on
+        # monotonic carrot progress alone. Do not pivot toward a lateral endpoint.
+        if remaining <= stop_tolerance_m:
+            if abs(cross) > terminal_lateral_m:
+                return result(0.0, 0.0, NavigationState.BLOCKED, "terminal_lateral_error")
+            return result(0.0, 0.0, NavigationState.GOAL_REACHED, "arrived")
+
+        carrot_s = min(length, progress + lookahead_m)
+        cx, cy = ax + ux * carrot_s, ay + uy * carrot_s
+        wx, wy = cx - px, cy - py
+        co, si = math.cos(yaw), math.sin(yaw)
+        local_x = co * wx + si * wy
+        local_y = -si * wx + co * wy
+        lookahead_sq = local_x * local_x + local_y * local_y
+        info.update(carrot_x_m=cx, carrot_y_m=cy,
+                    carrot_local_x_m=local_x, carrot_local_y_m=local_y)
+        if lookahead_sq < 1e-8:
+            return result(0.0, 0.0, NavigationState.BLOCKED, "carrot_degenerate")
+
+        # For reverse the robot's forward axis should point away from the carrot.
+        # This angle is correct even if the chassis yaw is not exactly on the line.
+        heading_error = (math.atan2(-local_y, -local_x) if reverse
+                         else math.atan2(local_y, local_x))
+        info["heading_error_rad"] = heading_error
+        if abs(heading_error) > math.radians(60.0):
+            # Rotate in place toward the FORWARD travel-facing angle. This is not
+            # a backwards path recovery; the separate turn/stable-stop controller
+            # should own actual completion on hardware.
+            omega = clamp(1.5 * heading_error, -0.30, 0.30)
+            return result(0.0, omega, NavigationState.ROTATING_TO_PATH, "align_forward")
+
         curvature = 2.0 * local_y / lookahead_sq
-        speed = self._forward_speed(distance_goal, heading_error)
-        omega = self._clamp(speed * curvature, self.drive.max_angular_speed_rad_s)
-        return ControllerOutput(
-            Twist2D(speed, omega),
-            NavigationState.TRACKING,
-            {"heading_error_rad": heading_error, "curvature_inv_m": curvature, "goal_distance_m": distance_goal},
-        )
+        # A 0.045 m/s floor reflects prior car tests; not a universal motor value.
+        speed = min(speed_limit_m_s, math.sqrt(2.0 * decel_m_s2 * max(remaining, 0.0)))
+        speed = max(0.045, speed / (1.0 + 0.5 * abs(curvature)))
+        speed = min(speed, speed_limit_m_s)
+        if length <= 0.10:
+            speed = min(speed, 0.08)  # conservative first trial for 7 cm moves
+        speed = max(0.0, speed)
+        signed_v = -speed if reverse else speed
+        omega = signed_v * curvature
+        # For translated motion, disallow one wheel reversing while the other
+        # goes forward: wheel reversal was unreliable immediately after turns.
+        # In-place turns above are deliberately exempt.
+        no_wheel_reversal_omega = 1.8 * abs(signed_v) / track_width_m
+        omega_limit = min(max_omega_rad_s, no_wheel_reversal_omega)
+        omega = clamp(omega, -omega_limit, omega_limit)
+        wheel_peak = abs(signed_v) + abs(omega) * track_width_m / 2
+        scale = min(1.0, self.drive.max_wheel_speed_m_s / max(wheel_peak, 1e-9))
+        signed_v *= scale
+        omega *= scale
+        info.update(curvature_inv_m=curvature, carrot_progress_m=carrot_s,
+                    max_tracking_omega_rad_s=omega_limit)
+        return result(signed_v, omega, NavigationState.TRACKING, "tracking")
 
-    def _forward_speed(self, distance_goal: float, heading_error: float) -> float:
-        speed_scale = max(0.25, math.cos(min(abs(heading_error), math.pi / 2.0)))
-        if self.navigation.slowdown_distance_m > 0.0:
-            speed_scale *= min(1.0, distance_goal / self.navigation.slowdown_distance_m)
-        return min(self.drive.max_linear_speed_m_s, self.drive.max_linear_speed_m_s * speed_scale)
-
-    def _lookahead_point(
-        self, pose: Pose2D, path: tuple[tuple[float, float], ...]
-    ) -> tuple[float, float]:
+    def compute(self, pose, path, goal, *, protocol_compat=False):
+        # Compatibility changes the backend, never selects a second controller.
         if not path:
-            raise RuntimeError("path is empty")
-        nearest = min(
-            range(self._path_index, len(path)),
-            key=lambda index: (path[index][0] - pose.x_m) ** 2 + (path[index][1] - pose.y_m) ** 2,
-        )
-        self._path_index = nearest
-        remaining = self.navigation.lookahead_m
-        current = (pose.x_m, pose.y_m)
-        for point in path[nearest + 1 :]:
-            segment = math.hypot(point[0] - current[0], point[1] - current[1])
-            if segment >= remaining and segment > 1e-12:
-                fraction = remaining / segment
-                return (current[0] + (point[0] - current[0]) * fraction, current[1] + (point[1] - current[1]) * fraction)
-            remaining -= segment
-            current = point
-        return path[-1]
-
-    @staticmethod
-    def _clamp(value: float, maximum: float) -> float:
-        return max(-maximum, min(maximum, value))
+            raise ValueError("path is empty")
+        if math.dist(path[0], path[-1]) < 1e-9:
+            return ControllerOutput(Twist2D(0, 0), NavigationState.GOAL_REACHED, {})
+        output = self.compute_line(pose, path[0], path[-1], self.progress_m)
+        self.progress_m = output.diagnostics["progress_m"]
+        return output
 
 
 class DifferentialNavigator:
@@ -148,10 +172,11 @@ class DifferentialNavigator:
         self,
         drive: DifferentialDriveConfig,
         navigation: NavigationConfig,
+        *, track_width_m: float = 0.198,
     ) -> None:
         self.drive = drive
         self.navigation = navigation
-        self.controller = DifferentialPathController(navigation, drive)
+        self.controller = DifferentialPathController(navigation, drive, track_width_m=track_width_m)
         self.goal: NavigationGoal | None = None
         self._path: tuple[tuple[float, float], ...] = ()
         self._state = NavigationState.IDLE
