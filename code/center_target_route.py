@@ -249,11 +249,11 @@ def route_from_pose(pose):
                 pose.y_m + forward * s + left * c)
 
     return (
-        RouteAction("forward_280cm", "follow_segment", (xy(0, 0), xy(2.8, 0))),
+        RouteAction("forward_280cm", "track_global_line", (xy(0, 0), xy(2.8, 0))),
         RouteAction("left_90deg_1", "rotate_to", (pose.yaw_rad + math.pi / 2,)),
-        RouteAction("forward_420cm", "follow_segment", (xy(2.8, 0), xy(2.8, 4.2))),
+        RouteAction("forward_420cm", "track_global_line", (xy(2.8, 0), xy(2.8, 4.2))),
         RouteAction("left_90deg_2", "rotate_to", (pose.yaw_rad + math.pi,)),
-        RouteAction("forward_250cm", "follow_segment", (xy(2.8, 4.2), xy(0.3, 4.2))),
+        RouteAction("forward_250cm", "track_global_line", (xy(2.8, 4.2), xy(0.3, 4.2))),
     )
 
 
@@ -323,14 +323,14 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                 if detour is not None:
                     frame_at, visible, centered = vision.observe_drop(clock())
                     entry = None
-                    target_visible = visible is not None and action.method == "follow_segment"
+                    target_visible = visible is not None and action.method == "track_global_line"
                     if target_visible != slowing:
                         slowing = target_visible
                         runtime.motion.drive = slow_drive if slowing else original_drive
                         runtime.record_event("test_route_target_speed", slowing=slowing,
                                              max_speed_m_s=runtime.motion.drive.max_linear_speed_m_s)
                     # Only patrol straight segments trigger; turns do not re-arm.
-                    if action.method == "follow_segment" and frame_at != last_drop_frame:
+                    if action.method == "track_global_line" and frame_at != last_drop_frame:
                         last_drop_frame = frame_at
                         if drop_latch.update(visible, trigger=centered is not None) is not None:
                             entry = centered

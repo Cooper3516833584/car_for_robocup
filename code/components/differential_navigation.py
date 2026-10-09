@@ -72,7 +72,7 @@ class DifferentialPathController:
     def compute_line(self, pose, start, end, previous_progress_m=0.0, *, reverse=False,
                      position_tolerance_m=None, terminal_lateral_m=0.03):
         lookahead_m = self.navigation.lookahead_m
-        speed_limit_m_s = self.drive.max_linear_speed_m_s
+        speed_limit_m_s = min(0.15, self.drive.max_linear_speed_m_s)
         stop_tolerance_m = (self.navigation.position_tolerance_m if position_tolerance_m is None
                             else position_tolerance_m)
         max_omega_rad_s = self.drive.max_angular_speed_rad_s

@@ -60,7 +60,7 @@ class CenterTargetTests(unittest.TestCase):
         start = Pose2D(5, 7, math.pi / 2, 0)
         route = task.route_from_pose(start)
         self.assertEqual([a.method for a in route],
-                         ["follow_segment", "rotate_to", "follow_segment", "rotate_to", "follow_segment"])
+                         ["track_global_line", "rotate_to", "track_global_line", "rotate_to", "track_global_line"])
         for index, distance in ((0, 2.8), (2, 4.2), (4, 2.5)):
             self.assertAlmostEqual(math.dist(*route[index].args), distance)
         self.assertAlmostEqual(route[1].args[0] - start.yaw_rad, math.pi / 2)
