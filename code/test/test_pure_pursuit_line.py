@@ -28,6 +28,52 @@ def line_step(pose, start, end, previous_progress_m, **kwargs):
 
 
 class PurePursuitReferenceTests(unittest.TestCase):
+    def test_near_endpoint_virtual_carrot_keeps_small_forward_correction(self):
+        out = line_step((.463, .020, 0), (0, 0), (.47, 0), 0)
+        self.assertEqual(out.status, "tracking")
+        self.assertGreater(out.v_m_s, 0)
+        self.assertLess(abs(out.details["heading_error_rad"]), math.radians(15))
+        self.assertLess(out.omega_rad_s, 0)
+        self.assertAlmostEqual(out.details["carrot_x_m"], .663)
+        self.assertAlmostEqual(out.details["remaining_m"], .007)
+        self.assertAlmostEqual(out.details["segment_length_m"], .47)
+
+    def test_endpoint_cross_track_checks_stop_without_turning(self):
+        for cross, status in ((.020, "arrived"), (.040, "terminal_lateral_error")):
+            with self.subTest(cross=cross):
+                out = line_step((.470, cross, 0), (0, 0), (.47, 0), 0)
+                self.assertEqual(out.status, status)
+                self.assertEqual((out.v_m_s, out.omega_rad_s), (0, 0))
+
+    def test_real_overshoot_is_blocked_even_with_large_yaw_error(self):
+        for x in (.570, .476):
+            for yaw in (0, math.pi):
+                with self.subTest(x=x, yaw=yaw):
+                    out = line_step((x, 0, yaw), (0, 0), (.47, 0), .47)
+                    self.assertEqual(out.status, "line_overshoot")
+                    self.assertEqual(out.details["reason"], "line_overshoot")
+                    self.assertEqual((out.v_m_s, out.omega_rad_s), (0, 0))
+                    self.assertAlmostEqual(out.details["raw_progress_m"], x)
+                    self.assertAlmostEqual(out.details["remaining_m"], .47-x)
+
+    def test_symmetric_arrival_tolerance_uses_actual_projection(self):
+        for x, status in ((.466, "arrived"), (.474, "arrived"), (.464, "tracking")):
+            with self.subTest(x=x):
+                out = line_step((x, 0, 0), (0, 0), (.47, 0), .47)
+                self.assertEqual(out.status, status)
+                self.assertAlmostEqual(out.progress_m, .47)
+                if status == "tracking":
+                    self.assertGreater(out.v_m_s, 0)
+
+    def test_reverse_near_endpoint_uses_virtual_carrot_without_forward_motion(self):
+        out = line_step((.007, .020, 0), (.47, 0), (0, 0), 0, reverse=True)
+        self.assertEqual(out.status, "tracking")
+        self.assertLess(out.v_m_s, 0)
+        self.assertLess(abs(out.details["heading_error_rad"]), math.radians(15))
+        self.assertGreater(out.omega_rad_s, 0)
+        self.assertAlmostEqual(out.details["carrot_x_m"], -.193)
+        self.assertAlmostEqual(out.details["remaining_m"], .007)
+
     def test_forward_drift_to_left_turns_right_without_reversing(self):
         out = line_step((0.05, 0.06, 0.0), (0.0, 0.0), (2.0, 0.0), 0.0)
         self.assertEqual(out.status, "tracking")

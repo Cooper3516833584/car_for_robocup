@@ -151,7 +151,8 @@ class DifferentialPathController:
                 info["reason"] = status
             return ControllerOutput(Twist2D(v, omega), state, info)
 
-        carrot_s = min(length, progress + lookahead_m)
+        # Virtual lookahead guides steering; the real endpoint still owns stopping.
+        carrot_s = progress + lookahead_m
         cx, cy = ax + ux * carrot_s, ay + uy * carrot_s
         wx, wy = cx - px, cy - py
         co, si = math.cos(yaw), math.sin(yaw)
@@ -165,6 +166,9 @@ class DifferentialPathController:
                     target_yaw_rad=normalize_angle_rad(math.atan2(dy,dx)+(math.pi if reverse else 0)))
         # Stop based on un-clamped physical along-track progress, never on
         # monotonic carrot progress alone. Do not pivot toward a lateral endpoint.
+        if remaining < -stop_tolerance_m:
+            return result(0.0, 0.0, NavigationState.BLOCKED, "line_overshoot")
+
         if remaining <= stop_tolerance_m:
             if abs(cross) > terminal_lateral_m:
                 return result(0.0, 0.0, NavigationState.BLOCKED, "terminal_lateral_error")
