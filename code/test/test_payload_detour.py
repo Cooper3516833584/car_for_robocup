@@ -162,27 +162,6 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertEqual(starts["right_90deg"]["args"],(0.,))
         self.assert_safe_exit()
 
-    def settle_advance(dt):
-            nonlocal settling_time, injected
-            if self.stage == "left_90deg" and self.runtime.motion.state is MotionActionState.SUCCEEDED:
-                self.assert_stopped()
-                settling_time += dt
-                if not injected:
-                    self.pose[2] += .02  # Observe the final turn pose after the first completion tick.
-                    injected = True
-            advance(dt)
-
-        self.run_detour(sleep=settle_advance)
-        self.assertTrue(injected)
-        self.assertAlmostEqual(settling_time, .20)
-        headings = [data["kwargs"]["heading_yaw_rad"] for event, data in self.events
-                    if event == "payload_detour_stage_start"
-                    and data["stage"] in ("forward_47cm", "reverse_47cm")]
-        final_yaw = self.stage_poses["left_90deg"].yaw_rad + .02
-        self.assertAlmostEqual(headings[0], final_yaw)
-        self.assertEqual(headings[0], headings[1])
-        self.assert_safe_exit()
-
     def test_abort_during_turn_settling_prevents_approach_and_releases_all(self):
         self.fixture()
 
