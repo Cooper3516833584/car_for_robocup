@@ -86,6 +86,38 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             hold_failure = exc
             raise
 
+    def verify_stopped_at_drop(A, B):
+        previous = None
+        stable = 0
+        deadline = clock() + 2.0
+        ux, uy = (B[0]-A[0])/settings.approach_m, (B[1]-A[1])/settings.approach_m
+        while clock() < deadline:
+            check()
+            result = _step(runtime)
+            pose = runtime.current_local_pose(result.estimate, now_s=result.now_s)
+            if pose is None:
+                raise RuntimeError("payload stop verification T265 unavailable")
+            raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
+            cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
+            if (abs(settings.approach_m-raw) > settings.position_tolerance_m + 1e-9
+                    or abs(cross) > .03):
+                raise RuntimeError("payload final position outside release tolerance")
+            if previous is None or pose.timestamp_s > previous.timestamp_s:
+                speed = rate = None
+                if previous is not None and pose.timestamp_s-previous.timestamp_s <= runtime.config.fusion.t265_max_age_s:
+                    dt = pose.timestamp_s-previous.timestamp_s
+                    speed = math.hypot(pose.x_m-previous.x_m,pose.y_m-previous.y_m)/dt
+                    rate = abs((pose.yaw_rad-previous.yaw_rad+math.pi)%(2*math.pi)-math.pi)/dt
+                stable = stable+1 if speed is not None and speed <= .02 and rate <= math.radians(3) else 0
+                previous = pose
+                runtime.record_event("payload_stop_verification", pose_reference="t265_local",
+                                     raw_progress_m=raw,cross_track_m=cross,
+                                     linear_speed_m_s=speed,t265_yaw_rate_rad_s=rate,stable_frames=stable)
+                if stable >= 4:
+                    return
+            sleep(PERIOD_S)
+        raise RuntimeError("payload did not settle before release timeout")
+
     try:
         channel = payload_channel(settings.payload_slot)
         if relay is None or not relay.connected or relay.channel_count < channel:
@@ -113,6 +145,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         motion("forward_47cm", "track_local_line", A2, B2)
         runtime.motion.stop()
         runtime.drive.stop()
+        verify_stopped_at_drop(A2, B2)
         check()
         runtime.record_event("payload_release_start", slot=settings.payload_slot, channel=channel)
         released = drop_payload(relay, settings.payload_slot, hold_s=settings.release_hold_s,
@@ -127,6 +160,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
         return returned
     except BaseException as exc:
+        runtime.record_event("payload_detour_failed", reason=f"{type(exc).__name__}: {exc}")
         runtime.mission.request_safe_stop(str(exc))
         raise
     finally:
@@ -138,7 +172,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
-                runtime.mission.request_safe_stop(str(exc))
+                if not primary_error:
+                    runtime.mission.request_safe_stop(str(exc))
         runtime.motion.navigation = original
         runtime.motion.drive = entry_drive
         # On success only the selected magnet is released; preserve other loads.
@@ -149,6 +184,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                     raise RuntimeError("payload relay all_off was not confirmed")
             except Exception as exc:
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
-                runtime.mission.request_safe_stop(str(exc))
+                if not primary_error:
+                    runtime.mission.request_safe_stop(str(exc))
         if cleanup_error is not None and not primary_error:
             raise cleanup_error

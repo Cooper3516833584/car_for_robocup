@@ -150,6 +150,30 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertNotIn("reverse_47cm", self.stage_poses)
         self.assert_safe_exit()
 
+    def test_drift_after_arrival_prevents_release(self):
+        self.fixture()
+        advance=self.advance
+        injected=False
+        def coast(dt):
+            nonlocal injected
+            if self.stage == 'forward_47cm' and self.runtime.motion.state is MotionActionState.CANCELLED and not injected:
+                self.pose[1] += .02
+                injected=True
+            advance(dt)
+        with self.assertRaisesRegex(RuntimeError,'final position'):
+            self.run_detour(sleep=coast)
+        self.assertTrue(injected)
+        self.assertFalse(self.releases)
+        self.assert_safe_exit()
+
+    def test_release_requires_four_new_stationary_samples(self):
+        self.fixture()
+        self.run_detour()
+        checks=[d for e,d in self.events if e=='payload_stop_verification']
+        self.assertGreaterEqual(len(checks),5)
+        self.assertEqual(checks[-1]['stable_frames'],4)
+        self.assertEqual(checks[-1]['pose_reference'],'t265_local')
+
     def test_outbound_uses_nominal_side_yaw_and_return_reuses_line(self):
         self.fixture()
         self.run_detour()
