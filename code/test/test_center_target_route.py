@@ -4,11 +4,11 @@ import math
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import center_target_route as task
-from components.pose_fusion import FusedPoseEstimate, PoseFusionState
+from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_config
@@ -93,7 +93,11 @@ class CenterTargetTests(unittest.TestCase):
         self.runtime._consume_d500 = lambda *_a, **_k: None
         self.runtime.fusion.estimate = lambda now: FusedPoseEstimate(
             Pose2D(*self.pose, now), PoseFusionState.OK, 0., ("test",), 0., 0.,
-            None, None, True, anchor_initialized=True)
+            None, None, True, anchor_initialized=True, t265_confidence=1.)
+        local_patch = patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock)
+        local = local_patch.start()
+        self.addCleanup(local_patch.stop)
+        local.side_effect = lambda: Pose2D(*self.pose,self.now)
         self.beeps = []
         self.alarm = Mock()
         self.alarm.on.side_effect = self.beep_on

@@ -44,18 +44,52 @@ def clamp(value, lo, hi):
 
 
 class TurnController:
-    """Shared yaw controller for explicit turns and final navigation alignment."""
-    def reset(self): pass
+    """Fixed yaw target completes only after four fresh, stationary T265 samples."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.previous_pose = None
+        self.stable_frames = 0
+        self.yaw_rate = None
 
     def compute(self, error, t265_pose, now_s, navigation, drive):
+        tolerance = min(navigation.yaw_tolerance_rad, math.radians(3))
         info = {"yaw_error_rad": error}
-        if abs(error) <= navigation.yaw_tolerance_rad:
-            return ControllerOutput(Twist2D(0, 0), NavigationState.GOAL_REACHED, info)
+        if t265_pose is None or not all(math.isfinite(v) for v in
+                (t265_pose.yaw_rad, t265_pose.timestamp_s)) or not 0 <= now_s-t265_pose.timestamp_s <= .15:
+            self.reset()
+            return ControllerOutput(Twist2D(0,0),NavigationState.POSE_LOST,
+                                    {**info,"reason":"turn_t265_unavailable", "stable_frames":0})
+        previous = self.previous_pose
+        new = previous is None or t265_pose.timestamp_s > previous.timestamp_s
+        if previous is not None and t265_pose.timestamp_s < previous.timestamp_s:
+            self.reset()
+            previous = None
+            new = True
+        if new:
+            rate = None
+            if previous is not None and t265_pose.timestamp_s-previous.timestamp_s <= .15:
+                rate = normalize_angle_rad(t265_pose.yaw_rad-previous.yaw_rad) / (t265_pose.timestamp_s-previous.timestamp_s)
+            self.yaw_rate = rate
+            self.previous_pose = t265_pose
+            if abs(error) <= tolerance and rate is not None and abs(rate) <= math.radians(3):
+                self.stable_frames += 1
+            else:
+                self.stable_frames = 0
+        if abs(error) > tolerance:
+            self.stable_frames = 0
+        info.update(t265_yaw_rate_rad_s=self.yaw_rate, stable_frames=self.stable_frames)
+        if self.stable_frames >= 4:
+            return ControllerOutput(Twist2D(0,0),NavigationState.GOAL_REACHED,info)
+        if abs(error) <= tolerance:
+            return ControllerOutput(Twist2D(0,0),NavigationState.FINAL_ALIGN,info)
         if not drive.allow_in_place_rotation:
-            return ControllerOutput(Twist2D(0, 0), NavigationState.BLOCKED, {**info, "reason": "in_place_rotation_unavailable"})
-        omega = math.copysign(min(abs(navigation.final_yaw_gain*error), drive.max_angular_speed_rad_s,
-                                 math.sqrt(2*drive.max_angular_accel_rad_s2*abs(error))), error)
-        return ControllerOutput(Twist2D(0, omega), NavigationState.FINAL_ALIGN, info)
+            return ControllerOutput(Twist2D(0,0),NavigationState.BLOCKED,
+                                    {**info,"reason":"in_place_rotation_unavailable"})
+        omega = math.copysign(min(abs(navigation.final_yaw_gain*error),drive.max_angular_speed_rad_s,
+                                 math.sqrt(2*drive.max_angular_accel_rad_s2*abs(error))),error)
+        return ControllerOutput(Twist2D(0,omega),NavigationState.FINAL_ALIGN,info)
 
 
 class DifferentialPathController:
@@ -64,10 +98,13 @@ class DifferentialPathController:
     def __init__(self, navigation, drive, *, track_width_m=0.198):
         self.navigation, self.drive = navigation, drive
         self.track_width_m = track_width_m
+        self.turn = TurnController()
         self.reset_path()
 
     def reset_path(self):
         self.progress_m = 0.0
+        self.position_arrived = False
+        self.turn.reset()
 
     def compute_line(self, pose, start, end, previous_progress_m=0.0, *, reverse=False,
                      position_tolerance_m=None, terminal_lateral_m=0.03):
@@ -169,14 +206,20 @@ class DifferentialPathController:
                     max_tracking_omega_rad_s=omega_limit)
         return result(signed_v, omega, NavigationState.TRACKING, "tracking")
 
-    def compute(self, pose, path, goal, *, protocol_compat=False):
-        # Compatibility changes the backend, never selects a second controller.
+    def compute(self, pose, path, goal, *, protocol_compat=False, t265_pose=None, now_s=None):
         if not path:
             raise ValueError("path is empty")
-        if math.dist(path[0], path[-1]) < 1e-9:
-            return ControllerOutput(Twist2D(0, 0), NavigationState.GOAL_REACHED, {})
-        output = self.compute_line(pose, path[0], path[-1], self.progress_m)
-        self.progress_m = output.diagnostics["progress_m"]
+        if self.position_arrived or math.dist(path[0],path[-1]) < 1e-9:
+            self.position_arrived = True
+            output = ControllerOutput(Twist2D(0,0),NavigationState.GOAL_REACHED,{})
+        else:
+            output = self.compute_line(pose,path[0],path[-1],self.progress_m)
+            self.progress_m = output.diagnostics["progress_m"]
+        if output.state is NavigationState.GOAL_REACHED:
+            self.position_arrived = True
+            if goal.yaw_rad is not None:
+                return self.turn.compute(normalize_angle_rad(goal.yaw_rad-pose.yaw_rad),t265_pose,
+                                         pose.timestamp_s if now_s is None else now_s,self.navigation,self.drive)
         return output
 
 
@@ -214,6 +257,7 @@ class DifferentialNavigator:
         *,
         now_s: float,
         pose_state: object = "ok",
+        t265_pose: Pose2D | None = None,
     ) -> NavigationOutput:
         now = float(now_s)
         if not math.isfinite(now):
@@ -237,6 +281,7 @@ class DifferentialNavigator:
             self._path,
             self.goal,
             protocol_compat=self.drive.protocol_mode == "ackermann_firmware_compat",
+            t265_pose=t265_pose, now_s=now,
         )
         command = result.command
         if state_name in {"d500_degraded", "t265_degraded"}:

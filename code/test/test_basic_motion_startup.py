@@ -1,88 +1,65 @@
-"""Safety and time contract for opt-in post-turn straight startup compensation."""
-
+"""Measured turn settling replaces retired fixed startup yaw compensation."""
 import math
 from pathlib import Path
 import sys
 import unittest
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from components.basic_motion_controller import BasicMotionController, MotionActionState
+from components.differential_navigation import DifferentialNavigator
+from config.v2_loader import load_v2_config
+from core.types import Pose2D, Twist2D
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from components.basic_motion_controller import MotionActionState
-from config.v2_runtime import RuntimeMode
-from core.types import Pose2D
-from robocup_runtime import build_runtime, load_runtime_config
-
-
-class StraightStartupTests(unittest.TestCase):
+class TurnSettlingTests(unittest.TestCase):
     def setUp(self):
-        self.runtime = build_runtime(load_runtime_config(), RuntimeMode.DRY_RUN)
-        self.motion = self.runtime.motion
-        self.addCleanup(self.runtime.close)
-
-    def start(self, bias=-0.15, duration=1.0):
-        self.motion.drive_distance(0.2, lateral_tolerance_m=0.03, heading_yaw_rad=0.0,
-                                   startup_yaw_bias_rad_s=bias, startup_duration_s=duration)
-
-    def test_bias_is_mirrored_fades_and_does_not_repeat(self):
-        for sign in (-1, 1):
-            with self.subTest(sign=sign):
-                self.motion.stop()
-                self.start(bias=sign * 0.15)
-                for stamp, expected in ((10.0, sign * 0.15), (10.5, sign * 0.075),
-                                        (11.0, 0.0), (12.0, 0.0)):
-                    output = self.motion.step(Pose2D(0, 0, 0, stamp), now_s=stamp)
-                    self.assertAlmostEqual(output.command.angular_z_rad_s, expected)
-                    self.assertGreater(output.command.linear_x_m_s, 0.0)
-
-    def test_completion_safety_loss_and_cancel_always_zero(self):
-        self.start()
-        self.motion.step(Pose2D(0, 0, 0, 10), now_s=10)
-        done = self.motion.step(Pose2D(0.2, 0, 0, 10.1), now_s=10.1)
-        self.assertEqual(done.state, MotionActionState.SUCCEEDED)
-        self.assertEqual(done.command.angular_z_rad_s, 0.0)
+        c=load_v2_config()
+        self.motion=BasicMotionController(DifferentialNavigator(c.drive,c.navigation),c.navigation,c.drive)
+        self.motion.rotate_to(0)
+    def step(self,t,yaw=0.,local_yaw=0.,sample_t=None):
+        return self.motion.step(Pose2D(0,0,yaw,t),now_s=t,
+            t265_pose=Pose2D(0,0,local_yaw,t if sample_t is None else sample_t))
+    def test_first_angle_entry_and_repeated_sample_do_not_complete(self):
+        self.assertEqual(self.step(1.).state,MotionActionState.RUNNING)
+        for t in (1.01,1.02,1.03):
+            out=self.step(t,sample_t=1.)
+            self.assertEqual(out.diagnostics['stable_frames'],0)
+        for i in range(1,5): out=self.step(1.+.05*i)
+        self.assertEqual(out.state,MotionActionState.SUCCEEDED)
+    def test_fused_yaw_stable_but_t265_still_rotating_cannot_complete(self):
+        for i in range(6):
+            out=self.step(1.+i*.05,local_yaw=i*.01)
+            self.assertEqual(out.state,MotionActionState.RUNNING)
+        self.assertGreater(out.diagnostics['t265_yaw_rate_rad_s'],math.radians(3))
+    def test_coast_past_fixed_target_requires_correction(self):
+        self.step(1.,yaw=.02)
+        out=self.step(1.05,yaw=.1,local_yaw=.1)
+        self.assertEqual(out.state,MotionActionState.RUNNING)
+        self.assertLess(out.command.angular_z_rad_s,0)
+        self.assertEqual(out.diagnostics['stable_frames'],0)
+        self.step(1.1)
+        for i in range(1,5): out=self.step(1.1+i*.05)
+        self.assertEqual(out.state,MotionActionState.SUCCEEDED)
+    def test_missing_and_stale_t265_stop(self):
+        out=self.motion.step(Pose2D(0,0,1,1),now_s=1)
+        self.assertEqual(out.command,Twist2D(0,0))
+        self.assertEqual(out.state,MotionActionState.POSE_LOST)
+        out=self.step(2.,yaw=1.,sample_t=1.)
+        self.assertEqual(out.command,Twist2D(0,0))
+    def test_relative_turn_wrap_and_full_turn(self):
         self.motion.stop()
-        self.start()
-        lost = self.motion.step(None, now_s=20)
-        self.assertEqual(lost.command.linear_x_m_s, 0.0)
-        self.assertEqual(lost.command.angular_z_rad_s, 0.0)
-        self.motion.step(Pose2D(0, 0, 0, 20.1), now_s=20.1)
-        blocked = self.motion.step(Pose2D(0, 0, math.radians(21), 20.2), now_s=20.2)
-        self.assertEqual(blocked.state, MotionActionState.BLOCKED)
-        self.assertEqual(blocked.command.angular_z_rad_s, 0.0)
+        self.motion.rotate(2*math.pi)
+        start=math.radians(170)
+        self.step(1.,yaw=start,local_yaw=start)
+        for i in range(1,17):
+            yaw=(start+i*2*math.pi/16+math.pi)%(2*math.pi)-math.pi
+            out=self.step(1.+i*.05,yaw=yaw,local_yaw=yaw)
+        self.assertEqual(out.state,MotionActionState.RUNNING)
+        for i in range(1,5): out=self.step(1.8+i*.05,yaw=start,local_yaw=start)
+        self.assertEqual(out.state,MotionActionState.SUCCEEDED)
+    def test_navigation_final_yaw_uses_same_measured_settle(self):
         self.motion.stop()
-        cancelled = self.motion.step(Pose2D(0, 0, 0, 20.3), now_s=20.3)
-        self.assertEqual(cancelled.command.linear_x_m_s, 0.0)
-        self.assertEqual(cancelled.command.angular_z_rad_s, 0.0)
+        self.motion.navigate_to_pose(0,0,0)
+        self.step(1.)
+        for i in range(6): out=self.step(1.05+i*.05)
+        self.assertEqual(out.state,MotionActionState.SUCCEEDED)
 
-    def test_compensation_never_requests_a_backward_wheel(self):
-        self.start(bias=-self.motion.drive.max_angular_speed_rad_s)
-        output = self.motion.step(Pose2D(0, 0, math.radians(15), 10), now_s=10)
-        self.assertEqual(output.state, MotionActionState.RUNNING)
-        v, w = output.command.linear_x_m_s, output.command.angular_z_rad_s
-        half_track = self.motion.track_width_m / 2
-        self.assertGreaterEqual(v - half_track * w, -1e-12)
-        self.assertGreaterEqual(v + half_track * w, -1e-12)
-
-    def test_counter_drift_ends_compensation_without_rearming(self):
-        self.start()
-        self.motion.step(Pose2D(0, 0, 0, 10), now_s=10)
-        output = self.motion.step(Pose2D(0, 0, math.radians(-3), 10.1), now_s=10.1)
-        self.assertTrue(output.diagnostics["startup_finished"])
-        self.assertEqual(output.diagnostics["startup_yaw_bias_rad_s"], 0.0)
-        self.assertGreater(output.command.angular_z_rad_s, 0.0)
-        recovered = self.motion.step(Pose2D(0, 0, 0, 10.2), now_s=10.2)
-        self.assertEqual(recovered.command.angular_z_rad_s, 0.0)
-
-    def test_invalid_or_unbounded_bias_is_rejected_before_motion(self):
-        for bias, duration in ((float("nan"), 1), (float("inf"), 1), (0.1, 0), (0.1, 2.01)):
-            with self.subTest(bias=bias, duration=duration), self.assertRaises(ValueError):
-                self.start(bias, duration)
-        with self.assertRaises(ValueError):
-            self.motion.drive_distance(-0.2, lateral_tolerance_m=0.03, heading_yaw_rad=0,
-                                       startup_yaw_bias_rad_s=0.1, startup_duration_s=1)
-        with self.assertRaises(ValueError):
-            self.motion.drive_distance(0.2, startup_yaw_bias_rad_s=0.1, startup_duration_s=1)
-
-
-if __name__ == "__main__":
-    unittest.main()
+if __name__=='__main__': unittest.main()

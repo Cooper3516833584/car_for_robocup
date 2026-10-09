@@ -48,11 +48,14 @@ class DifferentialNavigationTests(unittest.TestCase):
     def test_final_yaw_alignment_is_separate_from_position_arrival(self) -> None:
         navigator = self.make_navigator()
         navigator.set_goal(NavigationGoal(2.0, 2.0, 1.0))
-        aligning = navigator.step(Pose2D(2.0, 2.0, 0.0, 1.0), now_s=1.0)
+        aligning = navigator.step(Pose2D(2.0, 2.0, 0.0, 1.0), now_s=1.0, t265_pose=Pose2D(2.,2.,0.,1.))
         self.assertIs(aligning.state, NavigationState.FINAL_ALIGN)
         self.assertEqual(aligning.command.linear_x_m_s, 0.0)
         self.assertGreater(aligning.command.angular_z_rad_s, 0.0)
-        arrived = navigator.step(Pose2D(2.0, 2.0, 1.0, 1.1), now_s=1.1)
+        for i in range(6):
+            t=1.05+.05*i
+            p=Pose2D(2.,2.,1.,t)
+            arrived=navigator.step(p,now_s=t,t265_pose=p)
         self.assertIs(arrived.state, NavigationState.GOAL_REACHED)
         self.assertEqual(arrived.command, Twist2D(0.0, 0.0))
 
@@ -85,7 +88,7 @@ class DifferentialNavigationTests(unittest.TestCase):
         navigator = self.make_navigator(compat=True)
         navigator.set_goal(NavigationGoal(0.8, 3.0))
         output = navigator.step(Pose2D(0.8, 1.0, 0.0, 1.0), now_s=1.0)
-        self.assertTrue(output.diagnostics["compatibility_rotate_first"])
+        self.assertIs(output.state, NavigationState.ROTATING_TO_PATH)
         self.assertEqual(output.command.linear_x_m_s, 0.0)
         self.assertGreater(output.command.angular_z_rad_s, 0.0)
         navigator.set_goal(NavigationGoal(2.5, 1.0))
