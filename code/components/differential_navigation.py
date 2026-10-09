@@ -43,6 +43,21 @@ def clamp(value, lo, hi):
     return max(lo, min(hi, value))
 
 
+class TurnController:
+    """Shared yaw controller for explicit turns and final navigation alignment."""
+    def reset(self): pass
+
+    def compute(self, error, t265_pose, now_s, navigation, drive):
+        info = {"yaw_error_rad": error}
+        if abs(error) <= navigation.yaw_tolerance_rad:
+            return ControllerOutput(Twist2D(0, 0), NavigationState.GOAL_REACHED, info)
+        if not drive.allow_in_place_rotation:
+            return ControllerOutput(Twist2D(0, 0), NavigationState.BLOCKED, {**info, "reason": "in_place_rotation_unavailable"})
+        omega = math.copysign(min(abs(navigation.final_yaw_gain*error), drive.max_angular_speed_rad_s,
+                                 math.sqrt(2*drive.max_angular_accel_rad_s2*abs(error))), error)
+        return ControllerOutput(Twist2D(0, omega), NavigationState.FINAL_ALIGN, info)
+
+
 class DifferentialPathController:
     """The only translation kernel: directed line Pure Pursuit, no motor I/O."""
 
