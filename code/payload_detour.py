@@ -5,6 +5,7 @@ import math
 import sys
 import time
 
+from core.frames import normalize_angle_rad
 from components.basic_motion_controller import MotionActionState
 from components.payload_task import drop_payload, payload_channel
 from competition_task import _step
@@ -86,7 +87,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             hold_failure = exc
             raise
 
-    def verify_stopped_at_drop(A, B):
+    def verify_stopped_at_drop(A, B, side_yaw):
         previous = None
         stable = 0
         deadline = clock() + 2.0
@@ -99,10 +100,18 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 raise RuntimeError("payload stop verification T265 unavailable")
             raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
             cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
+            yaw_error = normalize_angle_rad(pose.yaw_rad - side_yaw)
             if (abs(settings.approach_m-raw) > settings.position_tolerance_m + 1e-9
                     or abs(cross) > .03):
                 raise RuntimeError("payload final position outside release tolerance")
             if previous is None or pose.timestamp_s > previous.timestamp_s:
+                if abs(yaw_error) > math.radians(3.0):
+                    runtime.record_event(
+                        "payload_stop_verification", passed=False,
+                        reason="payload_final_yaw_error", pose_reference="t265_local",
+                        yaw_error_rad=yaw_error, target_yaw_rad=side_yaw,
+                    )
+                    raise RuntimeError("payload final yaw outside release tolerance")
                 speed = rate = None
                 if previous is not None and pose.timestamp_s-previous.timestamp_s <= runtime.config.fusion.t265_max_age_s:
                     dt = pose.timestamp_s-previous.timestamp_s
@@ -112,7 +121,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 previous = pose
                 runtime.record_event("payload_stop_verification", pose_reference="t265_local",
                                      raw_progress_m=raw,cross_track_m=cross,
-                                     linear_speed_m_s=speed,t265_yaw_rate_rad_s=rate,stable_frames=stable)
+                                     linear_speed_m_s=speed,t265_yaw_rate_rad_s=rate,stable_frames=stable,
+                                     yaw_error_rad=yaw_error,target_yaw_rad=side_yaw)
                 if stable >= 4:
                     return
             sleep(PERIOD_S)
@@ -145,7 +155,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         motion("forward_47cm", "track_local_line", A2, B2)
         runtime.motion.stop()
         runtime.drive.stop()
-        verify_stopped_at_drop(A2, B2)
+        verify_stopped_at_drop(A2, B2, side_yaw)
         check()
         runtime.record_event("payload_release_start", slot=settings.payload_slot, channel=channel)
         released = drop_payload(relay, settings.payload_slot, hold_s=settings.release_hold_s,

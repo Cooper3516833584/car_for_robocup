@@ -42,9 +42,11 @@ class CompetitionTaskTests(unittest.TestCase):
         local = self.stack.enter_context(patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock))
         local.side_effect = lambda: None if self.lost else Pose2D(*self.xy_yaw, self.now)
         self.stack.enter_context(patch.object(task.time, "sleep", self.advance))
-        # Measured lane-segment fixtures must have distinct endpoints.
+        # Keep the shortened search endpoint inside the shortened corner segment.
+        # Otherwise the fixture physically overshoots corner 2 before rejoining.
         for name, value in {"LANE_ENTRY_X": 0.10, "TASK_BOARD_X": 0.20,
                             "CORNER_1_X": 0.30, "YELLOW_SEARCH_START_X": 0.35,
+                            "YELLOW_SEARCH_END_X": 0.40,
                             "CORNER_2_X": 0.45, "FINISH_X": 0.55}.items():
             self.stack.enter_context(patch.object(task, name, value))
 

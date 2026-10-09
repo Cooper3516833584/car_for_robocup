@@ -121,6 +121,17 @@ class PurePursuitReferenceTests(unittest.TestCase):
             self.assertEqual(out.state.value, "pose_lost")
             self.assertEqual((out.command.linear_x_m_s, out.command.angular_z_rad_s), (0,0))
 
+    def test_alignment_blocked_preserves_turn_failure_reason(self):
+        from dataclasses import replace
+        from components.differential_navigation import NavigationState
+        controller = self.controller()
+        controller.drive = replace(controller.drive, allow_in_place_rotation=False)
+        p = Pose2D(0, 0, math.pi/2, 1.)
+        out = controller.compute_line(p, (0,0), (2,0), t265_pose=p, now_s=1.)
+        self.assertIs(out.state, NavigationState.BLOCKED)
+        self.assertEqual(out.diagnostics["reason"], "in_place_rotation_unavailable")
+        self.assertEqual((out.command.linear_x_m_s,out.command.angular_z_rad_s),(0,0))
+
     def test_alignment_locks_carrot_bearing_instead_of_line_tangent(self):
         controller = self.controller()
         pose = Pose2D(0, 1, 0, 1.)

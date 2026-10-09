@@ -150,7 +150,7 @@ class DifferentialPathController:
         def result(v, omega, state, status):
             info.update(line_state=status, command_v_m_s=v, command_omega_rad_s=omega)
             if state is NavigationState.BLOCKED:
-                info["reason"] = status
+                info.setdefault("reason", status)
             return ControllerOutput(Twist2D(v, omega), state, info)
 
         # Virtual lookahead guides steering; the real endpoint still owns stopping.

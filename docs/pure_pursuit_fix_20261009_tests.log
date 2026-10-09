@@ -1,0 +1,712 @@
+Offline validation: 2026-10-09, Windows Python 3.13
+py -3 -m compileall -q code tools: exit 0
+git diff --check: exit 0
+Local ignored and example TOML navigation.lookahead_m: 0.20
+
+FULL UNITTEST OUTPUT (negative-path logs are expected):
+...Retired motion entry; use tools/closed_loop_motion.py or run_center_target_route.py
+Retired motion entry; use tools/closed_loop_motion.py or run_center_target_route.py
+Retired motion entry; use tools/closed_loop_motion.py or run_center_target_route.py
+Unlocalized actuation probe retired; use tools/closed_loop_motion.py
+Live legacy diagnostics retired; use tools/closed_loop_motion.py
+.....................battery voltage 10.50 V has been below 11.00 V for 5 consecutive readings; alarm enabled
+Direct serial motion retired; use closed_loop_motion.py and analyze its sensor logs
+[route] START forward_280cm
+[route] TARGET STOP; beep 1s (1)
+[route] START forward_280cm
+[route] TARGET STOP; beep 1s (1)
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] TARGET STOP; beep 1s (2)
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=2; drops=0
+[route] START forward_280cm
+.........................................................2026-10-09 22:14:47,697 ERROR root: direct drop all_off was not confirmed
+2026-10-09 22:14:47,699 ERROR root: direct drop all_off failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 117, in run_direct_competition_stage
+    if relay.connected and relay.all_off(verify=config.relay.verify_writes) is False:
+                           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: cleanup failed
+.2026-10-09 22:14:47,705 ERROR root: direct drop close failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 125, in run_direct_competition_stage
+    relay.close()
+    ~~~~~~~~~~~^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: close failed
+...2026-10-09 22:14:47,720 ERROR root: payload relay is disabled/unavailable
+.2026-10-09 22:14:47,723 ERROR root: direct competition stage failed: drop
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 166, in main
+    return run_direct_competition_stage(args)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 112, in run_direct_competition_stage
+    ok = task.drop_payload(relay, args.payload_slot)
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: drop failed
+2026-10-09 22:14:47,726 WARNING root: direct competition stage interrupted
+.....2026-10-09 22:14:48,243 ERROR root: direct competition stage failed: drop
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 166, in main
+    return run_direct_competition_stage(args)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 111, in run_direct_competition_stage
+    relay.open()
+    ~~~~~~~~~~^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: port unavailable
+.2026-10-09 22:14:48,247 ERROR root: --relay-port requires competition full or drop
+.2026-10-09 22:14:48,254 INFO root: task-board result: red=1 blue=2 green=1
+....2026-10-09 22:14:48,266 ERROR root: direct competition stage failed: yellow-detect
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 166, in main
+    return run_direct_competition_stage(args)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 94, in run_direct_competition_stage
+    detection = task.detect_yellow_from_camera(camera_value(args.yellow_camera), detector)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\competition_task.py", line 339, in detect_yellow_from_camera
+    return detect_yellow_once(capture, detector)
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: inference failed
+.2026-10-09 22:14:48,271 ERROR root: direct competition stage failed: yellow-detect
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 166, in main
+    return run_direct_competition_stage(args)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 93, in run_direct_competition_stage
+    detector = task.load_detector(args.yellow_model or task.YELLOW_MODEL_PATH)
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+FileNotFoundError: weights missing
+2026-10-09 22:14:48,273 ERROR root: direct competition stage failed: yellow-detect
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 166, in main
+    return run_direct_competition_stage(args)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 94, in run_direct_competition_stage
+    detection = task.detect_yellow_from_camera(camera_value(args.yellow_camera), detector)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\competition_task.py", line 337, in detect_yellow_from_camera
+    capture, owned = _open_yellow_camera(YELLOW_CAMERA if camera is None else camera)
+                     ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: camera unavailable
+.2026-10-09 22:14:48,278 ERROR root: yellow target not detected
+........2026-10-09 22:14:48,311 INFO competition_task: competition stage: lane
+2026-10-09 22:14:48,315 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:48,319 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:48,319 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:48,319 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:48,323 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:48,325 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:48,326 INFO competition_task: competition stage: yellow-align
+2026-10-09 22:14:48,326 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:48,329 INFO competition_task: competition stage: finish
+2026-10-09 22:14:48,331 INFO root: competition stage completed: full; result=RuntimeStep
+.2026-10-09 22:14:48,403 INFO root: competition stage completed: full; result=None
+.2026-10-09 22:14:48,410 INFO competition_task: competition stage: lane
+2026-10-09 22:14:48,415 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:48,420 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:48,420 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:48,420 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:48,424 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:48,426 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:48,427 INFO competition_task: competition stage: yellow-align
+2026-10-09 22:14:48,427 INFO competition_task: competition stage: drop-route
+2026-10-09 22:14:48,427 INFO competition_task: competition stage: drop
+2026-10-09 22:14:48,428 ERROR root: competition stopped
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 216, in main
+    result = run_competition_stage(
+        runtime, stage,
+    ...<2 lines>...
+        weights=args.yellow_model, slot=args.payload_slot,
+    )
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\competition_task.py", line 544, in run_competition_stage
+    return run_full_mission(runtime, task_board_camera=task_camera,
+                            yellow_camera=yellow_camera, detector=detector, slot=slot)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\competition_task.py", line 517, in run_full_mission
+    raise RuntimeError("payload release was not confirmed; mission stopped")
+RuntimeError: payload release was not confirmed; mission stopped
+.2026-10-09 22:14:48,496 INFO competition_task: competition stage: lane
+2026-10-09 22:14:48,501 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:48,505 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:48,505 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:48,506 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:48,509 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:48,512 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:48,513 INFO competition_task: competition stage: yellow-align
+2026-10-09 22:14:48,513 INFO competition_task: competition stage: drop-route
+2026-10-09 22:14:48,513 INFO competition_task: competition stage: drop
+2026-10-09 22:14:48,513 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:48,516 INFO competition_task: competition stage: finish
+2026-10-09 22:14:48,519 INFO root: competition stage completed: full; result=RuntimeStep
+.2026-10-09 22:14:48,610 INFO root: competition stage completed: full; result=RuntimeStep
+.2026-10-09 22:14:48,682 INFO competition_task: competition stage: lane
+2026-10-09 22:14:48,686 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:48,690 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:48,690 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:48,690 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:48,694 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:48,696 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:48,700 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:48,702 INFO competition_task: competition stage: finish
+2026-10-09 22:14:48,705 INFO root: competition stage completed: full; result=RuntimeStep
+.2026-10-09 22:14:48,772 ERROR components.payload_task: could not prepare payload slot 1
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 38, in prepare_payload
+    raise RuntimeError("payload holding state was not confirmed")
+RuntimeError: payload holding state was not confirmed
+.2026-10-09 22:14:48,780 ERROR competition_task: yellow model unavailable; skip visual drop
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\competition_task.py", line 537, in run_competition_stage
+    detector = load_detector(YELLOW_MODEL_PATH if weights is None else weights)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\yellow_yolo_adapter.py", line 23, in load_detector
+    from ultralytics import YOLO
+ModuleNotFoundError: No module named 'ultralytics'
+2026-10-09 22:14:48,781 INFO competition_task: competition stage: lane
+2026-10-09 22:14:48,783 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:48,785 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:48,785 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:48,785 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:48,787 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:48,789 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:48,789 INFO competition_task: competition stage: yellow-align
+2026-10-09 22:14:48,789 INFO competition_task: competition stage: drop-route
+2026-10-09 22:14:48,789 INFO competition_task: competition stage: drop
+2026-10-09 22:14:49,289 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:49,291 INFO competition_task: competition stage: finish
+.2026-10-09 22:14:49,296 INFO competition_task: competition stage: lane
+2026-10-09 22:14:49,298 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:49,300 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:49,300 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:49,300 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:49,302 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:49,303 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:49,303 INFO competition_task: competition stage: yellow-align
+2026-10-09 22:14:49,304 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:49,305 INFO competition_task: competition stage: finish
+.2026-10-09 22:14:49,309 INFO competition_task: competition stage: lane
+2026-10-09 22:14:49,311 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:49,315 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:49,315 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:49,315 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:49,317 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:49,319 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:49,319 INFO competition_task: competition stage: yellow-align
+2026-10-09 22:14:49,319 INFO competition_task: competition stage: drop-route
+2026-10-09 22:14:49,319 INFO competition_task: competition stage: drop
+.2026-10-09 22:14:49,322 INFO competition_task: competition stage: lane
+2026-10-09 22:14:49,324 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:49,326 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:49,327 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:49,327 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:49,329 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:49,330 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:49,330 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:49,332 INFO competition_task: competition stage: finish
+.2026-10-09 22:14:49,336 INFO competition_task: competition stage: lane
+2026-10-09 22:14:49,338 INFO competition_task: competition stage: task-board-position
+2026-10-09 22:14:49,340 INFO competition_task: competition stage: task-board
+2026-10-09 22:14:49,340 INFO competition_task: competition stage: hc-send
+2026-10-09 22:14:49,340 INFO competition_task: competition stage: corner1
+2026-10-09 22:14:49,342 INFO competition_task: competition stage: cross-lane
+2026-10-09 22:14:49,344 INFO competition_task: competition stage: yellow-search
+2026-10-09 22:14:49,344 INFO competition_task: competition stage: corner2
+2026-10-09 22:14:49,345 INFO competition_task: competition stage: finish
+..2026-10-09 22:14:49,354 INFO root: competition stage completed: lane; result=True
+.2026-10-09 22:14:49,358 ERROR root: competition requires --mode hardware-mission; use fake unit tests for software route validation
+2026-10-09 22:14:49,359 ERROR root: competition owns its route; do not combine with --goal-* or startup --task-board-turn-deg
+.2026-10-09 22:14:49,364 ERROR root: competition stopped
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\main_robocup.py", line 216, in main
+    result = run_competition_stage(
+        runtime, stage,
+    ...<2 lines>...
+        weights=args.yellow_model, slot=args.payload_slot,
+    )
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+RuntimeError: motion failed
+2026-10-09 22:14:49,432 INFO root: competition stage completed: yellow-search; result=YellowDetection
+.2026-10-09 22:14:49,436 INFO root: competition stage completed: yellow-search; result=None
+2026-10-09 22:14:49,440 INFO root: competition stage completed: yellow-search; result=YellowDetection
+2026-10-09 22:14:49,442 INFO root: competition stage completed: yellow-align; result=None
+2026-10-09 22:14:49,445 INFO root: competition stage completed: yellow-align; result=YellowDetection
+...2026-10-09 22:14:49,455 INFO competition_task: task board: {'red': 2, 'blue': 1, 'green': 1}
+2026-10-09 22:14:49,455 WARNING competition_task: task-board attempt 1: camera missing
+2026-10-09 22:14:49,455 WARNING competition_task: task-board attempt 2: camera missing
+2026-10-09 22:14:49,455 WARNING competition_task: task-board attempt 3: camera missing
+2026-10-09 22:14:49,455 WARNING competition_task: using fallback task {'red': 1, 'blue': 2, 'green': 1}: camera missing
+...2026-10-09 22:14:49,470 INFO competition_task: competition stage: drop
+.2026-10-09 22:14:49,472 INFO competition_task: competition stage: task-board
+..................................................................................................................................................................ss..sssss...2026-10-09 22:14:50,560 INFO components.hc_task_sender: HC task sent once: b'1:1:2'
+.2026-10-09 22:14:50,562 ERROR components.hc_task_sender: HC connection timed out; task was not sent
+.2026-10-09 22:14:50,562 ERROR components.hc_task_sender: HC one-shot task send failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\hc_task_sender.py", line 28, in send_task_once
+    driver.start()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: start
+2026-10-09 22:14:50,563 ERROR components.hc_task_sender: HC one-shot task send failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\hc_task_sender.py", line 29, in send_task_once
+    if driver.wait_connected(connect_wait_s):
+       ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: wait_connected
+2026-10-09 22:14:50,565 ERROR components.hc_task_sender: HC one-shot task send failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\hc_task_sender.py", line 30, in send_task_once
+    driver.write(message)  # Exactly one application-level write.
+    ~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: write
+2026-10-09 22:14:50,566 INFO components.hc_task_sender: HC task sent once: b'TASK,2,1,1\n'
+2026-10-09 22:14:50,566 ERROR components.hc_task_sender: HC close failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\hc_task_sender.py", line 40, in send_task_once
+    driver.close()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1228, in _execute_mock_call
+    raise effect
+OSError: close
+..2026-10-09 22:14:50,567 INFO components.hc_task_sender: HC task sent once: b'TASK,2,1,1\n'
+[route] RELEASE MODE relay; slot=1
+[route] SERVO HOLD 90deg, <Mock name='mock.pulse_us' id='1549930286448'>us
+...........................[route] relay_all_off cleanup failed: relay failed
+...usage: python.exe -m unittest [-h] [--config CONFIG] [--weights WEIGHTS]
+                              [--camera CAMERA] [--target-action {drop,beep}]
+                              [--target-region {frame,center}]
+                              [--payload-slot {1,2,3}]
+                              [--release-hold-s RELEASE_HOLD_S]
+                              [--release-mode {simulate,relay}]
+                              [--target-class-name TARGET_CLASS_NAME]
+                              [--target-speed-cm-s TARGET_SPEED_CM_S]
+                              [--drop-center-width-ratio DROP_CENTER_WIDTH_RATIO]
+                              [--relay-port RELAY_PORT]
+                              [--relay-channels {4,8}]
+                              [--servo-angle-deg SERVO_ANGLE_DEG]
+                              [--log-dir LOG_DIR] [--check-vision]
+                              [--max-seconds MAX_SECONDS]
+                              [--startup-alarm-seconds STARTUP_ALARM_SECONDS]
+                              [--confirm-motor-test]
+python.exe -m unittest: error: unrecognized arguments: --demo-no-position-checks
+[route] RELEASE MODE relay; slot=1
+[route] SERVO HOLD 90deg, <Mock name='mock.pulse_us' id='1549923013968'>us
+.[route] cleanup failed: USB disconnected
+[route] FAILED: ValueError: original route failure
+[route] drive_stop cleanup failed: USB disconnected
+..2026-10-09 22:14:54,838 ERROR components.payload_task: payload slot 1 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 70, in drop_payload
+    sleep(hold_s)
+    ~~~~~^^^^^^^^
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\payload_detour.py", line 82, in hold
+    check()
+    ~~~~~^^
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\payload_detour.py", line 52, in check
+    guard()
+    ~~~~~^^
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\test\test_payload_detour.py", line 146, in guard
+    raise RuntimeError("operator STOP during release")
+RuntimeError: operator STOP during release
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=1
+[route] PAYLOAD DETOUR slot=1
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=2
+............2026-10-09 22:14:55,240 ERROR components.payload_task: could not prepare payload slot 1
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 38, in prepare_payload
+    raise RuntimeError("payload holding state was not confirmed")
+RuntimeError: payload holding state was not confirmed
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=2
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=1
+...2026-10-09 22:14:55,508 ERROR components.payload_task: payload slot 1 activation was not confirmed
+2026-10-09 22:14:55,509 ERROR components.payload_task: payload slot 1 inactive state was not confirmed
+[route] START forward_280cm
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=0
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=1
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=1
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=1
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=1
+.............2026-10-09 22:14:56,185 ERROR components.payload_task: payload slot 1 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 67, in drop_payload
+    if active(channel, verify=verify) is False:
+       ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1232, in _execute_mock_call
+    raise result
+OSError: disconnected
+....2026-10-09 22:14:56,188 ERROR components.payload_task: payload slot True release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,188 ERROR components.payload_task: could not prepare payload slot True
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 35, in prepare_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,189 ERROR components.payload_task: payload slot 1.0 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,189 ERROR components.payload_task: could not prepare payload slot 1.0
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 35, in prepare_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,189 ERROR components.payload_task: payload slot 0 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,190 ERROR components.payload_task: could not prepare payload slot 0
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 35, in prepare_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,190 ERROR components.payload_task: payload slot 4 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,191 ERROR components.payload_task: could not prepare payload slot 4
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 35, in prepare_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+.2026-10-09 22:14:56,191 ERROR components.payload_task: payload relay unavailable or invalid slot: 1
+2026-10-09 22:14:56,191 ERROR components.payload_task: payload slot 0 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,192 ERROR components.payload_task: payload slot 4 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+2026-10-09 22:14:56,192 ERROR components.payload_task: payload slot True release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 65, in drop_payload
+    channel = payload_channel(slot, slot_to_relay)
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 20, in payload_channel
+    raise ValueError("payload slot must be 1, 2 or 3")
+ValueError: payload slot must be 1, 2 or 3
+.2026-10-09 22:14:56,192 ERROR components.payload_task: could not prepare payload slot 3
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 38, in prepare_payload
+    raise RuntimeError("payload holding state was not confirmed")
+RuntimeError: payload holding state was not confirmed
+.2026-10-09 22:14:56,193 ERROR components.payload_task: could not restore payload slot 1
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 78, in drop_payload
+    if inactive(channel, verify=verify) is False:
+       ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\TZDEZACR\AppData\Local\Programs\Python\Python313\Lib\unittest\mock.py", line 1232, in _execute_mock_call
+    raise result
+OSError: restore failed
+.2026-10-09 22:14:56,194 ERROR components.payload_task: payload slot 1 activation was not confirmed
+2026-10-09 22:14:56,194 ERROR components.payload_task: payload slot 1 inactive state was not confirmed
+.........................................................................................................................................................2026-10-09 22:14:58,346 INFO root: completed 2 runtime steps; mission=navigating
+.2026-10-09 22:14:58,347 ERROR root: --goal-yaw requires --goal-x and --goal-y
+.2026-10-09 22:14:58,349 ERROR root: cannot start RoboCup runtime: test gate
+.2026-10-09 22:14:58,351 ERROR root: cannot start RoboCup runtime: test gate
+..2026-10-09 22:14:58,354 ERROR root: cannot start RoboCup runtime: test gate
+............................................................................................2026-10-09 22:14:58,909 ERROR components.payload_task: could not prepare payload slot 2
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 38, in prepare_payload
+    raise RuntimeError("payload holding state was not confirmed")
+RuntimeError: payload holding state was not confirmed
+...............................................................................................................2026-10-09 22:14:58,966 WARNING robocup-slam-bridge: T265 TF starved for 3.1 s; holding last known pose to keep the scan window open
+.2026-10-09 22:14:58,967 WARNING robocup-slam-bridge: T265 TF starved for 3.1 s; holding last known pose to keep the scan window open
+........2026-10-09 22:14:58,974 WARNING robocup-slam-bridge: T265 TF starved for 3.1 s; holding last known pose to keep the scan window open
+...........................................................................2026-10-09 22:14:59,856 ERROR root: --task-board-camera and --task-board-turn-deg must be provided together
+2026-10-09 22:14:59,857 ERROR root: task-board startup requires hardware-mission and a finite measured turn
+2026-10-09 22:14:59,858 ERROR root: task-board startup requires hardware-mission and a finite measured turn
+.....................................................................
+----------------------------------------------------------------------
+Ran 891 tests in 13.194s
+
+OK (skipped=7)
+
+FOCUSED UNITTEST OUTPUT:
+
+TEST: test_pure_pursuit_line.py
+.....................
+----------------------------------------------------------------------
+Ran 21 tests in 0.201s
+
+OK
+TEST: test_differential_navigation.py
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.014s
+
+OK
+TEST: test_basic_motion_controller.py
+............
+----------------------------------------------------------------------
+Ran 12 tests in 0.015s
+
+OK
+TEST: test_basic_motion_startup.py
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.009s
+
+OK
+TEST: test_payload_detour.py
+.payload slot 1 release failed
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 70, in drop_payload
+    sleep(hold_s)
+    ~~~~~^^^^^^^^
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\payload_detour.py", line 82, in hold
+    check()
+    ~~~~~^^
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\payload_detour.py", line 52, in check
+    guard()
+    ~~~~~^^
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\test\test_payload_detour.py", line 146, in guard
+    raise RuntimeError("operator STOP during release")
+RuntimeError: operator STOP during release
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=1
+[route] PAYLOAD DETOUR slot=1
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=2
+............could not prepare payload slot 1
+Traceback (most recent call last):
+  File "C:\Users\TZDEZACR\Desktop\robocup\car\code\components\payload_task.py", line 38, in prepare_payload
+    raise RuntimeError("payload holding state was not confirmed")
+RuntimeError: payload holding state was not confirmed
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=2
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=1
+...payload slot 1 activation was not confirmed
+payload slot 1 inactive state was not confirmed
+[route] START forward_280cm
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=0
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=1
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=1
+[route] START forward_280cm
+[route] PAYLOAD DETOUR slot=1
+[route] DONE forward_280cm
+[route] START left_90deg_1
+[route] DONE left_90deg_1
+[route] START forward_420cm
+[route] DONE forward_420cm
+[route] START left_90deg_2
+[route] DONE left_90deg_2
+[route] START forward_250cm
+[route] DONE forward_250cm
+[route] FINISHED; alarms=0; drops=1
+.............
+----------------------------------------------------------------------
+Ran 29 tests in 1.425s
+
+OK

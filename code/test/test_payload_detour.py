@@ -174,6 +174,76 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertEqual(checks[-1]['stable_frames'],4)
         self.assertEqual(checks[-1]['pose_reference'],'t265_local')
 
+    def drop_pose_check(self, offsets, *, along_error=0., cross_error=0., measured_yaw=None):
+        """Inject measured stop poses after translation has completed, before release."""
+        samples = 0
+        def check():
+            nonlocal samples
+            if self.stage == "forward_47cm" and self.runtime.motion.state is MotionActionState.CANCELLED:
+                starts = {d["stage"]:d for e,d in self.events if e == "payload_detour_stage_start"}
+                A,B = starts["forward_47cm"]["args"]
+                target_yaw = starts["left_90deg"]["args"][0]
+                ux,uy = math.cos(target_yaw), math.sin(target_yaw)
+                self.pose[0] = B[0]+along_error*ux-cross_error*uy
+                self.pose[1] = B[1]+along_error*uy+cross_error*ux
+                offset = offsets[min(samples,len(offsets)-1)]
+                self.pose[2] = target_yaw+math.radians(offset) if measured_yaw is None else measured_yaw
+                samples += 1
+        return check
+
+    def test_drop_exact_fixed_yaw_and_position_tolerances_allow_one_release(self):
+        for along_error in (-.005,.005):
+            with self.subTest(along_error=along_error):
+                self.fixture()
+                self.run_detour(check_vision=self.drop_pose_check([0],along_error=along_error,cross_error=.02))
+                self.assertEqual(len(self.releases),1)
+                checks=[d for e,d in self.events if e=="payload_stop_verification"]
+                self.assertEqual(checks[-1]["stable_frames"],4)
+                self.assertAlmostEqual(checks[-1]["yaw_error_rad"],0)
+                self.assertGreaterEqual(len(checks),5)
+                self.assert_stopped()
+
+    def test_stationary_yaw_outside_tolerance_refuses_release_and_preserves_error(self):
+        for offset in (10.,-3.1):
+            with self.subTest(offset=offset):
+                self.fixture()
+                with self.assertRaisesRegex(RuntimeError,"final yaw outside"):
+                    self.run_detour(check_vision=self.drop_pose_check([offset]))
+                self.assertFalse(self.releases)
+                self.assertNotIn("reverse_47cm",self.stage_poses)
+                self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
+                self.assert_safe_exit()
+                failed=[d for e,d in self.events if e=="payload_stop_verification" and d.get("passed") is False]
+                self.assertEqual(failed[-1]["reason"],"payload_final_yaw_error")
+                self.assertAlmostEqual(failed[-1]["yaw_error_rad"],math.radians(offset))
+                self.assertTrue(any(e=="payload_detour_failed" and "final yaw outside" in d["reason"]
+                                    for e,d in self.events))
+
+    def test_stationary_yaw_inside_tolerance_allows_release(self):
+        self.fixture()
+        self.run_detour(check_vision=self.drop_pose_check([2.9]))
+        self.assertEqual(len(self.releases),1)
+        checks=[d for e,d in self.events if e=="payload_stop_verification"]
+        self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(2.9))
+
+    def test_release_yaw_across_pi_uses_normalized_one_degree_error(self):
+        self.fixture((0,0,math.radians(89)))
+        self.run_detour(check_vision=self.drop_pose_check([0],measured_yaw=-math.pi))
+        self.assertEqual(len(self.releases),1)
+        checks=[d for e,d in self.events if e=="payload_stop_verification"]
+        self.assertAlmostEqual(checks[-1]["target_yaw_rad"],math.radians(179))
+        self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(1))
+
+    def test_yaw_drifts_outside_tolerance_before_four_frames_refuses_release(self):
+        self.fixture()
+        with self.assertRaisesRegex(RuntimeError,"final yaw outside"):
+            self.run_detour(check_vision=self.drop_pose_check([2,2,2,4]))
+        checks=[d for e,d in self.events if e=="payload_stop_verification"]
+        self.assertEqual(checks[-1]["reason"],"payload_final_yaw_error")
+        self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(4))
+        self.assertFalse(self.releases)
+        self.assert_safe_exit()
+
     def test_outbound_uses_nominal_side_yaw_and_return_reuses_line(self):
         self.fixture()
         self.run_detour()
