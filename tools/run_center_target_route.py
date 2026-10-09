@@ -199,6 +199,7 @@ def main(argv=None):
                         drop_center_width_ratio=args.drop_center_width_ratio,
                         target_class_name=args.target_class_name)
     alarm = SoundLightAlarm() if args.target_action == "beep" or args.startup_alarm_seconds else None
+    outcome_error = None
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
         if detour is not None and args.release_mode == "simulate":
@@ -226,6 +227,7 @@ def main(argv=None):
         (args.log_dir / "result.txt").write_text("FINISHED\n")
         return 0
     except BaseException as exc:
+        outcome_error = f"{type(exc).__name__}: {exc}"
         if runtime is not None:
             try:
                 runtime.drive.stop()
@@ -235,15 +237,32 @@ def main(argv=None):
         print(f"[route] FAILED: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return 1
     finally:
-        for cleanup in (runtime.drive.stop if runtime is not None else lambda: None,
-                        alarm.off if alarm is not None and alarm.is_initialized else lambda: None,
-                        runtime.close if runtime is not None else lambda: None,
-                        vision.close, lambda: servo.close(hold=True) if servo.is_running else None):
+        cleanup_error = None
+        for label, cleanup in (
+                ("drive_stop",runtime.drive.stop if runtime is not None else lambda: None),
+                ("alarm_off",alarm.off if alarm is not None and alarm.is_initialized else lambda: None),
+                ("relay_all_off",lambda: runtime.relay.all_off(verify=True)
+                 if runtime is not None and runtime.relay is not None and runtime.relay.connected else None),
+                ("runtime_close",runtime.close if runtime is not None else lambda: None),
+                ("vision_close",vision.close),
+                ("servo_close",lambda: servo.close(hold=True) if servo.is_running else None)):
             try:
-                cleanup()
+                if cleanup() is False:
+                    raise RuntimeError(f"{label} was not confirmed")
             except Exception as exc:
-                print(f"[route] cleanup failed: {exc}", file=sys.stderr, flush=True)
-        logger.close()
+                cleanup_error = cleanup_error or exc
+                print(f"[route] {label} cleanup failed: {exc}",file=sys.stderr,flush=True)
+                try:
+                    logger.emit({"type":"route_cleanup_failed","resource":label,"reason":str(exc)},priority=True)
+                except Exception:
+                    pass
+        try:
+            logger.close()
+        except Exception as exc:
+            cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and outcome_error is None:
+            (args.log_dir / "result.txt").write_text(f"FAILED: cleanup: {cleanup_error}\n")
+            return 1
 
 
 
