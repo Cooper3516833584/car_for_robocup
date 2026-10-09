@@ -87,7 +87,7 @@ ALIGN_PIXEL_TO_DRIVE_SIGN = 1
 ALIGN_STEP_M = 0.02
 ALIGN_MAX_STEPS = 20
 # The existing general route tolerance is 3 cm; a 2 cm alignment action needs
-# a smaller tolerance. Applied to drive_distance only and restored afterwards.
+# a smaller tolerance. Applied to move_local_distance only and restored afterwards.
 SHORT_MOVE_TOLERANCE_M = 0.005
 
 # TODO(field): measure this sequence from the aligned camera pose to release.
@@ -186,9 +186,9 @@ def move_to_xy(runtime, x_m, y_m):
         x_m, y_m), label="move_to_xy")
 
 
-def follow_lane_segment(runtime, start_xy, end_xy):
-    return run_motion_action(runtime, lambda: runtime.motion.follow_segment(
-        start_xy, end_xy), label="follow_lane_segment")
+def track_lane_line(runtime, start_xy, end_xy):
+    return run_motion_action(runtime, lambda: runtime.motion.track_global_line(
+        start_xy, end_xy), label="track_lane_line")
 
 
 def turn_to_deg(runtime, yaw_deg):
@@ -196,13 +196,25 @@ def turn_to_deg(runtime, yaw_deg):
         math.radians(yaw_deg)), label="turn_to_deg")
 
 
-def drive_distance(runtime, distance_m):
+def move_local_distance(runtime, distance_m):
     original = runtime.motion.navigation
     runtime.motion.navigation = replace(original, position_tolerance_m=min(
         original.position_tolerance_m, SHORT_MOVE_TOLERANCE_M))
+    def start():
+        pose = runtime.current_local_pose()
+        if pose is None:
+            raise LocalizationLostError("fresh continuous T265 local pose unavailable")
+        A = (pose.x_m, pose.y_m)
+        B = (A[0] + distance_m * math.cos(pose.yaw_rad),
+             A[1] + distance_m * math.sin(pose.yaw_rad))
+        runtime.motion.track_local_line(A, B, reverse=distance_m < 0)
     try:
-        return run_motion_action(runtime, lambda: runtime.motion.drive_distance(
-            distance_m, lateral_tolerance_m=original.position_tolerance_m), label="drive_distance")
+        if not math.isfinite(distance_m):
+            raise ValueError("local distance must be finite")
+        if distance_m == 0:
+            runtime.drive.stop()
+            return wait_for_fused_localization(runtime)
+        return run_motion_action(runtime, start, label="move_local_distance")
     finally:
         runtime.motion.navigation = original
 
@@ -213,7 +225,7 @@ def go_to_lane(runtime):
 
 def go_to_task_board(runtime):
     # TASK_BOARD_X/Y is the on-lane observation pose, not the board centre.
-    result = follow_lane_segment(runtime, (LANE_ENTRY_X, LANE_ENTRY_Y),
+    result = track_lane_line(runtime, (LANE_ENTRY_X, LANE_ENTRY_Y),
                                  (TASK_BOARD_X, TASK_BOARD_Y))
     turn_to_deg(runtime, TASK_BOARD_YAW_DEG)
     runtime.drive.stop()
@@ -267,13 +279,13 @@ def send_task_to_drone_once(counts, *, runtime=None):
 
 
 def go_to_first_corner(runtime):
-    return follow_lane_segment(runtime, (TASK_BOARD_X, TASK_BOARD_Y),
+    return track_lane_line(runtime, (TASK_BOARD_X, TASK_BOARD_Y),
                                (CORNER_1_X, CORNER_1_Y))
 
 
 def enter_cross_lane(runtime):
     turn_to_deg(runtime, CROSS_LANE_YAW_DEG)
-    return follow_lane_segment(runtime, (CORNER_1_X, CORNER_1_Y),
+    return track_lane_line(runtime, (CORNER_1_X, CORNER_1_Y),
                                (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y))
 
 
@@ -376,7 +388,7 @@ def search_yellow_drop_zone(runtime, camera, detector):
             if remaining <= 0.01:
                 break
             distance = min(YELLOW_SEARCH_STEP_M, remaining)
-            drive_distance(runtime, distance)
+            move_local_distance(runtime, distance)
             travelled += distance
         runtime.record_event("yellow_not_found", reason="search segment exhausted")
         return None
@@ -417,7 +429,7 @@ def align_yellow_drop_zone(runtime, camera, detector, initial_detection=None):
             if index == ALIGN_MAX_STEPS:
                 break
             distance = math.copysign(ALIGN_STEP_M, error) * ALIGN_PIXEL_TO_DRIVE_SIGN
-            drive_distance(runtime, distance)
+            move_local_distance(runtime, distance)
             detection = None
         runtime.record_event("yellow_align", success=False, reason="step limit reached")
         return None
@@ -432,7 +444,7 @@ def run_fixed_drop_route(runtime):
     for index, (action, value) in enumerate(FIXED_DROP_ROUTE):
         runtime.record_event("fixed_drop_route_step", step=index, action=action, value=value)
         if action == "drive":
-            result = drive_distance(runtime, value)
+            result = move_local_distance(runtime, value)
         elif action == "rotate_to":
             result = turn_to_deg(runtime, value)
         elif action == "rotate":
@@ -450,12 +462,12 @@ def drop_payload(relay, slot=1):
 
 
 def go_to_second_corner(runtime):
-    return follow_lane_segment(runtime, (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y),
+    return track_lane_line(runtime, (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y),
                                (CORNER_2_X, CORNER_2_Y))
 
 
 def go_to_finish(runtime):
-    result = follow_lane_segment(runtime, (CORNER_2_X, CORNER_2_Y),
+    result = track_lane_line(runtime, (CORNER_2_X, CORNER_2_Y),
                                  (FINISH_X, FINISH_Y))
     runtime.drive.stop()
     runtime.mission.finish()

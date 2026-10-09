@@ -6,12 +6,12 @@ import math
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, PropertyMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
 from components.basic_motion_controller import MotionActionState
-from components.pose_fusion import FusedPoseEstimate, PoseFusionState
+from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from components.task_board_reader import TaskCounts, TaskBoardResult
 from components.yellow_yolo_adapter import YellowDetection
 from components.relay_lcus import FakeLCUSRelay
@@ -39,6 +39,8 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime.record_event = Mock()
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        local = self.stack.enter_context(patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock))
+        local.side_effect = lambda: None if self.lost else Pose2D(*self.xy_yaw, self.now)
         self.stack.enter_context(patch.object(task.time, "sleep", self.advance))
         # Measured lane-segment fixtures must have distinct endpoints.
         for name, value in {"LANE_ENTRY_X": 0.10, "TASK_BOARD_X": 0.20,
@@ -51,7 +53,7 @@ class CompetitionTaskTests(unittest.TestCase):
         return FusedPoseEstimate(pose, PoseFusionState.LOST if self.lost else PoseFusionState.OK,
                                  0.0, ("test",), None if self.lost else 0.0,
                                  None if self.lost else 0.0, None, None, True,
-                                 anchor_initialized=True)
+                                 anchor_initialized=True, t265_confidence=1.)
 
     def advance(self, dt):
         self.sleep_count += 1
@@ -65,17 +67,17 @@ class CompetitionTaskTests(unittest.TestCase):
         self.now += dt
 
     def test_consecutive_real_actions_resume_ready_and_stop(self):
-        task.drive_distance(self.runtime, 0.12)
+        task.move_local_distance(self.runtime, 0.12)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.TARGET_OPERATION)
         first_x = self.xy_yaw[0]
-        task.drive_distance(self.runtime, -0.04)
+        task.move_local_distance(self.runtime, -0.04)
         self.assertLess(self.xy_yaw[0], first_x - 0.025)
         self.assertEqual(self.runtime.motion.state, MotionActionState.SUCCEEDED)
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
     def test_two_centimetre_move_is_not_swallowed_by_route_tolerance(self):
         original = self.runtime.motion.navigation
-        task.drive_distance(self.runtime, 0.02)
+        task.move_local_distance(self.runtime, 0.02)
         self.assertGreater(self.xy_yaw[0], 0.015)
         self.assertIs(self.runtime.motion.navigation, original)
 
@@ -96,7 +98,7 @@ class CompetitionTaskTests(unittest.TestCase):
             self.lost = 0.1 < elapsed[0] < 0.3
 
         self.stack.enter_context(patch.object(task.time, "sleep", advance))
-        task.drive_distance(self.runtime, 0.10)
+        task.move_local_distance(self.runtime, 0.10)
         self.assertEqual(self.runtime.motion.state, MotionActionState.SUCCEEDED)
 
     def test_complete_pose_loss_stops_route(self):
@@ -108,7 +110,7 @@ class CompetitionTaskTests(unittest.TestCase):
 
         self.stack.enter_context(patch.object(task.time, "sleep", advance))
         with self.assertRaises(task.LocalizationLostError):
-            task.drive_distance(self.runtime, 0.20)
+            task.move_local_distance(self.runtime, 0.20)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
@@ -133,7 +135,7 @@ class CompetitionTaskTests(unittest.TestCase):
         reads = [detection, None, None, None, None]
         detect = self.stack.enter_context(patch.object(task, "_detect_stopped",
             side_effect=lambda *_: reads.pop(0) if reads else None))
-        with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
+        with patch.object(task, "move_local_distance", wraps=task.move_local_distance) as move:
             self.assertIsNone(task.search_yellow_drop_zone(self.runtime, Mock(), Mock()))
         self.assertGreaterEqual(detect.call_count, 4)
         distances = [c.args[1] for c in move.call_args_list]
@@ -145,7 +147,7 @@ class CompetitionTaskTests(unittest.TestCase):
         detections = iter([YellowDetection(300, 1000, 80, 80, 0.9),
                            YellowDetection(321, 1000, 80, 80, 0.9)])
         self.stack.enter_context(patch.object(task, "_detect_stopped", side_effect=lambda *_: next(detections)))
-        with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
+        with patch.object(task, "move_local_distance", wraps=task.move_local_distance) as move:
             aligned = task.align_yellow_drop_zone(self.runtime, Mock(), Mock(),
                 initial_detection=YellowDetection(340, 1000, 80, 80, 0.9))
         self.assertEqual([c.args[1] for c in move.call_args_list], [0.02, -0.02])
@@ -160,7 +162,7 @@ class CompetitionTaskTests(unittest.TestCase):
             with patch.object(task, "select_yellow", return_value=native):
                 detection = task.detect_yellow_once(camera, detector)
             self.assertEqual(detection, YellowDetection(320, 240, 80, 80, .9))
-            with patch.object(task, "drive_distance") as drive:
+            with patch.object(task, "move_local_distance") as drive:
                 self.assertIs(task.align_yellow_drop_zone(self.runtime, camera, detector,
                                                           initial_detection=detection), detection)
             drive.assert_not_called()
@@ -177,7 +179,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "ALIGN_MAX_STEPS", 2))
         detection = YellowDetection(800, 360, 80, 80, 0.9)
         self.stack.enter_context(patch.object(task, "_detect_stopped", return_value=detection))
-        with patch.object(task, "drive_distance", wraps=task.drive_distance) as move:
+        with patch.object(task, "move_local_distance", wraps=task.move_local_distance) as move:
             self.assertIsNone(task.align_yellow_drop_zone(self.runtime, Mock(), Mock()))
         self.assertEqual([c.args[1] for c in move.call_args_list], [-0.02, -0.02])
 
@@ -219,7 +221,7 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_uses_measured_lane_segments(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
-        with patch.object(task, "follow_lane_segment", wraps=task.follow_lane_segment) as follow:
+        with patch.object(task, "track_lane_line", wraps=task.track_lane_line) as follow:
             task.run_full_mission(self.runtime, detector=None)
         self.assertEqual([(c.args[1], c.args[2]) for c in follow.call_args_list], [
             ((0.10, 0.0), (0.20, 0.0)), ((0.20, 0.0), (0.30, 0.0)),
@@ -246,7 +248,7 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_second_corner_recovers_to_fixed_lane_after_offset_drop(self):
         self.xy_yaw[:] = [0.38, 0.15, 0.2]
         # Rejoin geometry must remain the measured lane, not current-pose -> goal.
-        with patch.object(task, "follow_lane_segment", return_value=Mock()) as follow:
+        with patch.object(task, "track_lane_line", return_value=Mock()) as follow:
             task.go_to_second_corner(self.runtime)
         follow.assert_called_once_with(self.runtime, (0.35, 0.0), (0.45, 0.0))
 
