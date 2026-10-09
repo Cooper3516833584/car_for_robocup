@@ -180,7 +180,7 @@ class BasicMotionController:
             result = ControllerOutput(_ZERO, NavigationState.GOAL_REACHED, {})
         else:
             result = controller.compute_line(pose, action.start_xy, action.end_xy, action.progress_s,
-                                             reverse=action.reverse)
+                                             reverse=action.reverse, t265_pose=t265_pose, now_s=now_s)
             action.progress_s = result.diagnostics["progress_m"]
             self._phase = MotionPhase.ALIGNING if result.state is NavigationState.ROTATING_TO_PATH else MotionPhase.TRACKING
         diagnostics = {**result.diagnostics, "pose_reference": pose_reference, "reverse": action.reverse}

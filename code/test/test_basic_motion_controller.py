@@ -82,6 +82,37 @@ class BasicMotionTests(unittest.TestCase):
         self.assertGreater(out.command.angular_z_rad_s,0)
         self.assertTrue(out.diagnostics['reverse'])
 
+    def test_all_line_actions_forward_t265_and_wait_for_alignment(self):
+        for method,args in (("track_global_line",((0,0),(1,0))),
+                            ("track_local_line",((0,0),(1,0))),
+                            ("navigate_to",(1,0)), ("navigate_to_pose",(1,0,0))):
+            with self.subTest(method=method):
+                self.motion.stop()
+                getattr(self.motion,method)(*args)
+                self.step(yaw=math.pi/2,t=1.)
+                self.assertEqual(self.step(yaw=math.radians(55),t=1.05).command.linear_x_m_s,0)
+                self.step(t=1.10)
+                for i in range(1,5): out=self.step(t=1.10+.05*i)
+                self.assertEqual(out.diagnostics["line_state"],"align_settled")
+                self.assertEqual(out.state,MotionActionState.RUNNING)
+                self.assertGreater(self.step(t=1.35).command.linear_x_m_s,0)
+
+    def test_cancel_restart_clears_line_alignment_target(self):
+        self.motion.track_global_line((0,0),(1,0))
+        self.step(yaw=math.pi/2)
+        self.motion.stop()
+        self.assertIsNone(self.motion.navigator.controller._line_align_yaw)
+        self.motion.track_local_line((0,0),(0,1))
+        out=self.step(t=1.05)
+        self.assertGreater(out.command.angular_z_rad_s,0)
+        self.assertEqual(out.command.linear_x_m_s,0)
+
+    def test_line_alignment_never_uses_fused_pose_as_settle_sample(self):
+        self.motion.track_global_line((0,0),(1,0))
+        out=self.motion.step(Pose2D(0,0,math.pi/2,1.),now_s=1.)
+        self.assertEqual(out.state,MotionActionState.POSE_LOST)
+        self.assertEqual(out.command,Twist2D(0,0))
+
     def test_legacy_actions_removed(self):
         for name in ('drive_distance','follow_segment','drive_to','face_point'):
             self.assertFalse(hasattr(self.motion,name))

@@ -74,6 +74,87 @@ class PurePursuitReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(out.details["carrot_x_m"], -.193)
         self.assertAlmostEqual(out.details["remaining_m"], .007)
 
+    def controller(self):
+        config = load_v2_config()
+        return DifferentialPathController(replace(config.navigation, lookahead_m=.20), config.drive)
+
+    def test_alignment_waits_below_60_degrees_and_during_measured_coast(self):
+        controller = self.controller()
+        def step(t, yaw, local_yaw):
+            return controller.compute_line(Pose2D(0, 0, yaw, t), (0, 0), (2, 0),
+                t265_pose=Pose2D(0, 0, local_yaw, t), now_s=t)
+        out = step(1., math.pi/2, math.pi/2)
+        self.assertEqual(out.diagnostics["line_state"], "align_forward")
+        self.assertEqual(out.command.linear_x_m_s, 0)
+        out = step(1.05, math.radians(55), math.radians(55))
+        self.assertEqual(out.command.linear_x_m_s, 0)
+        self.assertEqual(out.diagnostics["stable_frames"], 0)
+        # Fused yaw is in tolerance while real local yaw is still moving.
+        for i in range(4):
+            out = step(1.10 + .05*i, 0, .01*i)
+            self.assertEqual(out.command.linear_x_m_s, 0)
+            self.assertEqual(out.diagnostics["stable_frames"], 0)
+        for i in range(1, 5):
+            out = step(1.25 + .05*i, 0, .03)
+            self.assertEqual(out.command.linear_x_m_s, 0)
+            if i < 4:
+                self.assertEqual(out.diagnostics["line_state"], "align_forward")
+        self.assertEqual(out.diagnostics["line_state"], "align_settled")
+        self.assertEqual(out.command.linear_x_m_s, 0)
+        self.assertEqual(out.command.angular_z_rad_s, 0)
+        self.assertEqual(step(1.50, 0, .03).diagnostics["line_state"], "tracking")
+
+    def test_alignment_repeated_samples_do_not_count_and_missing_stale_stop(self):
+        controller = self.controller()
+        def step(t, yaw, local):
+            return controller.compute_line(Pose2D(0, 0, yaw, t), (0, 0), (2, 0),
+                                           t265_pose=local, now_s=t)
+        step(1., math.pi/2, Pose2D(0, 0, math.pi/2, 1.))
+        local = Pose2D(0, 0, 0, 1.05)
+        step(1.05, 0, local)
+        for t in (1.06, 1.07, 1.08, 1.09):
+            out = step(t, 0, local)
+            self.assertEqual(out.diagnostics["stable_frames"], 0)
+            self.assertEqual(out.command.linear_x_m_s, 0)
+        for t, local in ((1.10, None), (1.50, Pose2D(0,0,0,1.05))):
+            out = step(t, 0, local)
+            self.assertEqual(out.state.value, "pose_lost")
+            self.assertEqual((out.command.linear_x_m_s, out.command.angular_z_rad_s), (0,0))
+
+    def test_alignment_locks_carrot_bearing_instead_of_line_tangent(self):
+        controller = self.controller()
+        pose = Pose2D(0, 1, 0, 1.)
+        out = controller.compute_line(pose, (0,0), (2,0), t265_pose=pose, now_s=1.)
+        self.assertAlmostEqual(out.diagnostics["target_yaw_rad"], math.atan2(-1,.2))
+        changed = Pose2D(.1, 1, -.2, 1.05)
+        out = controller.compute_line(changed, (0,0), (2,0), t265_pose=changed, now_s=1.05)
+        self.assertAlmostEqual(out.diagnostics["target_yaw_rad"], math.atan2(-1,.2))
+
+    def test_reverse_alignment_settles_then_drives_only_backward(self):
+        controller = self.controller()
+        def step(t, yaw):
+            p = Pose2D(0,0,yaw,t)
+            return controller.compute_line(p, (0,0), (1,0), reverse=True, t265_pose=p, now_s=t)
+        out = step(1., math.pi/2)
+        self.assertAlmostEqual(abs(out.diagnostics["target_yaw_rad"]), math.pi)
+        self.assertEqual(out.command.linear_x_m_s, 0)
+        step(1.05, math.pi)
+        for i in range(1,5):
+            out = step(1.05+.05*i, math.pi)
+            self.assertEqual(out.command.linear_x_m_s, 0)
+        self.assertEqual(out.diagnostics["line_state"], "align_settled")
+        self.assertLess(step(1.30, math.pi).command.linear_x_m_s, 0)
+
+    def test_endpoint_preempts_an_active_alignment(self):
+        from components.differential_navigation import NavigationState
+        for x, state in ((.47, NavigationState.GOAL_REACHED), (.57, NavigationState.BLOCKED)):
+            controller = self.controller()
+            p = Pose2D(0,0,math.pi/2,1.)
+            controller.compute_line(p, (0,0), (.47,0), t265_pose=p, now_s=1.)
+            out = controller.compute_line(Pose2D(x,0,math.pi/2,1.05),(0,0),(.47,0))
+            self.assertIs(out.state, state)
+            self.assertEqual((out.command.linear_x_m_s,out.command.angular_z_rad_s),(0,0))
+
     def test_forward_drift_to_left_turns_right_without_reversing(self):
         out = line_step((0.05, 0.06, 0.0), (0.0, 0.0), (2.0, 0.0), 0.0)
         self.assertEqual(out.status, "tracking")
@@ -109,7 +190,8 @@ class PurePursuitReferenceTests(unittest.TestCase):
         self.assertEqual((out.v_m_s, out.omega_rad_s), (0.0, 0.0))
 
     def test_large_heading_error_rotates_without_backward_translation(self):
-        out = line_step((0.0, 0.0, math.pi / 2), (0.0, 0.0), (2.0, 0.0), 0.0)
+        out = line_step((0.0, 0.0, math.pi / 2), (0.0, 0.0), (2.0, 0.0), 0.0,
+                        t265_pose=Pose2D(0, 0, math.pi/2, 1.), now_s=1.)
         self.assertEqual(out.status, "align_forward")
         self.assertEqual(out.v_m_s, 0.0)
         self.assertLess(out.omega_rad_s, 0.0)

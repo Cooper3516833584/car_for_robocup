@@ -104,10 +104,12 @@ class DifferentialPathController:
     def reset_path(self):
         self.progress_m = 0.0
         self.position_arrived = False
+        self._line_align_yaw = None
         self.turn.reset()
 
     def compute_line(self, pose, start, end, previous_progress_m=0.0, *, reverse=False,
-                     position_tolerance_m=None, terminal_lateral_m=0.03):
+                     position_tolerance_m=None, terminal_lateral_m=0.03,
+                     t265_pose=None, now_s=None):
         lookahead_m = self.navigation.lookahead_m
         speed_limit_m_s = min(0.15, self.drive.max_linear_speed_m_s)
         stop_tolerance_m = (self.navigation.position_tolerance_m if position_tolerance_m is None
@@ -182,16 +184,27 @@ class DifferentialPathController:
         heading_error = (math.atan2(-local_y, -local_x) if reverse
                          else math.atan2(local_y, local_x))
         info["heading_error_rad"] = heading_error
-        if abs(heading_error) > math.radians(60.0):
-            # Rotate in place toward the FORWARD travel-facing angle. This is not
-            # a backwards path recovery; the separate turn/stable-stop controller
-            # should own actual completion on hardware.
-            if not self.drive.allow_in_place_rotation:
-                return result(0.0,0.0,NavigationState.BLOCKED,"in_place_rotation_unavailable")
-            limit = min(.30,max_omega_rad_s,
-                        math.sqrt(2*self.drive.max_angular_accel_rad_s2*abs(heading_error)))
-            omega = clamp(1.5*heading_error,-limit,limit)
-            return result(0.0, omega, NavigationState.ROTATING_TO_PATH, "align_forward")
+        if self._line_align_yaw is None and abs(heading_error) > math.radians(60.0):
+            # Lock the entry carrot's travel-facing body yaw, including reverse.
+            self._line_align_yaw = normalize_angle_rad(pose.yaw_rad + heading_error)
+            self.turn.reset()
+        if self._line_align_yaw is not None:
+            info["target_yaw_rad"] = self._line_align_yaw
+            turn_result = self.turn.compute(
+                normalize_angle_rad(self._line_align_yaw - pose.yaw_rad),
+                t265_pose, pose.timestamp_s if now_s is None else now_s,
+                self.navigation, self.drive,
+            )
+            info.update(turn_result.diagnostics)
+            if turn_result.state is NavigationState.GOAL_REACHED:
+                self._line_align_yaw = None
+                self.turn.reset()
+                # Settling completes alignment, never the line; resume next tick.
+                return result(0.0, 0.0, NavigationState.ROTATING_TO_PATH, "align_settled")
+            if turn_result.state is NavigationState.FINAL_ALIGN:
+                return result(0.0, turn_result.command.angular_z_rad_s,
+                              NavigationState.ROTATING_TO_PATH, "align_forward")
+            return result(0.0, 0.0, turn_result.state, "align_forward")
 
         # A 0.045 m/s floor reflects prior car tests; not a universal motor value.
         speed = min(speed_limit_m_s, math.sqrt(2.0 * decel_m_s2 * max(remaining, 0.0)))
@@ -223,7 +236,8 @@ class DifferentialPathController:
             self.position_arrived = True
             output = ControllerOutput(Twist2D(0,0),NavigationState.GOAL_REACHED,{})
         else:
-            output = self.compute_line(pose,path[0],path[-1],self.progress_m)
+            output = self.compute_line(pose,path[0],path[-1],self.progress_m,
+                                       t265_pose=t265_pose, now_s=now_s)
             self.progress_m = output.diagnostics["progress_m"]
         if output.state is NavigationState.GOAL_REACHED:
             self.position_arrived = True

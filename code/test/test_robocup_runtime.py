@@ -99,6 +99,24 @@ class RobocupRuntimeTests(unittest.TestCase):
                 self.assertEqual(result.command,Twist2D(0,0))
                 self.assertEqual(result.mission_state,RobocupMissionState.SAFE_STOP)
 
+    def test_global_line_alignment_rejects_invalid_local_settle_input(self):
+        for reason in ("missing", "stale", "confidence", "continuity"):
+            with self.subTest(reason=reason):
+                runtime = self.make_distance_reference_runtime(
+                    fused=Pose2D(10,20,math.pi/2,self.now[0]),
+                    local=Pose2D(0,0,math.pi/2,self.now[0]))
+                runtime.motion.track_global_line((10,20),(11,20))
+                initial = runtime.step(now_s=self.now[0])
+                self.assertEqual(initial.motion.diagnostics["line_state"], "align_forward")
+                if reason == "missing": self.local = None
+                if reason == "stale": self.local = replace(self.local,timestamp_s=self.now[0]-1)
+                if reason == "confidence": self.estimate = replace(self.estimate,t265_confidence=0)
+                if reason == "continuity": self.estimate = replace(self.estimate,t265_continuity_broken=True)
+                result = runtime.step(now_s=self.now[0])
+                self.assertEqual(result.command,Twist2D(0,0))
+                self.assertEqual(result.motion.state,MotionActionState.POSE_LOST)
+                self.assertEqual(result.mission_state,RobocupMissionState.SAFE_STOP)
+
     def test_global_actions_use_fused_and_local_turns_use_t265(self):
         for name,args,local in [('track_global_line',((10,20),(11,20)),False),
                                ('navigate_to',(11,20),False),('rotate_to',(.5,),False),
