@@ -30,6 +30,20 @@ from hal.pwm import PWMBackendError
 from payload_detour import DetourSettings
 
 
+def route_speed_config(config, scale):
+    """Scale translation and turn targets without changing geometry or acceleration."""
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError("--speed-scale must be finite and positive")
+    return replace(config,
+                   drive=replace(config.drive,
+                       max_linear_speed_m_s=config.drive.max_linear_speed_m_s * scale,
+                       max_angular_speed_rad_s=config.drive.max_angular_speed_rad_s * scale,
+                       max_wheel_speed_m_s=config.drive.max_wheel_speed_m_s * scale),
+                   navigation=replace(config.navigation,
+                       translation_speed_scale=config.navigation.translation_speed_scale * scale,
+                       final_yaw_gain=config.navigation.final_yaw_gain * scale))
+
+
 def payload_config(config, *, action, release_mode="simulate", relay_port=None, relay_channels=None):
     """Validate explicit relay settings before any camera/servo/motor opens."""
     if action == "beep":
@@ -121,6 +135,8 @@ def main(argv=None):
     parser.add_argument("--target-class-name", default=None)
     parser.add_argument("--target-speed-cm-s", type=float, default=8,
                         help="patrol speed cap while a target is visible; normal acceleration limits apply")
+    parser.add_argument("--speed-scale", type=float, default=1,
+                        help="scale patrol, short moves, visible-target speed and turn targets; default 1")
     parser.add_argument("--drop-center-width-ratio", type=float, default=0.1,
                         help="horizontal trigger band, default middle 10%%; vertical position is unrestricted")
     parser.add_argument("--relay-port", help="explicit, confirmed LCUS device path; never auto-detected")
@@ -172,12 +188,13 @@ def main(argv=None):
         parser.error("--max-seconds must be between 1 and 600")
     config = accepted_relative_slam_profile(load_v2_config(args.config))
     try:
+        config = route_speed_config(config, args.speed_scale)
         config = payload_config(config, action=args.target_action,
                                 release_mode=args.release_mode,
                                 relay_port=args.relay_port, relay_channels=args.relay_channels)
         detour = (DetourSettings(payload_slot=args.payload_slot, release_hold_s=args.release_hold_s,
                                  verify_relay=config.relay.verify_writes,
-                                 patrol_slow_speed_m_s=args.target_speed_cm_s / 100)
+                                 patrol_slow_speed_m_s=args.target_speed_cm_s * args.speed_scale / 100)
                   if args.target_action == "drop" else None)
     except ValueError as exc:
         parser.error(str(exc))
@@ -202,6 +219,15 @@ def main(argv=None):
     outcome_error = None
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
+        runtime.record_event("test_route_speed_profile", scale=args.speed_scale,
+                             translation_speed_scale=config.navigation.translation_speed_scale,
+                             patrol_max_m_s=min(.15 * config.navigation.translation_speed_scale,
+                                                config.drive.max_linear_speed_m_s),
+                             target_max_m_s=detour.patrol_slow_speed_m_s if detour else None,
+                             turn_max_rad_s=config.drive.max_angular_speed_rad_s)
+        print(f"[route] SPEED scale={args.speed_scale:g}; "
+              f"patrol_max={min(.15 * config.navigation.translation_speed_scale, config.drive.max_linear_speed_m_s):g}m/s; "
+              f"turn_max={config.drive.max_angular_speed_rad_s:g}rad/s", flush=True)
         if detour is not None and args.release_mode == "simulate":
             runtime.relay = FakeLCUSRelay(4)
         if detour is not None:

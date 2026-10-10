@@ -294,12 +294,13 @@ class NavigationConfig:
     path_yaw_gain: float = 1.5
     final_yaw_gain: float = 1.5
     degraded_speed_scale: float = 0.4
+    translation_speed_scale: float = 1.0
 
     def __post_init__(self) -> None:
         for name in (
             "position_tolerance_m", "yaw_tolerance_rad", "lookahead_m",
             "rotate_in_place_threshold_rad", "slowdown_distance_m",
-            "path_yaw_gain", "final_yaw_gain",
+            "path_yaw_gain", "final_yaw_gain", "translation_speed_scale",
         ):
             _positive(name, getattr(self, name))
         scale = _finite("degraded_speed_scale", self.degraded_speed_scale)

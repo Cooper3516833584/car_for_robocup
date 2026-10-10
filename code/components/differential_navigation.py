@@ -111,7 +111,8 @@ class DifferentialPathController:
                      position_tolerance_m=None,
                      t265_pose=None, now_s=None):
         lookahead_m = self.navigation.lookahead_m
-        speed_limit_m_s = min(0.15, self.drive.max_linear_speed_m_s)
+        speed_scale = self.navigation.translation_speed_scale
+        speed_limit_m_s = min(0.15 * speed_scale, self.drive.max_linear_speed_m_s)
         stop_tolerance_m = (self.navigation.position_tolerance_m if position_tolerance_m is None
                             else position_tolerance_m)
         max_omega_rad_s = self.drive.max_angular_speed_rad_s
@@ -201,12 +202,12 @@ class DifferentialPathController:
                               NavigationState.ROTATING_TO_PATH, "align_forward")
             return result(0.0, 0.0, turn_result.state, "align_forward")
 
-        # A 0.045 m/s floor reflects prior car tests; not a universal motor value.
+        # Scale the car's measured patrol profile; braking remains acceleration-limited.
         speed = min(speed_limit_m_s, math.sqrt(2.0 * decel_m_s2 * max(remaining, 0.0)))
-        speed = max(0.045, speed / (1.0 + 0.5 * abs(curvature)))
+        speed = max(0.045 * speed_scale, speed / (1.0 + 0.5 * abs(curvature)))
         speed = min(speed, speed_limit_m_s)
         if length <= 0.10:
-            speed = min(speed, 0.08)  # conservative first trial for 7 cm moves
+            speed = min(speed, 0.08 * speed_scale)
         speed = max(0.0, speed)
         signed_v = -speed if reverse else speed
         omega = signed_v * curvature

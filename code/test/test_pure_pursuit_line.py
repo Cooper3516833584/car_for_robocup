@@ -27,6 +27,36 @@ def line_step(pose, start, end, previous_progress_m, **kwargs):
 
 
 class PurePursuitReferenceTests(unittest.TestCase):
+    def test_double_speed_profile_scales_global_short_and_reverse_motion(self):
+        from tools.run_center_target_route import route_speed_config
+        base = load_v2_config()
+        base = replace(base, navigation=replace(base.navigation, lookahead_m=.20),
+                       drive=replace(base.drive, max_linear_speed_m_s=.20,
+                                     max_angular_speed_rad_s=.80, max_wheel_speed_m_s=.30))
+        fast = route_speed_config(base, 2)
+        self.assertEqual(fast.drive.max_linear_accel_m_s2, base.drive.max_linear_accel_m_s2)
+        self.assertEqual(fast.drive.max_angular_accel_rad_s2, base.drive.max_angular_accel_rad_s2)
+        for length, reverse in ((2.8, False), (.07, False), (.47, True)):
+            outputs = []
+            for config in (base, fast):
+                control = DifferentialPathController(config.navigation, config.drive)
+                pose = Pose2D(0, .003, math.pi if reverse else 0, 1)
+                outputs.append(control.compute_line(pose, (0, 0), (length, 0), reverse=reverse).command)
+            with self.subTest(length=length, reverse=reverse):
+                self.assertAlmostEqual(outputs[1].linear_x_m_s, 2 * outputs[0].linear_x_m_s)
+                self.assertAlmostEqual(outputs[1].angular_z_rad_s, 2 * outputs[0].angular_z_rad_s)
+        for scale in (0, -1, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                route_speed_config(base, scale)
+        from components.differential_navigation import TurnController
+        for error in (.2, .9):
+            turns = [TurnController().compute(error, Pose2D(0, 0, 0, 1), 1,
+                     config.navigation, config.drive).command for config in (base, fast)]
+            self.assertEqual(turns[1].linear_x_m_s, 0)
+            self.assertAlmostEqual(turns[1].angular_z_rad_s,
+                min(2 * turns[0].angular_z_rad_s,
+                    math.sqrt(2 * fast.drive.max_angular_accel_rad_s2 * error)))
+
     def test_near_endpoint_virtual_carrot_keeps_small_forward_correction(self):
         out = line_step((.463, .020, 0), (0, 0), (.47, 0), 0)
         self.assertEqual(out.status, "tracking")
