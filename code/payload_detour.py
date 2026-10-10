@@ -36,8 +36,15 @@ class DetourSettings:
 
 def run_payload_detour(runtime, settings, *, guard=lambda: None,
                        check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
-                       travel_drive=None):
-    """Advance 7cm, left90, forward47cm, release, reverse47cm, restore road yaw.
+                       travel_drive=None, fine_align=None):
+    """Advance 7cm, left90, approach the target, release, return, restore road yaw.
+
+    Without ``fine_align`` the approach is the original fixed 47 cm line and the
+    return is its exact reverse; existing route demos keep that behaviour.
+    With ``fine_align`` the callback owns the coarse approach, the 0 deg visual
+    refinement and the fallback distance, and returns the fused pose the payload
+    was aligned at. The return leg is then the real final pose back to the turn
+    pose, never a fixed 47 cm.
 
     Caller owns runtime/relay lifecycle and resumes its original segment.
     Every motion/hold tick checks cancellation, vision and runtime safety.
@@ -95,12 +102,16 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         check()
         result = _step(runtime)  # Motion cancelled: maintain zero output.
         pose = fused_pose(result)
-        ux, uy = (B[0]-A[0])/settings.approach_m, (B[1]-A[1])/settings.approach_m
+        span = math.dist(A, B)
+        if span < 1e-9:
+            ux, uy = math.cos(side_yaw), math.sin(side_yaw)
+        else:
+            ux, uy = (B[0]-A[0])/span, (B[1]-A[1])/span
         raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
         cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
         runtime.record_event("payload_drop_pose", pose_reference="fused",
                              raw_progress_m=raw,cross_track_m=cross,
-                             along_track_error_m=raw-settings.approach_m,
+                             along_track_error_m=raw-span,
                              yaw_error_rad=normalize_angle_rad(pose.yaw_rad-side_yaw),
                              target_yaw_rad=side_yaw)
 
@@ -124,9 +135,15 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         side_yaw = road_yaw + math.pi / 2
         side_pose = motion("left_90deg", "rotate_to", side_yaw)
         A2 = (side_pose.x_m, side_pose.y_m)
-        B2 = (A2[0] + settings.approach_m * math.cos(side_yaw),
-              A2[1] + settings.approach_m * math.sin(side_yaw))
-        motion("forward_47cm", "track_global_line", A2, B2)
+        if fine_align is None:
+            B2 = (A2[0] + settings.approach_m * math.cos(side_yaw),
+                  A2[1] + settings.approach_m * math.sin(side_yaw))
+            motion("forward_47cm", "track_global_line", A2, B2)
+        else:
+            # The callback only drives through this fused motion closure; it
+            # returns the fused pose the payload is aligned at.
+            final_pose = fine_align(side_pose, road_yaw, side_yaw, motion)
+            B2 = (final_pose.x_m, final_pose.y_m)
         runtime.motion.stop()
         runtime.drive.stop()
         record_drop_pose(A2, B2, side_yaw)
@@ -139,7 +156,15 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if not released:
             raise RuntimeError("payload release or relay deactivation failed")
         runtime.record_event("payload_release_done", slot=settings.payload_slot, channel=channel)
-        motion("reverse_47cm", "track_global_line", B2, A2, reverse=True)
+        if fine_align is None:
+            motion("reverse_47cm", "track_global_line", B2, A2, reverse=True)
+        elif math.dist(B2, A2) >= 1e-9:
+            # Reverse the saved fused line from the real drop pose, which the
+            # visual refinement may have moved off the fixed lateral line.
+            motion("return_from_drop", "track_global_line", B2, A2, reverse=True)
+        else:
+            runtime.record_event("payload_detour_stage_skipped", stage="return_from_drop",
+                                 reason="already at the turn pose", pose_reference="fused")
         returned = motion("right_90deg", "rotate_to", road_yaw)
         runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned,
                              pose_reference="fused")

@@ -5,8 +5,8 @@
 本次任务层整合未改动 D500/T265/融合算法、C10B 帧发送器或底盘 watchdog。
 
 完整流程：等待融合定位 → 车道入口 → 任务板观察点 → OCR → HC 单发 → 第一转角
-→ 横向车道 → 连续黄色搜索至画面横向中部 → 融合位置投放往返 → 第二转角
-→ 终点坐标停车。
+→ 横向车道 → 连续黄色搜索至画面横向中部 → 融合位置投放往返（含 0° 视觉精对准）
+→ 第二转角 → 终点坐标停车。
 
 正式车道使用现有 `track_global_line()`，按测定的线段方向运行和回线：
 
@@ -36,11 +36,17 @@
 目标中心 X 进入画面横向 45%～55% 即停止搜索；Y 不作为触发条件。
 未找到目标则跳过投放并继续原第二转角和终点。相机/推理故障与过期结果结束任务。
 
-成功找到目标后，按保存的融合道路朝向前进 7 cm → 左转 90° → 前进 47 cm
-→ 释放所选仓位并等待 0.5 s → 倒车返回保存的侧向起点 → 恢复道路朝向。
+成功找到目标后，按保存的融合道路朝向前进 7 cm → 左转 90° → 沿侧向粗靠近
+0.38 m → 相机舵机转到 0° 后按 0° 画面精对准 → 释放所选仓位并等待 0.5 s
+→ 从真实投放位姿倒车回左转结束位姿 → 恢复道路朝向。
+0° 精对准只比较实时画面外圆弧顶点与随包参考照片 `assets/ch3_yellow_servo0_reference.jpg`
+的弧顶 X/Y，横向误差用"转到道路朝向→融合定位前进/后退→转回目标朝向"修正，
+纵向误差沿侧向融合直线修正；像素容差只表示对齐成功，不是停车失败门限。
+找不到圆弧、相机打不开或修正轮数用完时，退化为原融合定位 0.47 m 侧向位置尽力投放，
+不因此结束整场。投放后按保存的真实投放位姿与左转结束位姿倒车返回，不再固定倒退 47 cm。
 前进 7 cm 维持目标可见时的速度限制；侧向行驶和倒车恢复原巡航速度上限。
-7 cm、47 cm 和倒车端点、进度、纠偏及到达判断均使用 T265+D500/SLAM 融合位置，
-倒车复用去程端点；转向完成继续使用已有实测角速度条件。随后使用原有
+7 cm、0.38 m、所有微调与返回端点、进度、纠偏及到达判断均使用 T265+D500/SLAM 融合位置；
+转向完成继续使用已有实测角速度条件。随后使用原有
 `YELLOW_SEARCH_START → CORNER_2` 车道端点继续行驶。
 几何误差停车门限和投放前停稳检测保持已删除状态，横偏/终点残差仅纠偏和记录。
 
@@ -78,6 +84,11 @@
 | `ALIGN_PIXEL_TO_DRIVE_SIGN / ALIGN_STEP_M` | 当前 +1 / 0.02 m，实测前后移动对 cx 的影响 |
 | `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作使用融合位置，按纵向距离完成，动作后恢复配置；到位后不转向追点 |
 | `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 选项1/2/3对应右前CH2/中间CH3/左前CH4、False（通电吸住/断电释放）、0.5 s；与组件及路线测试共用已确认接线 |
+| `CH3_PAYLOAD_SLOT / TARGET_COLOR` | 2 / `yellow`；正式比赛默认中间 CH3，`--payload-slot` 缺省值同为 2 |
+| `DROP_COARSE_M / DROP_FALLBACK_M` | 0.38 m 初始工作距离 / 0.47 m 原融合侧向距离（视觉不可用时的回退点） |
+| `DROP_X_TOL_PX / DROP_Y_TOL_PX / DROP_MOVE_M` | 各 10 px 与 0.02 m；像素容差只表示对齐成功，2 cm 是每次微调步长 |
+| `DROP_FINE_MAX_ACTIONS / DROP_FINE_SPEED_M_S` | 20 次（只限制循环长度）/ 0.05 m/s 微调速度上限 |
+| `DROP_REFERENCE` | `assets/ch3_yellow_servo0_reference.jpg`，舵机 0° 且 CH3 对准时的现场照片，仅用于 yellow |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
 | `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
 | `HC_TASK_MESSAGE_TEMPLATE` | `TASK,{red},{blue},{green}\n`，需要无人机接收程序按此格式解析 |
@@ -99,10 +110,13 @@
   `go_to_second_corner`、`go_to_finish`。
 - 感知与通信：`read_task_board`、`send_task_to_drone_once`、`detect_yellow_once`、`detect_yellow_from_camera`、
   `search_centered_yellow_on_line`、`align_yellow_drop_zone`。
-- 投放与串联：`perform_payload_detour`、`run_fixed_drop_route`、`drop_payload`、`run_full_mission`、
-  `run_competition_stage`。
+- 投放与串联：`align_drop_position`、`perform_payload_detour`、`run_drop_align`、
+  `run_fixed_drop_route`、`drop_payload`、`run_full_mission`、`run_competition_stage`。
 
-`drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认1。
+`drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认2
+（中间 CH3，继电器通道 3）。完整的 0° 精对准由 `align_drop_position` 完成，可由
+`payload_detour.run_payload_detour(..., fine_align=...)` 直接调用，只使用调用方传入的
+融合运动闭包，不新建运动控制器；不传 `fine_align` 时仍走原固定 7/47 cm 往返。
 完整流程在首段移动前给所选电磁铁通电吸住；投放组件断电释放后保持 OFF，
 异常和键盘中断也尝试关闭所选路；完整 runtime 负责继电器统一
 退出。CLI 的独立 drop 阶段自己负责 `all_off()` 和关闭串口，包含失败/中断退出，
@@ -152,11 +166,15 @@ python3 code/main_robocup.py --mode hardware-mission --competition-stage yellow-
 # 从当前位置前后微调；不会先跑搜索或完整路线。
 python3 code/main_robocup.py --mode hardware-mission --competition-stage yellow-align --yellow-model /absolute/path/best_car.pt
 
+# 只做 0° 投放精对准：操作员先把车摆成左转结束、面向黄色目标的位姿。
+# 舵机转 0°、走 0.38 m 粗靠近并按参考弧顶修正；不释放电磁铁、不返回、不加载 YOLO。
+python3 code/main_robocup.py --mode hardware-mission --competition-stage drop-align --yellow-camera 0
+
 # 只跑固定动作；不释放物资。
 python3 code/main_robocup.py --mode hardware-mission --competition-stage drop-route
 
 # 只释放指定仓位，不执行路线。
-python3 code/main_robocup.py --competition-stage drop --config configs/robocup_diffdrive.toml --payload-slot 1 --relay-port /dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0
+python3 code/main_robocup.py --competition-stage drop --config configs/robocup_diffdrive.toml --payload-slot 2 --relay-port /dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0
 
 # 整场：先填写路线常量，再完成单项验收后使用。
 python3 code/main_robocup.py --mode hardware-mission --competition --yellow-model /absolute/path/best_car.pt
@@ -180,6 +198,7 @@ python3 code/main_robocup.py --mode hardware-mission --competition --speed-scale
 | `task-board` | 0，含明显 WARNING 的 `(1,2,1)` fallback | 非识别流程的异常为 1 |
 | `hc-send / drop` | 0 | 1，drop 清理失败也为 1 |
 | `yellow-detect / yellow-search / yellow-align` | 0，有检测/对齐结果 | 1，无结果或异常 |
+| `drop-align` | 0，完成粗靠近与精对准（含 0.47 m 回退） | 1，无结果或异常 |
 | `drop-route` | 0，所有固定动作正常完成 | 1，动作失败或异常 |
 | 其它运动阶段 | 0，正常完成 | 1，runtime safe-stop/error 或异常 |
 
@@ -192,6 +211,13 @@ python3 code/main_robocup.py --mode hardware-mission --competition --speed-scale
 推理调用沿用 `target_yolo/verify_model.py` 中的 `model.predict(frame, ...)`。
 `yellow_yolo_adapter.py` 仅提取黄色最高置信度 bbox 的中心和大小。
 `target_yolo/vision.py` 是数据标注用 HSV 代码，比赛主程序不调用它。
+
+0° 精对准另用 `components/drop_target_vision.py`（只用 OpenCV/numpy，不加载 YOLO），
+在外圆弧 HSV 范围内挑最宽的细长弧并返回弧顶 `(x, y)` 与弧宽；参考特征只在运行时
+从 `assets/ch3_yellow_servo0_reference.jpg` 提取一次，实时帧与该参考相减，不使用
+画面中心 `(320, 240)`，也不做整图模板匹配。该文件为 red/blue/green 预留了 HSV 阈值，
+但本轮只有 yellow+CH3 有现场正确参考照片，其他颜色继续使用融合回退。
+现场若发现 0° 镜头视角不同，可直接用同尺寸的新照片替换该 JPG，不新增标定配置。
 
 板端需要原有 OCR 环境（`requirements-task-board.txt`）和可运行既有模型的
 Ultralytics/PyTorch 环境。Ultralytics、模型和相机仅在视觉 stage 中按需加载；
@@ -226,7 +252,16 @@ git diff --check
 嵌套动作中的 STOP、整场超时、SIGTERM 和清理。旧独立微调/分步搜索兼容测试保留。
 运动验收使用生产 runtime 和 motion 配合假底盘反馈，本轮整合未接真实硬件。
 
-2026-10-10 本次整合验收：本地 Python 3.13 执行 914 项测试，907 项通过、
+本轮新增覆盖：随包 0° 参考照片能提取外圆弧且不是画面中心、平移图像后特征同向位移、
+0°/90° 舵机切换与一次所有者关闭、粗靠近 0.38 m 先于任何投放判定、30/80 px 大偏差继续
+修正不 SAFE_STOP、修正轮数用完后在已观测最佳位姿尽力投放、相机/参考缺失时退化到
+融合 0.47 m、按真实投放位姿返回而不是固定 47 cm、默认 `--payload-slot 2` 只释放 CH3。
+
+2026-10-10 CH3 视觉精对准验收：本地 Python 3.13 执行 932 项测试，925 项通过、
+7 项因环境限制跳过；compileall 与 git diff --check 通过。新增 18 项验收。
+未执行真实相机、YOLO 推理、串口、电机或继电器测试。
+
+2026-10-10 上一轮整合验收：本地 Python 3.13 执行 914 项测试，907 项通过、
 7 项因环境限制跳过；compileall、git diff --check 和原有 dry-run 均通过。
 新增 11 项验收包含主程序完整假设备任务与共享视觉工作线程的实际控制逻辑。
 
@@ -259,5 +294,5 @@ connect → write 一次 → 立即 close，不加入 ACK 或重发。接收端�
 
 现场顺序：task-board → hc-send（含上述 20 条完整行验收）→ yellow-detect → drop 空载
 → 定位 get_current_pose → lane → go_to_task_board/第一车道段 → corner1 → cross-lane
-→ yellow-search → yellow-align → drop-route 不装物资 → drop 装测试物 → corner2
-→ finish → full。前四项不依赖完整定位 runtime。
+→ yellow-search → yellow-align → drop-align（车摆成左转结束、面向目标位姿）
+→ drop-route 不装物资 → drop 装测试物 → corner2 → finish → full。前四项不依赖完整定位 runtime。

@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch, PropertyMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
 from components.basic_motion_controller import MotionActionState
+from components.payload_task import payload_channel
 from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from components.task_board_reader import TaskCounts, TaskBoardResult
 from components.yellow_yolo_adapter import YellowDetection
@@ -41,6 +42,13 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime.record_event = Mock()
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        # No test may open a real 0 deg camera: the fake frame reader is used by
+        # the visual alignment fallback paths, which is the same behaviour as a
+        # missing field camera.
+        frame_reader = Mock()
+        frame_reader.read.return_value = (False, None)
+        self.stack.enter_context(patch.object(task, "_open_yellow_camera",
+                                              return_value=(frame_reader, False)))
         local = self.stack.enter_context(patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock))
         local.side_effect = lambda: None if self.lost else Pose2D(*self.xy_yaw, self.now)
         self.stack.enter_context(patch.object(task.time, "sleep", self.advance))
@@ -205,7 +213,8 @@ class CompetitionTaskTests(unittest.TestCase):
             corner.assert_not_called()
         send.assert_called_once()
         self.assertGreater(drop.call_count, 0)
-        self.assertTrue(all(c.args == (2,) for c in drop.call_args_list))
+        # Default competition slot 2 is the middle CH3 = relay channel 3.
+        self.assertTrue(all(c.args == (3,) for c in drop.call_args_list))
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
@@ -265,6 +274,42 @@ class CompetitionTaskTests(unittest.TestCase):
         drop.assert_not_called()
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
 
+    def test_standalone_drop_align_sets_zero_degrees_without_releasing(self):
+        servo = Mock(is_running=True, pulse_us=1500)
+        self.stack.enter_context(patch("config.v2_factory.build_servo", return_value=servo))
+        aligned = Mock()
+        before = len(self.runtime.relay.commands)
+        navigation = self.runtime.motion.navigation
+        with patch.object(task, "align_drop_position", return_value=aligned) as align:
+            result = task.run_competition_stage(self.runtime, "drop-align",
+                                                yellow_camera="/dev/video9")
+        self.assertIs(result, aligned)
+        servo.set_angle.assert_called_once_with(0, settle=True)
+        servo.close.assert_called_once_with(hold=True)
+        self.assertEqual(align.call_args.args[1], "/dev/video9")
+        self.assertAlmostEqual(align.call_args.args[3], align.call_args.args[4] - math.pi / 2)
+        # Alignment only: no magnet is energized or released.
+        self.assertEqual(len(self.runtime.relay.commands), before)
+        self.assertFalse(any(self.runtime.relay.query_status().values()))
+        self.assertIs(self.runtime.motion.navigation, navigation)
+
+    def test_main_stage_drop_align_uses_the_alignment_result(self):
+        for result, expected in ((None, 1), (Mock(), 0)):
+            with self.subTest(found=result is not None), \
+                 patch("main_robocup.build_runtime", return_value=self.runtime), \
+                 patch.object(task, "run_competition_stage", return_value=result) as run:
+                self.assertEqual(main(["--mode", "hardware-mission",
+                                       "--competition-stage", "drop-align"]), expected)
+                self.assertEqual(run.call_args.args, (self.runtime, "drop-align"))
+
+    def test_main_default_payload_slot_is_the_middle_ch3(self):
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch.object(task, "run_competition_stage", return_value=True) as run:
+            main(["--mode", "hardware-mission", "--competition"])
+        self.assertEqual(run.call_args.kwargs["slot"], 2)
+        self.assertEqual(task.CH3_PAYLOAD_SLOT, 2)
+        self.assertEqual(payload_channel(task.CH3_PAYLOAD_SLOT), 3)
+
     def test_standalone_drop_does_not_start_full_route(self):
         drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=True))
         full = self.stack.enter_context(patch.object(task, "run_full_mission"))
@@ -322,7 +367,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=(
             YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
         self.stack.enter_context(patch.object(task, "send_task_once", return_value=hc_ok))
-        def detour(runtime, slot):
+        def detour(runtime, slot, **_kwargs):
             if not drop_ok:
                 runtime.mission.request_safe_stop("payload release was not confirmed")
                 raise RuntimeError("payload release was not confirmed")
@@ -354,7 +399,9 @@ class CompetitionTaskTests(unittest.TestCase):
         self._run_full_cli(align_ok=False).assert_not_called()
 
     def test_full_cli_drop_failure_stops_and_returns_failure(self):
-        self._run_full_cli(drop_ok=False, expected_code=1).assert_called_once_with(self.runtime, 1)
+        drop = self._run_full_cli(drop_ok=False, expected_code=1)
+        # The competition default is the middle CH3 (slot 2), never CH2.
+        self.assertEqual(drop.call_args.args, (self.runtime, 2))
 
     def test_full_mission_uses_selected_left_front_magnet_and_holds_before_motion(self):
         relay = FakeLCUSRelay(4)

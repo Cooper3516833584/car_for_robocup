@@ -48,12 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--competition", action="store_true", help="run the complete competition mission (hardware-mission)")
     parser.add_argument("--competition-stage", choices=(
         "full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
-        "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop", "corner2", "finish"),
-        help="run only this stage; task-board/hc-send/yellow-detect/drop use direct hardware without localization runtime")
+        "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop",
+        "drop-align", "corner2", "finish"),
+        help="run only this stage; task-board/hc-send/yellow-detect/drop use direct hardware without "
+             "localization runtime; drop-align expects the car already at the left-turn pose")
     parser.add_argument("--yellow-camera", help="competition camera index or stable device path")
     parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
-    parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=1,
-                        help="drop/full selection: 1=right-front CH2, 2=middle CH3, 3=left-front CH4")
+    parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=2,
+                        help="drop/full selection: 1=right-front CH2, 2=middle CH3 (competition default), "
+                             "3=left-front CH4")
     parser.add_argument("--relay-port", help="explicit LCUS port; enables real relay only for drop/full")
     parser.add_argument("--speed-scale", type=float, default=1,
                         help="shared motion speed multiplier; use 2 for the validated faster profile")
@@ -271,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                          result if isinstance(result, (bool, type(None))) else type(result).__name__)
             if runtime.mission.state.value in {"error", "safe_stop"}:
                 return 1
-            if stage in {"yellow-search", "yellow-align"}:
+            if stage in {"yellow-search", "yellow-align", "drop-align"}:
                 return 0 if result is not None else 1
             if stage == "drop-route" and result is False:
                 return 1

@@ -10,7 +10,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, PropertyMock, patch
+from unittest.mock import Mock, PropertyMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
@@ -39,6 +39,11 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.config = replace(self.config, servo=replace(self.config.servo, enabled=True))
         self.logger = Mock()
         self.servo = Mock(is_running=True, pulse_us=2500)
+        # The 0 deg refinement camera is faked: no test may open a real device.
+        self.capture = Mock()
+        self.capture.read.return_value = (False, None)
+        self.stack.enter_context(patch.object(task, "_open_yellow_camera",
+                                              return_value=(self.capture, False)))
         self.vision = Mock(ready=True, frame_size=(640,480))
         self.vision.observe.side_effect = lambda now: (now, self.boxes()[0])
         self.vision.observe_drop.side_effect = lambda now: (now, *self.boxes())
@@ -102,7 +107,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.pose[1] += command.linear_x_m_s*math.sin(heading)*dt
         self.pose[2] += command.angular_z_rad_s*dt
         self.now += dt
-        if self.stop_during_detour and any(e=="payload_detour_stage_start" and v["stage"]=="forward_47cm"
+        if self.stop_during_detour and any(e=="payload_detour_stage_start" and v["stage"]=="coarse_approach"
                                           for e,v in self.events):
             self.stop_file.touch()
 
@@ -122,23 +127,31 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["confidence"],.8)
         self.assertEqual(kwargs["target_class_name"],"yellow")
         self.assertAlmostEqual(kwargs["drop_center_width_ratio"],.1)
-        self.servo.set_angle.assert_called_once_with(90,settle=True)
+        # +90 search, 0 deg refinement, then back to the +90 search angle.
+        self.assertEqual(self.servo.set_angle.call_args_list,
+                         [call(90, settle=True), call(0, settle=True), call(90, settle=True)])
         self.servo.close.assert_called_once_with(hold=True)
         self.vision.close.assert_called_once()
         calls=self.runtime.motion.track_global_line.call_args_list
         self.assertTrue(any(c.args==((.25,0),(1.05,0)) for c in calls))
         self.assertTrue(any(c.args==((1.05,.10),(1.05,.65)) for c in calls))
         self.assertTrue(any(c.args==((1.05,.10),(1.05,.85)) for c in calls))
-        reverse=next(c for c in calls if c.kwargs.get("reverse"))
-        self.assertTrue(any(c.args==tuple(reversed(reverse.args)) for c in calls))
+        starts={v["stage"]:v for e,v in self.events if e=="payload_detour_stage_start"}
+        self.assertEqual(starts["coarse_approach"]["args"][0],
+                         starts["return_from_drop"]["args"][1])
+        self.assertTrue(starts["return_from_drop"]["kwargs"]["reverse"])
+        self.assertTrue(any(c.kwargs.get("reverse") for c in calls))
         self.assertLess(math.dist(self.pose[:2],(1.40,.85)),.035)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
         self.assertFalse(any(self.runtime.relay._states.values()))
         self.assertFalse(self.runtime.relay.connected)
         self.assertEqual(self.detour_caps["advance_7cm"],{.16})
         cruise_cap = self.config.drive.max_linear_speed_m_s * 2
-        self.assertEqual(self.detour_caps["forward_47cm"],{cruise_cap})
-        self.assertEqual(self.detour_caps["reverse_47cm"],{cruise_cap})
+        self.assertEqual(self.detour_caps["coarse_approach"],{cruise_cap})
+        # 1-2 cm refinements run at the dedicated fine speed; the release hold
+        # afterwards is already back on the route drive.
+        self.assertIn(task.DROP_FINE_SPEED_M_S,self.detour_caps["creep_to_fallback"])
+        self.assertEqual(self.detour_caps["return_from_drop"],{cruise_cap})
         self.assertEqual(self.runtime.motion.drive.max_linear_speed_m_s,cruise_cap)
         actions=[c.args[0] for c in self.logger.emit.call_args_list if c.args[0]["type"]=="motion_action"]
         self.assertTrue(any(abs(e["diagnostics"].get("lookahead_m",0)-.35)<1e-6 for e in actions))
@@ -146,7 +159,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
 
     def test_native_camera_size_does_not_reenter_pixel_alignment_after_centering(self):
         self.vision.frame_size=(1280,720)
-        with patch.object(task,"_open_yellow_camera",side_effect=AssertionError("already centered")):
+        with patch.object(task,"_detect_stopped",side_effect=AssertionError("already centered")):
             self.assertEqual(self.run_main(),0)
         self.assertTrue(any(e=="yellow_align" and v.get("source")=="continuous_search" for e,v in self.events))
 

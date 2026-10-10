@@ -90,6 +90,24 @@ ALIGN_MAX_STEPS = 20
 # Relative short moves now construct endpoints in the fused frame.
 SHORT_MOVE_TOLERANCE_M = 0.005
 
+# ---- CH3 close-range visual drop alignment (yellow + middle magnet) --------
+# Field tuning lives here, not in a config file. No threshold here declares a
+# drop failure: every pixel tolerance only says "aligned well enough to score".
+TARGET_COLOR = "yellow"
+CH3_PAYLOAD_SLOT = 2  # CH3 = middle electromagnet = relay channel 3.
+DROP_COARSE_M = 0.38      # initial working distance after the left turn
+DROP_FALLBACK_M = 0.47    # original fused lateral distance, vision-free fallback
+DROP_FINE_SPEED_M_S = 0.05
+DROP_X_TOL_PX = 10        # success condition only
+DROP_Y_TOL_PX = 10        # success condition only
+DROP_MOVE_M = 0.02        # one 2 cm fused micro-move per correction step
+DROP_FINE_MAX_ACTIONS = 20  # bounds the loop length, never a park/fail gate
+DROP_FRAME_TRIES = 3      # frames read per observation before calling it arc-free
+DROP_SIGN_FLIP_PX = 1.0   # error growth that flips one axis direction
+DROP_BEST_TOLERANCE_M = 0.01
+DROP_REFERENCE = (Path(__file__).resolve().parents[1] / "assets"
+                  / "ch3_yellow_servo0_reference.jpg")
+
 # Legacy standalone drop-route tuning; full uses the shared fused payload detour.
 # Only ("drive", m), ("rotate", deg), ("rotate_to", deg) are supported.
 FIXED_DROP_ROUTE = [("drive", 0.00)]
@@ -102,7 +120,7 @@ PAYLOAD_VERIFY_RELAY = True
 LOG = logging.getLogger(__name__)
 STAGES = ("full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
           "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop",
-          "corner2", "finish")
+          "drop-align", "corner2", "finish")
 
 
 def wait_for_fused_localization(runtime):
@@ -152,6 +170,16 @@ def run_motion_action(runtime, start_action, *, label):
     except BaseException:
         runtime.drive.stop()
         raise
+
+
+def _fused_motion(runtime):
+    """Adapt the routed action runner to the alignment ``motion(label, ...)`` shape."""
+    def motion(label, method, *args, **kwargs):
+        result = run_motion_action(runtime,
+                                   lambda: getattr(runtime.motion, method)(*args, **kwargs),
+                                   label=label)
+        return result.estimate.pose
+    return motion
 
 
 def move_to_pose(runtime, x_m, y_m, yaw_deg):
@@ -375,8 +403,14 @@ def search_yellow_drop_zone(runtime, camera, detector):
             capture.release()
 
 
-def search_centered_yellow_on_line(runtime, camera, detector):
-    """Reuse tested continuous vision on the competition's own search segment."""
+def search_centered_yellow_on_line(runtime, camera, detector, *, servo=None,
+                                   color=YELLOW_CLASS_NAME):
+    """Reuse tested continuous vision on the competition's own search segment.
+
+    With a borrowed ``servo`` the caller keeps ownership: this function only
+    commands the +90 search angle and never closes it. Without one (standalone
+    ``yellow-search``) it builds, parks and closes its own axis.
+    """
     from target_patrol import YoloVision, find_centered_target
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
@@ -385,17 +419,21 @@ def search_centered_yellow_on_line(runtime, camera, detector):
         runtime.drive.stop()
         runtime.record_event("yellow_not_found", reason="detector unavailable")
         return None
-    servo = build_servo(runtime.config)
+    owned_servo = servo is None
+    if owned_servo:
+        servo = build_servo(runtime.config)
     if servo is None:
         raise RuntimeError("continuous target search requires the calibrated camera servo")
     vision = YoloVision(YELLOW_MODEL_PATH, camera, confidence=YELLOW_MIN_CONF,
-                        target_region="frame", target_class_name=YELLOW_CLASS_NAME,
+                        target_region="frame", target_class_name=color,
                         drop_center_width_ratio=2 * YELLOW_CX_TOL_PX / CAMERA_WIDTH,
                         detector=detector)
     runtime.drive.stop()
     try:
+        # park_servo also covers the first PWM export's udev permission delay.
         park_servo(servo, 90)
-        runtime.record_event("competition_camera_hold", angle_deg=90, pulse_us=servo.pulse_us)
+        runtime.record_event("competition_camera_hold", angle_deg=90, pulse_us=servo.pulse_us,
+                             color=color)
         move_to_pose(runtime, YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y, CROSS_LANE_YAW_DEG)
         vision.start()
         box = find_centered_target(runtime, vision,
@@ -414,8 +452,11 @@ def search_centered_yellow_on_line(runtime, camera, detector):
     finally:
         primary_error = sys.exc_info()[0] is not None
         cleanup_error = None
-        for name, cleanup in (("drive_stop",runtime.drive.stop), ("vision_close",vision.close),
-                              ("servo_close",lambda:servo.close(hold=True) if servo.is_running else None)):
+        cleanups = [("drive_stop", runtime.drive.stop), ("vision_close", vision.close)]
+        if owned_servo:
+            cleanups.append(("servo_close",
+                             lambda: servo.close(hold=True) if servo.is_running else None))
+        for name, cleanup in cleanups:
             try:
                 cleanup()
             except Exception as exc:
@@ -492,8 +533,185 @@ def drop_payload(relay, slot=1):
                            verify=PAYLOAD_VERIFY_RELAY)
 
 
-def perform_payload_detour(runtime, slot=1):
-    """The validated fused 7/47 cm out-and-back, independent of field route."""
+def _fused_translation(motion, pose, direction_yaw, distance_m, label):
+    """One fused translation from ``pose`` along ``direction_yaw``.
+
+    The endpoint lives in the saved fused frame and the Pure Pursuit controller
+    owns stopping, so no speed-times-time estimate is ever substituted for a
+    distance. A negative distance drives backwards, keeping the chassis facing
+    the target instead of pivoting away from it.
+    """
+    if abs(distance_m) < 1e-9:
+        return pose
+    start = (pose.x_m, pose.y_m)
+    end = (start[0] + distance_m * math.cos(direction_yaw),
+           start[1] + distance_m * math.sin(direction_yaw))
+    return motion(label, "track_global_line", start, end, reverse=distance_m < 0)
+
+
+def _shift_across_road(motion, pose, road_yaw, side_yaw, distance_m):
+    """Move sideways by facing the road axis, translating, then facing the target.
+
+    A differential chassis cannot translate; this turn-translate-turn is the only
+    way it can change its lateral position while keeping the saved headings.
+    Returns the pose after the final turn, so the camera is back on the target.
+    """
+    turned = motion("align_turn_road", "rotate_to", road_yaw)
+    _fused_translation(motion, turned, road_yaw, distance_m, "align_shift_road")
+    return motion("align_turn_side", "rotate_to", side_yaw)
+
+
+def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, *,
+                        color=TARGET_COLOR):
+    """Refine the CH3 drop pose from the 0 deg view; returns the fused drop pose.
+
+    From the fused pose at the end of the left turn it approaches
+    ``DROP_COARSE_M``, then corrects along the road axis and along the target
+    axis until the outer-ring arc of the live 0 deg frame matches the packaged
+    reference photograph. Every pixel tolerance here is a success condition
+    only. A missing arc, a camera error or an exhausted correction loop never
+    fails the mission: the best observed pose, or the original fused
+    ``DROP_FALLBACK_M`` point, is used instead. Only fused motion endpoints are
+    constructed; ``motion`` is the caller's existing action closure.
+    """
+    from components import drop_target_vision as vision
+
+    start = (side_pose.x_m, side_pose.y_m)
+    coarse_m = min(DROP_COARSE_M, DROP_FALLBACK_M)
+    # The packaged photograph is the real 0 deg CH3 view for TARGET_COLOR only;
+    # another colour must not be aligned against it.
+    reference = (vision.read_reference(DROP_REFERENCE, color) if color == TARGET_COLOR
+                 else None)
+    camera_error = (None if reference is not None
+                    else f"no packaged 0 deg reference arc for {color}")
+    capture, owned = None, False
+
+    def open_camera():
+        """Open the 0 deg view after the coarse approach, never before it."""
+        nonlocal capture, owned, camera_error
+        if reference is None:
+            return
+        try:
+            capture, owned = _open_yellow_camera(YELLOW_CAMERA if camera is None else camera)
+        except Exception as exc:
+            camera_error = f"{type(exc).__name__}: {exc}"
+            runtime.record_event("drop_align_camera_failed", reason=camera_error)
+
+    def observe():
+        """Newest usable 0 deg arc, or None after a few fresh frames."""
+        if capture is None:
+            return None
+        for _ in range(DROP_FRAME_TRIES):
+            try:
+                ok, frame = capture.read()
+            except Exception:
+                ok, frame = False, None
+            if not ok or frame is None:
+                continue
+            try:
+                arc = vision.extract_target_arc(frame, color)
+            except Exception:
+                arc = None
+            if arc is not None:
+                return arc
+        return None
+
+    original_drive = runtime.motion.drive
+    try:
+        runtime.record_event("drop_align_start", color=color, reference=reference,
+                             coarse_m=coarse_m, fallback_m=DROP_FALLBACK_M,
+                             start_xy=start, road_yaw_rad=road_yaw, side_yaw_rad=side_yaw,
+                             pose_reference="fused")
+        pose = _fused_translation(motion, side_pose, side_yaw, coarse_m, "coarse_approach")
+        # Every following move is a 1-2 cm micro-move: cap it for the loop only.
+        runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
+            original_drive.max_linear_speed_m_s, DROP_FINE_SPEED_M_S))
+        open_camera()
+        travelled = coarse_m
+        arc = observe()
+        while arc is None and capture is not None and travelled < DROP_FALLBACK_M - 1e-9:
+            step = min(DROP_MOVE_M, DROP_FALLBACK_M - travelled)
+            pose = _fused_translation(motion, pose, side_yaw, step, "creep_to_fallback")
+            travelled += step
+            arc = observe()
+        if arc is None:
+            pose = _fused_translation(motion, pose, side_yaw,
+                                      DROP_FALLBACK_M - travelled, "fallback_47cm")
+            reason = camera_error or "no outer ring arc in the 0 deg view"
+            runtime.record_event("drop_align_done", success=False, fallback="fused_47cm",
+                                 reason=reason, pose=pose, pose_reference="fused")
+            return pose
+
+        best = None
+        pending = None
+        # Default directions; a direction that provably grows its own error is
+        # flipped once, so an inverted camera mount still converges.
+        signs = {"x": 1.0, "y": -1.0}
+        for index in range(DROP_FINE_MAX_ACTIONS):
+            ex, ey = vision.reference_error(arc, reference)
+            score = abs(ex) + abs(ey)
+            if best is None or score < best["score"]:
+                best = {"score": score, "pose": pose}
+            if pending is not None:
+                axis, before, direction = pending
+                now = ex if axis == "x" else ey
+                if abs(now) > abs(before) + DROP_SIGN_FLIP_PX:
+                    signs[axis] = -direction
+                    runtime.record_event("drop_align_sign_flip", axis=axis, was=direction,
+                                         now=signs[axis], pose_reference="fused")
+                pending = None
+            aligned = abs(ex) <= DROP_X_TOL_PX and abs(ey) <= DROP_Y_TOL_PX
+            runtime.record_event("drop_align_step", step=index, apex_x_px=arc[0],
+                                 apex_y_px=arc[1], arc_width_px=arc[2], error_x_px=ex,
+                                 error_y_px=ey, score_px=score, success=aligned,
+                                 pose_reference="fused")
+            if aligned:
+                runtime.record_event("drop_align_done", success=True, source="visual",
+                                     error_x_px=ex, error_y_px=ey, pose=pose,
+                                     pose_reference="fused")
+                return pose
+            if abs(ex) > DROP_X_TOL_PX:
+                axis, error = "x", ex
+            else:
+                axis, error = "y", ey
+            direction = signs[axis]
+            step_m = direction * DROP_MOVE_M * (1.0 if error >= 0 else -1.0)
+            if axis == "x":
+                pose = _shift_across_road(motion, pose, road_yaw, side_yaw, step_m)
+            else:
+                pose = _fused_translation(motion, pose, side_yaw, step_m, "align_along")
+            pending = (axis, error, direction)
+            arc = observe()
+            if arc is None:
+                runtime.record_event("drop_align_arc_lost", step=index, pose_reference="fused")
+                break
+        if best is None:
+            # Only reachable with the correction loop disabled: keep the original
+            # fused lateral distance instead of inventing a different drop point.
+            pose = _fused_translation(motion, pose, side_yaw,
+                                      DROP_FALLBACK_M - travelled, "fallback_47cm")
+            runtime.record_event("drop_align_done", success=False, fallback="fused_47cm",
+                                 reason="correction loop disabled", pose=pose,
+                                 pose_reference="fused")
+            return pose
+        best_xy = (best["pose"].x_m, best["pose"].y_m)
+        if math.dist((pose.x_m, pose.y_m), best_xy) > DROP_BEST_TOLERANCE_M:
+            delta = (best_xy[0] - pose.x_m, best_xy[1] - pose.y_m)
+            forward = delta[0] * math.cos(pose.yaw_rad) + delta[1] * math.sin(pose.yaw_rad)
+            pose = motion("align_best_pose", "track_global_line", (pose.x_m, pose.y_m),
+                          best_xy, reverse=forward < 0)
+        runtime.record_event("drop_align_done", success=False, fallback="best_pose",
+                             score_px=best["score"], pose=pose, pose_reference="fused")
+        return pose
+    finally:
+        runtime.motion.drive = original_drive
+        if owned and capture is not None:
+            capture.release()
+
+
+def perform_payload_detour(runtime, slot=CH3_PAYLOAD_SLOT, *, servo=None, camera=None,
+                           color=TARGET_COLOR):
+    """The validated fused 7 cm out-and-back with 0 deg visual drop alignment."""
     from payload_detour import DetourSettings, run_payload_detour
     settings = DetourSettings(
         payload_slot=slot, release_hold_s=PAYLOAD_RELEASE_HOLD_S,
@@ -502,11 +720,62 @@ def perform_payload_detour(runtime, slot=1):
     original_drive = runtime.motion.drive
     runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
         original_drive.max_linear_speed_m_s, settings.patrol_slow_speed_m_s))
+
+    def fine_align(side_pose, road_yaw, side_yaw, motion):
+        # The detour calls this right after the left turn: only now does the
+        # camera look forward at the target, so 0 deg is set here.
+        if servo is not None:
+            servo.set_angle(0, settle=True)
+            runtime.record_event("competition_camera_hold", angle_deg=0, pulse_us=servo.pulse_us)
+        return align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion,
+                                   color=color)
+
     try:
         return run_payload_detour(runtime, settings, clock=runtime.clock,
-                                  sleep=time.sleep, travel_drive=original_drive)
+                                  sleep=time.sleep, travel_drive=original_drive,
+                                  fine_align=fine_align)
     finally:
         runtime.motion.drive = original_drive
+        if servo is not None and servo.is_running:
+            try:
+                servo.set_angle(90, settle=True)
+                runtime.record_event("competition_camera_hold", angle_deg=90, pulse_us=servo.pulse_us)
+            except Exception as exc:
+                LOG.warning("camera servo did not return to the search angle: %s", exc)
+                runtime.record_event("competition_cleanup_failed", resource="servo_search_angle",
+                                     reason=str(exc))
+
+
+def run_drop_align(runtime, camera, *, color=TARGET_COLOR):
+    """Operator-placed alignment test: 0 deg camera, coarse approach, refinement.
+
+    The car must already stand at the left-turn end pose facing the target. This
+    entry never runs the 7 cm advance, the left turn or the return, and never
+    energizes or releases a magnet; it only exercises the 0 deg vision and the
+    fused micro-moves on the real chassis.
+    """
+    from config.v2_factory import build_servo
+    from components.servo_positioning import park_servo
+
+    servo = build_servo(runtime.config)
+    if servo is None:
+        raise RuntimeError("drop-align requires the calibrated camera servo")
+    original_navigation = runtime.motion.navigation
+    try:
+        runtime.motion.navigation = replace(original_navigation, position_tolerance_m=min(
+            original_navigation.position_tolerance_m, SHORT_MOVE_TOLERANCE_M))
+        park_servo(servo, 0)
+        runtime.record_event("competition_camera_hold", angle_deg=0, pulse_us=servo.pulse_us)
+        pose = wait_for_fused_localization(runtime).estimate.pose
+        runtime.drive.stop()
+        return align_drop_position(runtime, camera, pose, pose.yaw_rad - math.pi / 2,
+                                   pose.yaw_rad, _fused_motion(runtime), color=color)
+    finally:
+        runtime.motion.navigation = original_navigation
+        try:
+            servo.close(hold=True)
+        except Exception:
+            LOG.exception("drop-align servo close failed")
 
 
 def go_to_second_corner(runtime):
@@ -532,7 +801,10 @@ def _stage(runtime, name, action):
     return result
 
 
-def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None, slot=1):
+def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
+                     slot=CH3_PAYLOAD_SLOT, color=TARGET_COLOR):
+    from config.v2_factory import build_servo
+
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     wait_for_fused_localization(runtime)
@@ -548,30 +820,45 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("payload holding state was not confirmed")
             raise RuntimeError("payload holding state was not confirmed; mission will not move")
         runtime.record_event("payload_hold_ready", slot=slot, channel=channel)
-    _stage(runtime, "lane", lambda: go_to_lane(runtime))
-    _stage(runtime, "task-board-position", lambda: go_to_task_board(runtime))
-    counts = _stage(runtime, "task-board", lambda: read_task_board(task_camera, runtime=runtime))
-    runtime.mission.set_task_counts(counts)
-    _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime))
-    _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
-    _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
-    detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
-        runtime, yellow_camera, detector))
-    aligned = None if detection is None else _stage(runtime, "yellow-align", lambda: align_yellow_drop_zone(
-        runtime, yellow_camera, detector, initial_detection=detection))
-    if aligned is not None:
-        _stage(runtime, "payload-detour", lambda: perform_payload_detour(runtime, slot))
-        runtime.record_event("payload_drop", slot=slot, channel=channel, success=True,
-                             pose_reference="fused")
-    else:
-        runtime.record_event("payload_drop", slot=slot, channel=channel, success=False, skipped=True,
-                             reason="yellow search or alignment failed")
-    _stage(runtime, "corner2", lambda: go_to_second_corner(runtime))
-    return _stage(runtime, "finish", lambda: go_to_finish(runtime))
+    # One axis serves the +90 search, the 0 deg refinement and the +90 restore;
+    # the search borrows it and must not close it.
+    servo = build_servo(runtime.config)
+    try:
+        _stage(runtime, "lane", lambda: go_to_lane(runtime))
+        _stage(runtime, "task-board-position", lambda: go_to_task_board(runtime))
+        counts = _stage(runtime, "task-board", lambda: read_task_board(task_camera, runtime=runtime))
+        runtime.mission.set_task_counts(counts)
+        _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime))
+        _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
+        _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
+        detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
+            runtime, yellow_camera, detector, servo=servo, color=color))
+        aligned = None if detection is None else _stage(runtime, "yellow-align",
+            lambda: align_yellow_drop_zone(runtime, yellow_camera, detector,
+                                           initial_detection=detection))
+        if aligned is not None:
+            _stage(runtime, "payload-detour", lambda: perform_payload_detour(
+                runtime, slot, servo=servo, camera=yellow_camera, color=color))
+            runtime.record_event("payload_drop", slot=slot, channel=channel, success=True,
+                                 pose_reference="fused")
+        else:
+            runtime.record_event("payload_drop", slot=slot, channel=channel, success=False,
+                                 skipped=True, reason="yellow search or alignment failed")
+        _stage(runtime, "corner2", lambda: go_to_second_corner(runtime))
+        return _stage(runtime, "finish", lambda: go_to_finish(runtime))
+    finally:
+        if servo is not None and servo.is_running:
+            try:
+                servo.close(hold=True)
+            except Exception as exc:
+                LOG.exception("camera servo close failed")
+                runtime.record_event("competition_cleanup_failed", resource="servo_close",
+                                     reason=str(exc))
 
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
-                          yellow_camera=None, weights=None, slot=1):
+                          yellow_camera=None, weights=None, slot=CH3_PAYLOAD_SLOT,
+                          color=TARGET_COLOR):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
         raise ValueError(f"unknown competition stage: {stage}")
@@ -590,7 +877,8 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     runtime.drive.stop()
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
-                                yellow_camera=yellow_camera, detector=detector, slot=slot)
+                                yellow_camera=yellow_camera, detector=detector, slot=slot,
+                                color=color)
     if stage == "hc-send":
         from components.task_board_reader import TaskCounts
         return _stage(runtime, stage, lambda: send_task_to_drone_once(
@@ -620,6 +908,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
         "yellow-search": lambda: search_centered_yellow_on_line(runtime, yellow_camera, detector),
         "yellow-align": lambda: align_yellow_drop_zone(runtime, yellow_camera, detector),
         "drop-route": lambda: run_fixed_drop_route(runtime),
+        "drop-align": lambda: run_drop_align(runtime, yellow_camera, color=color),
         "corner2": lambda: go_to_second_corner(runtime),
         "finish": lambda: go_to_finish(runtime),
     }
