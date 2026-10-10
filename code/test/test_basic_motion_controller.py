@@ -58,9 +58,9 @@ class BasicMotionTests(unittest.TestCase):
         self.motion.stop()
         self.motion.track_local_line((0,0),(.47,0))
         out = self.step(.47,.04)
-        self.assertEqual(out.state, MotionActionState.BLOCKED)
+        self.assertEqual(out.state, MotionActionState.SUCCEEDED)
         self.assertEqual(out.command,Twist2D(0,0))
-        self.assertEqual(out.diagnostics['reason'],'terminal_lateral_error')
+        self.assertAlmostEqual(out.diagnostics['cross_track_m'],.04)
 
     def test_pose_loss_zero_and_no_old_commands(self):
         self.motion.track_local_line((0,0),(1,0))

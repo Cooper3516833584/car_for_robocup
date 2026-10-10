@@ -108,7 +108,7 @@ class DifferentialPathController:
         self.turn.reset()
 
     def compute_line(self, pose, start, end, previous_progress_m=0.0, *, reverse=False,
-                     position_tolerance_m=None, terminal_lateral_m=0.03,
+                     position_tolerance_m=None,
                      t265_pose=None, now_s=None):
         lookahead_m = self.navigation.lookahead_m
         speed_limit_m_s = min(0.15, self.drive.max_linear_speed_m_s)
@@ -121,11 +121,11 @@ class DifferentialPathController:
         ax, ay = start
         bx, by = end
         values = (px, py, yaw, ax, ay, bx, by, previous_progress_m, lookahead_m,
-                  speed_limit_m_s, stop_tolerance_m, terminal_lateral_m,
+                  speed_limit_m_s, stop_tolerance_m,
                   max_omega_rad_s, track_width_m, decel_m_s2)
         if not all(math.isfinite(x) for x in values):
             raise ValueError("non-finite Pure Pursuit input")
-        if min(lookahead_m, speed_limit_m_s, stop_tolerance_m, terminal_lateral_m,
+        if min(lookahead_m, speed_limit_m_s, stop_tolerance_m,
                max_omega_rad_s, track_width_m, decel_m_s2) <= 0.0:
             raise ValueError("positive limits required")
 
@@ -166,14 +166,9 @@ class DifferentialPathController:
         curvature = 2.0 * local_y / max(lookahead_sq, 1e-9)
         info.update(curvature_inv_m=curvature,carrot_progress_m=carrot_s,
                     target_yaw_rad=normalize_angle_rad(math.atan2(dy,dx)+(math.pi if reverse else 0)))
-        # Stop based on un-clamped physical along-track progress, never on
-        # monotonic carrot progress alone. Do not pivot toward a lateral endpoint.
-        if remaining < -stop_tolerance_m:
-            return result(0.0, 0.0, NavigationState.BLOCKED, "line_overshoot")
-
+        # Complete on actual along-track progress. Overshoot and lateral
+        # residuals remain diagnostic values, not task abort conditions.
         if remaining <= stop_tolerance_m:
-            if abs(cross) > terminal_lateral_m:
-                return result(0.0, 0.0, NavigationState.BLOCKED, "terminal_lateral_error")
             return result(0.0, 0.0, NavigationState.GOAL_REACHED, "arrived")
 
         if lookahead_sq < 1e-8:

@@ -135,13 +135,14 @@ class RobocupRuntimeTests(unittest.TestCase):
         result=self.distance_reference_step(runtime,(.2,0,0),(12,23,.2))
         self.assertAlmostEqual(result.motion.diagnostics['progress_m'],.2)
 
-    def test_terminal_lateral_error_stops_mission(self):
+    def test_terminal_lateral_residual_completes_action_without_safe_stop(self):
         runtime=self.make_distance_reference_runtime()
         runtime.motion.track_local_line((0,0),(.47,0))
         runtime.step(now_s=self.now[0])
         result=self.distance_reference_step(runtime,(.47,.04,0),(10.47,20.04,0))
         self.assertEqual(result.command,Twist2D(0,0))
-        self.assertEqual(result.mission_state,RobocupMissionState.SAFE_STOP)
+        self.assertEqual(result.mission_state,RobocupMissionState.TARGET_OPERATION)
+        self.assertEqual(result.motion.state,MotionActionState.SUCCEEDED)
 
     def test_dry_run_builds_full_fake_runtime_and_closes(self) -> None:
         runtime = self.make_runtime()

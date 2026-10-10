@@ -20,8 +20,7 @@ def line_step(pose, start, end, previous_progress_m, **kwargs):
                     max_angular_speed_rad_s=kwargs.pop("max_omega_rad_s", .80),
                     max_linear_accel_m_s2=kwargs.pop("decel_m_s2", .30))
     controller = DifferentialPathController(nav, drive, track_width_m=kwargs.pop("track_width_m", .198))
-    output = controller.compute_line(Pose2D(*pose, 1.), start, end, previous_progress_m,
-                                     terminal_lateral_m=kwargs.pop("terminal_lateral_m", .03), **kwargs)
+    output = controller.compute_line(Pose2D(*pose, 1.), start, end, previous_progress_m, **kwargs)
     return SimpleNamespace(v_m_s=output.command.linear_x_m_s, omega_rad_s=output.command.angular_z_rad_s,
                            progress_m=output.diagnostics["progress_m"], status=output.diagnostics["line_state"],
                            details=output.diagnostics)
@@ -38,25 +37,25 @@ class PurePursuitReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(out.details["remaining_m"], .007)
         self.assertAlmostEqual(out.details["segment_length_m"], .47)
 
-    def test_endpoint_cross_track_checks_stop_without_turning(self):
-        for cross, status in ((.020, "arrived"), (.040, "terminal_lateral_error")):
+    def test_endpoint_lateral_residual_completes_without_turning(self):
+        for cross, status in ((.020, "arrived"), (.040, "arrived")):
             with self.subTest(cross=cross):
                 out = line_step((.470, cross, 0), (0, 0), (.47, 0), 0)
                 self.assertEqual(out.status, status)
                 self.assertEqual((out.v_m_s, out.omega_rad_s), (0, 0))
 
-    def test_real_overshoot_is_blocked_even_with_large_yaw_error(self):
+    def test_real_overshoot_completes_even_with_large_yaw_error(self):
         for x in (.570, .476):
             for yaw in (0, math.pi):
                 with self.subTest(x=x, yaw=yaw):
                     out = line_step((x, 0, yaw), (0, 0), (.47, 0), .47)
-                    self.assertEqual(out.status, "line_overshoot")
-                    self.assertEqual(out.details["reason"], "line_overshoot")
+                    self.assertEqual(out.status, "arrived")
+                    self.assertNotIn("reason", out.details)
                     self.assertEqual((out.v_m_s, out.omega_rad_s), (0, 0))
                     self.assertAlmostEqual(out.details["raw_progress_m"], x)
                     self.assertAlmostEqual(out.details["remaining_m"], .47-x)
 
-    def test_symmetric_arrival_tolerance_uses_actual_projection(self):
+    def test_arrival_uses_actual_projection_even_when_carrot_progress_is_complete(self):
         for x, status in ((.466, "arrived"), (.474, "arrived"), (.464, "tracking")):
             with self.subTest(x=x):
                 out = line_step((x, 0, 0), (0, 0), (.47, 0), .47)
@@ -73,6 +72,12 @@ class PurePursuitReferenceTests(unittest.TestCase):
         self.assertGreater(out.omega_rad_s, 0)
         self.assertAlmostEqual(out.details["carrot_x_m"], -.193)
         self.assertAlmostEqual(out.details["remaining_m"], .007)
+
+    def test_reverse_endpoint_overshoot_completes_without_forward_recovery(self):
+        out = line_step((-.10, .04, 0), (.47,0), (0,0), 0, reverse=True)
+        self.assertEqual(out.status, "arrived")
+        self.assertEqual((out.v_m_s,out.omega_rad_s),(0,0))
+        self.assertAlmostEqual(out.details["remaining_m"],-.10)
 
     def controller(self):
         config = load_v2_config()
@@ -158,7 +163,7 @@ class PurePursuitReferenceTests(unittest.TestCase):
 
     def test_endpoint_preempts_an_active_alignment(self):
         from components.differential_navigation import NavigationState
-        for x, state in ((.47, NavigationState.GOAL_REACHED), (.57, NavigationState.BLOCKED)):
+        for x, state in ((.47, NavigationState.GOAL_REACHED), (.57, NavigationState.GOAL_REACHED)):
             controller = self.controller()
             p = Pose2D(0,0,math.pi/2,1.)
             controller.compute_line(p, (0,0), (.47,0), t265_pose=p, now_s=1.)
@@ -190,9 +195,9 @@ class PurePursuitReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(out.details["carrot_progress_m"], 1.0)
         self.assertGreater(out.v_m_s, 0.0)
 
-    def test_terminal_lateral_error_never_spins_to_chase_endpoint(self):
+    def test_terminal_lateral_residual_never_spins_to_chase_endpoint(self):
         out = line_step((0.469, 0.04, 0.0), (0.0, 0.0), (0.47, 0.0), 0.0)
-        self.assertEqual(out.status, "terminal_lateral_error")
+        self.assertEqual(out.status, "arrived")
         self.assertEqual((out.v_m_s, out.omega_rad_s), (0.0, 0.0))
 
     def test_arrival_requires_actual_projection(self):
