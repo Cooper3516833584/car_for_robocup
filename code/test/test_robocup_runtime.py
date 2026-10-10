@@ -75,6 +75,24 @@ class RobocupRuntimeTests(unittest.TestCase):
         self.assertEqual(result.command.angular_z_rad_s,0)
         self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "t265_local")
 
+    def test_fused_short_line_arrives_when_slam_corrects_stalled_local_progress(self):
+        runtime = self.make_distance_reference_runtime()
+        runtime.motion.track_global_line((10.,20.),(10.47,20.))
+        runtime.step(now_s=self.now[0])
+        result = self.distance_reference_step(runtime, (.07,0,0), (10.47,20.01,0))
+        self.assertEqual(result.motion.state, MotionActionState.SUCCEEDED)
+        self.assertEqual(result.command, Twist2D(0,0))
+        self.assertEqual(self.last_motion_event(runtime)["pose_reference"], "fused")
+        runtime.motion.stop()
+        runtime.mission.on_payload_action_done()
+        runtime.motion.track_global_line((10.47,20.),(10.,20.),reverse=True)
+        result = self.distance_reference_step(runtime, (.07,0,0), (10.30,20.01,0))
+        self.assertLess(result.command.linear_x_m_s, 0)
+        self.assertTrue(result.motion.diagnostics["reverse"])
+        result = self.distance_reference_step(runtime, (.07,0,0), (10.,20.,0))
+        self.assertEqual(result.motion.state, MotionActionState.SUCCEEDED)
+        self.assertEqual(result.command, Twist2D(0,0))
+
     def test_real_local_drift_is_corrected_without_blocking(self):
         runtime = self.make_distance_reference_runtime()
         runtime.motion.track_local_line((0,0),(.47,0))

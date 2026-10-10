@@ -8,7 +8,7 @@ import time
 from core.frames import normalize_angle_rad
 from components.basic_motion_controller import MotionActionState
 from components.payload_task import drop_payload, payload_channel
-from competition_task import _step
+from competition_task import _step, _usable_pose
 from robocup_runtime import RobocupMissionState
 
 PERIOD_S = 0.05
@@ -42,6 +42,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
     Caller owns runtime/relay lifecycle and resumes its original segment.
     Every motion/hold tick checks cancellation, vision and runtime safety.
     Absolute turn headings avoid accumulating left/right turn tolerances.
+    Translation, headings and saved return endpoints share the fused pose frame.
     """
     relay = runtime.relay
     original = runtime.motion.navigation
@@ -52,24 +53,27 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         guard()
         check_vision()
 
+    def fused_pose(result):
+        if not _usable_pose(result):
+            raise RuntimeError("payload fused pose unavailable")
+        return result.estimate.pose
+
     def motion(label, method, *args, **kwargs):
         check()
         runtime.motion.stop()
         if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
             runtime.mission.on_payload_action_done()
         getattr(runtime.motion, method)(*args, **kwargs)
-        runtime.record_event("payload_detour_stage_start", stage=label, args=args, kwargs=kwargs)
+        runtime.record_event("payload_detour_stage_start", stage=label, args=args, kwargs=kwargs,
+                             pose_reference="fused")
         while True:
             check()
             result = _step(runtime)
             if runtime.motion.state is MotionActionState.SUCCEEDED:
                 runtime.drive.stop()
                 runtime.record_event("payload_detour_stage_done", stage=label,
-                                     pose=result.estimate.pose)
-                local = runtime.current_local_pose(result.estimate, now_s=result.now_s)
-                if local is None:
-                    raise RuntimeError("payload local pose unavailable")
-                return local
+                                     pose=result.estimate.pose, pose_reference="fused")
+                return fused_pose(result)
             if runtime.motion.state not in {MotionActionState.RUNNING, MotionActionState.POSE_LOST}:
                 raise RuntimeError(f"{label}: motion failed: {runtime.motion.state.value}")
             sleep(PERIOD_S)
@@ -90,13 +94,11 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
     def record_drop_pose(A, B, side_yaw):
         check()
         result = _step(runtime)  # Motion cancelled: maintain zero output.
-        pose = runtime.current_local_pose(result.estimate, now_s=result.now_s)
-        if pose is None:
-            raise RuntimeError("payload release T265 unavailable")
+        pose = fused_pose(result)
         ux, uy = (B[0]-A[0])/settings.approach_m, (B[1]-A[1])/settings.approach_m
         raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
         cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
-        runtime.record_event("payload_drop_pose", pose_reference="t265_local",
+        runtime.record_event("payload_drop_pose", pose_reference="fused",
                              raw_progress_m=raw,cross_track_m=cross,
                              along_track_error_m=raw-settings.approach_m,
                              yaw_error_rad=normalize_angle_rad(pose.yaw_rad-side_yaw),
@@ -111,22 +113,20 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         check()
         runtime.motion.stop()
         entry = _step(runtime)
-        road_pose = runtime.current_local_pose(entry.estimate, now_s=entry.now_s)
-        if road_pose is None:
-            raise RuntimeError("payload entry T265 local pose unavailable")
+        road_pose = fused_pose(entry)
         road_yaw = road_pose.yaw_rad
         start = (road_pose.x_m, road_pose.y_m)
         road_end = (start[0] + settings.advance_m * math.cos(road_yaw),
                     start[1] + settings.advance_m * math.sin(road_yaw))
-        motion("advance_7cm", "track_local_line", start, road_end)
-        runtime.record_event("payload_detour_road_pose", pose=road_pose)
+        motion("advance_7cm", "track_global_line", start, road_end)
+        runtime.record_event("payload_detour_road_pose", pose=road_pose, pose_reference="fused")
         runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
         side_yaw = road_yaw + math.pi / 2
-        side_pose = motion("left_90deg", "rotate_local_to", side_yaw)
+        side_pose = motion("left_90deg", "rotate_to", side_yaw)
         A2 = (side_pose.x_m, side_pose.y_m)
         B2 = (A2[0] + settings.approach_m * math.cos(side_yaw),
               A2[1] + settings.approach_m * math.sin(side_yaw))
-        motion("forward_47cm", "track_local_line", A2, B2)
+        motion("forward_47cm", "track_global_line", A2, B2)
         runtime.motion.stop()
         runtime.drive.stop()
         record_drop_pose(A2, B2, side_yaw)
@@ -139,9 +139,10 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if not released:
             raise RuntimeError("payload release or relay deactivation failed")
         runtime.record_event("payload_release_done", slot=settings.payload_slot, channel=channel)
-        motion("reverse_47cm", "track_local_line", B2, A2, reverse=True)
-        returned = motion("right_90deg", "rotate_local_to", road_yaw)
-        runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned)
+        motion("reverse_47cm", "track_global_line", B2, A2, reverse=True)
+        returned = motion("right_90deg", "rotate_to", road_yaw)
+        runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned,
+                             pose_reference="fused")
         return returned
     except BaseException as exc:
         runtime.record_event("payload_detour_failed", reason=f"{type(exc).__name__}: {exc}")

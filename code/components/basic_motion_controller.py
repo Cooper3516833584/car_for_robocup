@@ -113,8 +113,8 @@ class BasicMotionController:
         self._begin(kind, start, end)
         self._active.start_xy, self._active.end_xy, self._active.reverse = start, end, bool(reverse)
 
-    def track_global_line(self, start_xy, end_xy):
-        self._line(MotionActionType.TRACK_GLOBAL_LINE, start_xy, end_xy)
+    def track_global_line(self, start_xy, end_xy, *, reverse=False):
+        self._line(MotionActionType.TRACK_GLOBAL_LINE, start_xy, end_xy, reverse)
 
     def track_local_line(self, start_xy, end_xy, *, reverse=False):
         self._line(MotionActionType.TRACK_LOCAL_LINE, start_xy, end_xy, reverse)

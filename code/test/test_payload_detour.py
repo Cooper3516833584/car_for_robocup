@@ -58,6 +58,7 @@ class PayloadDetourTests(unittest.TestCase):
             None, None, True, anchor_initialized=True, t265_confidence=1.)
         local_patch = patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock)
         local_property = local_patch.start()
+        self.local_property = local_property
         self.addCleanup(local_patch.stop)
         local_property.side_effect = lambda: Pose2D(*self.pose, self.now)
         self.runtime.record_event = self.record
@@ -171,7 +172,7 @@ class PayloadDetourTests(unittest.TestCase):
         checks=[d for e,d in self.events if e=="payload_drop_pose"]
         self.assertEqual(len(checks),1)
         self.assertNotIn("stable_frames",checks[-1])
-        self.assertEqual(checks[-1]["pose_reference"],"t265_local")
+        self.assertEqual(checks[-1]["pose_reference"],"fused")
         self.assertEqual(len(self.releases),1)
 
     def drop_pose_check(self, offsets, *, along_error=0., cross_error=0., measured_yaw=None):
@@ -263,6 +264,28 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertAlmostEqual(B[1]-A[1],.47)
         self.assertEqual(starts["reverse_47cm"]["args"],(B,A))
         self.assertEqual(starts["right_90deg"]["args"],(0.,))
+        self.assert_safe_exit()
+
+    def test_detour_uses_fused_geometry_when_t265_translation_stalls_in_another_frame(self):
+        self.fixture((5., 7., math.pi / 2))
+        # New, confident T265 samples can still report wrong translation.
+        # A fixed yaw-frame offset preserves measured turn rate, not fused heading.
+        self.local_property.side_effect = lambda: Pose2D(50., -20., self.pose[2] - .7, self.now)
+        global_line = self.runtime.motion.track_global_line
+        self.runtime.motion.track_global_line = Mock(wraps=global_line)
+        self.runtime.motion.track_local_line = Mock(side_effect=AssertionError("local distance reference"))
+        returned = self.run_detour()
+        road = self.stage_poses["advance_7cm"]
+        side = self.stage_poses["forward_47cm"]
+        self.assertAlmostEqual(road.y_m, 7.07, delta=.006)
+        self.assertAlmostEqual(side.x_m, road.x_m - .47, delta=.006)
+        self.assertLess(math.dist((returned.x_m, returned.y_m), (road.x_m, road.y_m)), .03)
+        calls = self.runtime.motion.track_global_line.call_args_list
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2].args, tuple(reversed(calls[1].args)))
+        self.assertTrue(calls[2].kwargs["reverse"])
+        self.assertTrue(all(d["pose_reference"] == "fused" for e,d in self.events
+                            if e in {"payload_detour_stage_start", "payload_drop_pose"}))
         self.assert_safe_exit()
 
     def test_abort_during_turn_settling_prevents_approach_and_releases_all(self):
@@ -465,7 +488,7 @@ class PayloadDetourTests(unittest.TestCase):
 
         def check_speed_scope(dt):
             if (self.stage in ("advance_7cm", "left_90deg", "forward_47cm", "reverse_47cm", "right_90deg")
-                    and self.runtime.motion.action_type.value != "track_global_line"):
+                    and self.runtime.motion.navigation is not self.original_navigation):
                 stages_seen.add(self.stage)
                 if self.stage == "advance_7cm":
                     self.assertLessEqual(self.runtime.motion.drive.max_linear_speed_m_s, .08)
