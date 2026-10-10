@@ -181,9 +181,19 @@ python3 code/main_robocup.py --mode hardware-mission --competition --yellow-mode
 
 # 同一正式场地路线，速度倍率 2，模拟释放（仍会启动真实电机）。
 python3 code/main_robocup.py --mode hardware-mission --competition --speed-scale 2 --release-mode simulate
+
+# 单项测试程序：舵机 +90° → 通电吸住所选仓位 → 沿当前融合朝向边走边找目标
+# → 目标横向居中后停车 → 7 cm / 左转 90° / 0° 视觉精对准 → 释放 → 融合返回 → 结束。
+# 不走任务板、HC、车道和终点；搜索线由当前位姿生成，不读比赛路线常量。
+python3 tools/run_ch3_drop_test.py --confirm-motor-test --search-distance-m 3 \
+  --payload-slot 2 --release-mode relay --relay-port /dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0 \
+  --log-dir logs/ch3-drop-test
 ```
 
 其它 stage：`lane`、`corner1`、`cross-lane`、`corner2`、`finish`、`full`。
+独立搜索+投放测试程序在 `tools/run_ch3_drop_test.py`：它复用 `target_patrol` 的连续
+搜索与 `competition_task.perform_payload_detour` 的同一套融合投放，只把搜索线换成
+"当前位姿沿当前朝向前进 `--search-distance-m`"，因此不需要先跑车道或读板。
 `corner1/corner2` 各沿固定车道到对应点；`cross-lane` 转向并沿车道进入黄色搜索起点；
 `finish` 沿第二转角到终点的固定线段回线，到达位置后停车。读板的观察点运动可独立调用
 `go_to_task_board(runtime)`，`task-board` stage 本身只识别。
