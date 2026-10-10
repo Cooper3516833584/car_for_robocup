@@ -140,12 +140,27 @@ class DifferentialPathController:
         progress = max(clamp(previous_progress_m, 0.0, length),
                        clamp(raw_s, 0.0, length))
         remaining = length - raw_s
+        cruise_speed = min(speed_limit_m_s, math.sqrt(2.0 * decel_m_s2 * max(remaining, 0.0)))
+        preview_speed = min(cruise_speed, 0.08 * speed_scale) if length <= 0.10 else cruise_speed
+        # Use the speed plan before curvature slowing, avoiding a feedback loop
+        # where stronger steering shrinks lookahead and strengthens steering again.
+        # Short payload lines keep their original precision profile in both directions.
+        extension = 0.0
+        if length > self.navigation.lookahead_short_segment_m:
+            extension = min(self.navigation.lookahead_max_extension_m,
+                            self.navigation.lookahead_speed_gain_s * max(
+                                0.0, preview_speed - self.navigation.lookahead_speed_reference_m_s))
+        lookahead_m += extension
         info: dict[str, float | str | bool | None] = {
             "progress_m": progress, "reverse": reverse,
             "raw_progress_m": raw_s,
             "remaining_m": remaining,
             "cross_track_m": cross,
             "segment_length_m": length,
+            "lookahead_m": lookahead_m,
+            "lookahead_base_m": self.navigation.lookahead_m,
+            "lookahead_plan_speed_m_s": preview_speed,
+            "lookahead_extension_m": extension,
         }
 
         def result(v, omega, state, status):
@@ -203,7 +218,7 @@ class DifferentialPathController:
             return result(0.0, 0.0, turn_result.state, "align_forward")
 
         # Scale the car's measured patrol profile; braking remains acceleration-limited.
-        speed = min(speed_limit_m_s, math.sqrt(2.0 * decel_m_s2 * max(remaining, 0.0)))
+        speed = cruise_speed
         speed = max(0.045 * speed_scale, speed / (1.0 + 0.5 * abs(curvature)))
         speed = min(speed, speed_limit_m_s)
         if length <= 0.10:

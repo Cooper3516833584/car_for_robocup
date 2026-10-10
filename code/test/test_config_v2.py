@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,27 @@ from config.v2_runtime import RuntimeMode, runtime_constraints, validate_runtime
 
 
 class ConfigV2Tests(unittest.TestCase):
+    def test_adaptive_lookahead_defaults_for_older_profiles(self):
+        config = self._load_modified({
+            "lookahead_speed_reference_m_s = 0.15\n": "",
+            "lookahead_speed_gain_s = 1.0\n": "",
+            "lookahead_max_extension_m = 0.15\n": "",
+            "lookahead_short_segment_m = 0.50\n": "",
+        })
+        self.assertEqual(config.navigation.lookahead_speed_gain_s, 1.)
+        self.assertEqual(config.navigation.lookahead_max_extension_m, .15)
+        self.assertEqual(config.navigation.lookahead_short_segment_m, .50)
+
+    def test_adaptive_lookahead_rejects_invalid_parameters_and_allows_disabled_gain(self):
+        nav = load_v2_config().navigation
+        for name in ("lookahead_speed_reference_m_s", "lookahead_short_segment_m",
+                     "lookahead_speed_gain_s", "lookahead_max_extension_m"):
+            for value in (-1, float("nan"), float("inf")):
+                with self.subTest(name=name,value=value), self.assertRaises(ConfigV2Error):
+                    replace(nav, **{name:value})
+        self.assertEqual(replace(nav, lookahead_speed_gain_s=0).lookahead_speed_gain_s, 0)
+        self.assertEqual(replace(nav, lookahead_max_extension_m=0).lookahead_max_extension_m, 0)
+
     def test_differential_navigator_factory_has_one_definition(self) -> None:
         factory = Path(__file__).resolve().parents[1] / "config" / "v2_factory.py"
         source = factory.read_text(encoding="utf-8")

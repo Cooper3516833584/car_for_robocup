@@ -295,14 +295,22 @@ class NavigationConfig:
     final_yaw_gain: float = 1.5
     degraded_speed_scale: float = 0.4
     translation_speed_scale: float = 1.0
+    lookahead_speed_reference_m_s: float = 0.15
+    lookahead_speed_gain_s: float = 1.0
+    lookahead_max_extension_m: float = 0.15
+    lookahead_short_segment_m: float = 0.50
 
     def __post_init__(self) -> None:
         for name in (
             "position_tolerance_m", "yaw_tolerance_rad", "lookahead_m",
             "rotate_in_place_threshold_rad", "slowdown_distance_m",
             "path_yaw_gain", "final_yaw_gain", "translation_speed_scale",
+            "lookahead_speed_reference_m_s", "lookahead_short_segment_m",
         ):
             _positive(name, getattr(self, name))
+        for name in ("lookahead_speed_gain_s", "lookahead_max_extension_m"):
+            if _finite(name, getattr(self, name)) < 0:
+                raise ConfigV2Error(f"navigation.{name} must be nonnegative")
         scale = _finite("degraded_speed_scale", self.degraded_speed_scale)
         if not 0.0 < scale <= 1.0:
             raise ConfigV2Error("navigation.degraded_speed_scale must be in (0, 1]")

@@ -43,8 +43,12 @@ class PurePursuitReferenceTests(unittest.TestCase):
                 pose = Pose2D(0, .003, math.pi if reverse else 0, 1)
                 outputs.append(control.compute_line(pose, (0, 0), (length, 0), reverse=reverse).command)
             with self.subTest(length=length, reverse=reverse):
-                self.assertAlmostEqual(outputs[1].linear_x_m_s, 2 * outputs[0].linear_x_m_s)
-                self.assertAlmostEqual(outputs[1].angular_z_rad_s, 2 * outputs[0].angular_z_rad_s)
+                if length <= .50:
+                    self.assertAlmostEqual(outputs[1].linear_x_m_s, 2 * outputs[0].linear_x_m_s)
+                    self.assertAlmostEqual(outputs[1].angular_z_rad_s, 2 * outputs[0].angular_z_rad_s)
+                else:
+                    self.assertGreater(outputs[1].linear_x_m_s, outputs[0].linear_x_m_s)
+                    self.assertLess(abs(outputs[1].angular_z_rad_s), 2 * abs(outputs[0].angular_z_rad_s))
         for scale in (0, -1, float('nan'), float('inf')):
             with self.assertRaises(ValueError):
                 route_speed_config(base, scale)
@@ -66,6 +70,73 @@ class PurePursuitReferenceTests(unittest.TestCase):
         self.assertAlmostEqual(out.details["carrot_x_m"], .663)
         self.assertAlmostEqual(out.details["remaining_m"], .007)
         self.assertAlmostEqual(out.details["segment_length_m"], .47)
+
+    def fast_controller(self, **navigation):
+        config = load_v2_config()
+        nav = replace(config.navigation, lookahead_m=.20, translation_speed_scale=2,
+                      position_tolerance_m=.005, **navigation)
+        drive = replace(config.drive, max_linear_speed_m_s=.40,
+                        max_wheel_speed_m_s=.60, max_angular_speed_rad_s=1.6)
+        return DifferentialPathController(nav, drive)
+
+    def test_adaptive_preview_grows_with_speed_cap_and_limits_extension(self):
+        controller = self.fast_controller()
+        for speed, expected in ((.08,.20), (.15,.20), (.16,.21), (.20,.25), (.25,.30), (.30,.35)):
+            controller.drive = replace(controller.drive, max_linear_speed_m_s=speed)
+            out = controller.compute_line(Pose2D(0,.03,0,1), (0,0), (2.8,0))
+            with self.subTest(speed=speed):
+                self.assertAlmostEqual(out.diagnostics["lookahead_m"], expected)
+                self.assertLess(out.command.angular_z_rad_s, 0)
+                self.assertLessEqual(out.command.linear_x_m_s, speed)
+        controller.navigation = replace(controller.navigation, translation_speed_scale=4)
+        controller.drive = replace(controller.drive, max_linear_speed_m_s=.60)
+        out = controller.compute_line(Pose2D(0,0,0,1), (0,0), (2.8,0))
+        self.assertAlmostEqual(out.diagnostics["lookahead_m"], .35)
+
+    def test_short_forward_and_reverse_preserve_preview_and_original_endpoints(self):
+        controller = self.fast_controller()
+        fixed = self.fast_controller(lookahead_speed_gain_s=0)
+        for length in (.07, .47, .50):
+            for reverse in (False, True):
+                start, end = ((length,0),(0,0)) if reverse else ((0,0),(length,0))
+                out = controller.compute_line(Pose2D(*start,0,1), start, end, reverse=reverse)
+                with self.subTest(length=length, reverse=reverse):
+                    self.assertAlmostEqual(out.diagnostics["lookahead_m"], .20)
+                    self.assertEqual(out.diagnostics["lookahead_extension_m"], 0)
+                    if reverse:
+                        self.assertLess(out.command.linear_x_m_s, 0)
+                    else:
+                        self.assertGreater(out.command.linear_x_m_s, 0)
+                    offset_pose = Pose2D(start[0], .04, .07, 1)
+                    short = controller.compute_line(offset_pose, start, end, reverse=reverse)
+                    original = fixed.compute_line(offset_pose, start, end, reverse=reverse)
+                    self.assertEqual(short.command, original.command)
+                    done = controller.compute_line(Pose2D(*end,0,1), start, end, reverse=reverse)
+                    self.assertEqual(done.diagnostics["line_state"], "arrived")
+                    self.assertEqual((done.command.linear_x_m_s,done.command.angular_z_rad_s),(0,0))
+
+    def test_braking_shrinks_preview_without_moving_arrival_endpoint(self):
+        controller = self.fast_controller()
+        far = controller.compute_line(Pose2D(0,0,0,1), (0,0), (2.8,0))
+        near = controller.compute_line(Pose2D(2.77,.02,0,1), (0,0), (2.8,0))
+        self.assertAlmostEqual(far.diagnostics["lookahead_m"], .35)
+        self.assertAlmostEqual(near.diagnostics["lookahead_m"], .20)
+        self.assertGreater(near.command.linear_x_m_s, 0)
+        done = controller.compute_line(Pose2D(2.8,.02,.3,1), (0,0), (2.8,0))
+        self.assertEqual(done.diagnostics["line_state"], "arrived")
+        self.assertEqual((done.command.linear_x_m_s,done.command.angular_z_rad_s),(0,0))
+
+    def test_adaptive_preview_reduces_fast_steering_without_curvature_feedback(self):
+        adaptive = self.fast_controller()
+        fixed = self.fast_controller(lookahead_speed_gain_s=0)
+        pose = Pose2D(0,.04,.08,1)
+        softened = adaptive.compute_line(pose, (0,0), (2.8,0))
+        original = fixed.compute_line(pose, (0,0), (2.8,0))
+        self.assertAlmostEqual(softened.diagnostics["lookahead_m"], .35)
+        self.assertAlmostEqual(original.diagnostics["lookahead_m"], .20)
+        self.assertLess(abs(softened.command.angular_z_rad_s), abs(original.command.angular_z_rad_s))
+        self.assertLess(softened.command.linear_x_m_s, .30)
+        self.assertAlmostEqual(softened.diagnostics["lookahead_plan_speed_m_s"], .30)
 
     def test_endpoint_lateral_residual_completes_without_turning(self):
         for cross, status in ((.020, "arrived"), (.040, "arrived")):

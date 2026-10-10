@@ -224,7 +224,12 @@ def main(argv=None):
                              patrol_max_m_s=min(.15 * config.navigation.translation_speed_scale,
                                                 config.drive.max_linear_speed_m_s),
                              target_max_m_s=detour.patrol_slow_speed_m_s if detour else None,
-                             turn_max_rad_s=config.drive.max_angular_speed_rad_s)
+                             turn_max_rad_s=config.drive.max_angular_speed_rad_s,
+                             lookahead_base_m=config.navigation.lookahead_m,
+                             lookahead_speed_reference_m_s=config.navigation.lookahead_speed_reference_m_s,
+                             lookahead_speed_gain_s=config.navigation.lookahead_speed_gain_s,
+                             lookahead_max_extension_m=config.navigation.lookahead_max_extension_m,
+                             lookahead_short_segment_m=config.navigation.lookahead_short_segment_m)
         print(f"[route] SPEED scale={args.speed_scale:g}; "
               f"patrol_max={min(.15 * config.navigation.translation_speed_scale, config.drive.max_linear_speed_m_s):g}m/s; "
               f"turn_max={config.drive.max_angular_speed_rad_s:g}rad/s", flush=True)

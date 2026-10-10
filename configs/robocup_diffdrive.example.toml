@@ -139,6 +139,12 @@ hardware_mission_validated = false
 position_tolerance_m = 0.03
 yaw_tolerance_rad = 0.0523598776
 lookahead_m = 0.20
+# Long lines extend preview above 0.15 m/s; 0.30 m/s gives 0.35 m.
+# Lines <=0.50 m (including payload forward/reverse) retain base lookahead.
+lookahead_speed_reference_m_s = 0.15
+lookahead_speed_gain_s = 1.0
+lookahead_max_extension_m = 0.15
+lookahead_short_segment_m = 0.50
 rotate_in_place_threshold_rad = 0.70
 slowdown_distance_m = 0.50
 path_yaw_gain = 1.5
