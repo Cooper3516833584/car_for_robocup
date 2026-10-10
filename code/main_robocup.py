@@ -7,10 +7,12 @@ import logging
 import math
 from pathlib import Path
 import sys
+import signal
 
 from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal
 from config.relative_slam_profile import accepted_relative_slam_profile
+from config.mission_profile import payload_config, route_speed_config
 from config.v2_factory import configure_payload_relay
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
@@ -53,6 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=1,
                         help="drop/full selection: 1=right-front CH2, 2=middle CH3, 3=left-front CH4")
     parser.add_argument("--relay-port", help="explicit LCUS port; enables real relay only for drop/full")
+    parser.add_argument("--speed-scale", type=float, default=1,
+                        help="shared motion speed multiplier; use 2 for the validated faster profile")
+    parser.add_argument("--release-mode", choices=("simulate", "relay"),
+                        help="competition full: simulate disables the physical relay; default uses config")
+    parser.add_argument("--max-seconds", type=float, default=300,
+                        help="competition motion task time limit, including nested search and detour")
     return parser
 
 
@@ -135,6 +143,15 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
     direct_stage = args.competition_stage in DIRECT_COMPETITION_STAGES
+    if not math.isfinite(args.speed_scale) or args.speed_scale <= 0:
+        logging.error("--speed-scale must be finite and positive")
+        return 2
+    if not math.isfinite(args.max_seconds) or not 1 <= args.max_seconds <= 600:
+        logging.error("--max-seconds must be finite and between 1 and 600")
+        return 2
+    if args.release_mode is not None and (not competition_enabled or args.competition_stage not in (None, "full")):
+        logging.error("--release-mode requires competition full")
+        return 2
     if args.relay_port is not None and (not competition_enabled
             or args.competition_stage not in (None, "full", "drop")):
         logging.error("--relay-port requires competition full or drop")
@@ -174,16 +191,24 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_runtime_config(args.config)
         if competition_enabled and args.competition_stage in (None, "full"):
-            config = configure_payload_relay(config, port=args.relay_port)
+            if args.release_mode is not None:
+                config = payload_config(config, action="drop", release_mode=args.release_mode,
+                                        relay_port=args.relay_port)
+            else:
+                config = configure_payload_relay(config, port=args.relay_port)
         mode = RuntimeMode(args.mode)
         if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
             config = accepted_relative_slam_profile(config)
+        config = route_speed_config(config, args.speed_scale)
         runtime = build_runtime(
             config,
             mode,
             replay_file=args.replay_file,
             mission_profile=args.mission_profile,
         )
+        if competition_enabled and args.release_mode == "simulate":
+            from components.relay_lcus import FakeLCUSRelay
+            runtime.relay = FakeLCUSRelay(4)
         if args.log_dir is not None:
             runtime.event_logger = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
         elif task_board_enabled or competition_enabled:
@@ -208,17 +233,39 @@ def main(argv: list[str] | None = None) -> int:
                 logging.exception("could not record readiness rejection")
         return 2
 
+    previous_sigterm = None
     try:
         if competition_enabled:
             from competition_task import run_competition_stage
+            from mission_control import task_scope
 
             stage = args.competition_stage or "full"
-            result = run_competition_stage(
-                runtime, stage,
-                task_board_camera=camera_value(args.task_board_camera),
-                yellow_camera=camera_value(args.yellow_camera),
-                weights=args.yellow_model, slot=args.payload_slot,
-            )
+            runtime.record_event("competition_motion_profile", speed_scale=args.speed_scale,
+                                 translation_speed_scale=config.navigation.translation_speed_scale,
+                                 lookahead_base_m=config.navigation.lookahead_m,
+                                 lookahead_max_extension_m=config.navigation.lookahead_max_extension_m,
+                                 release_mode=args.release_mode or "config")
+            deadline = runtime.clock() + args.max_seconds
+            stop_file = Path(args.log_dir or "logs/competition") / "STOP"
+
+            def guard():
+                if stop_file.exists():
+                    raise RuntimeError("competition interrupted by STOP file")
+                if runtime.clock() >= deadline:
+                    raise RuntimeError("competition task time limit expired")
+
+            def terminate(*_):
+                raise KeyboardInterrupt
+
+            previous_sigterm = signal.signal(signal.SIGTERM, terminate)
+            with task_scope(guard):
+                guard()
+                result = run_competition_stage(
+                    runtime, stage,
+                    task_board_camera=camera_value(args.task_board_camera),
+                    yellow_camera=camera_value(args.yellow_camera),
+                    weights=args.yellow_model, slot=args.payload_slot,
+                )
             logging.info("competition stage completed: %s; result=%s",
                          stage,
                          result if isinstance(result, (bool, type(None))) else type(result).__name__)
@@ -269,10 +316,15 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         if not competition_enabled:
             raise
+        runtime.mission.request_safe_stop("competition task failed")
         logging.exception("competition stopped")
         return 1
     finally:
-        runtime.close()
+        try:
+            runtime.close()
+        finally:
+            if previous_sigterm is not None:
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

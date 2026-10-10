@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import math
 import os
 from pathlib import Path
@@ -16,72 +15,19 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 
-from center_target_route import MODEL_PATH, YoloVision, run_route
+from target_patrol import MODEL_PATH, YoloVision, run_route
 from components.diagnostics_log import JsonlEventLogger
 from components.sound_light_alarm import SoundLightAlarm
-from components.relay_lcus import DEFAULT_RELAY_PORT, FakeLCUSRelay
+from components.relay_lcus import FakeLCUSRelay
 from components.payload_task import prepare_payload
 from config.relative_slam_profile import accepted_relative_slam_profile
-from config.v2_factory import build_servo, configure_payload_relay
+from config.v2_factory import build_servo
+from config.mission_profile import payload_config, route_speed_config
+from components.servo_positioning import park_servo
 from config.v2_loader import load_v2_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import build_runtime
-from hal.pwm import PWMBackendError
 from payload_detour import DetourSettings
-
-
-def route_speed_config(config, scale):
-    """Scale translation and turn targets without changing geometry or acceleration."""
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("--speed-scale must be finite and positive")
-    return replace(config,
-                   drive=replace(config.drive,
-                       max_linear_speed_m_s=config.drive.max_linear_speed_m_s * scale,
-                       max_angular_speed_rad_s=config.drive.max_angular_speed_rad_s * scale,
-                       max_wheel_speed_m_s=config.drive.max_wheel_speed_m_s * scale),
-                   navigation=replace(config.navigation,
-                       translation_speed_scale=config.navigation.translation_speed_scale * scale,
-                       final_yaw_gain=config.navigation.final_yaw_gain * scale))
-
-
-def payload_config(config, *, action, release_mode="simulate", relay_port=None, relay_channels=None):
-    """Validate explicit relay settings before any camera/servo/motor opens."""
-    if action == "beep":
-        if config.relay.enabled or relay_port is not None or relay_channels is not None:
-            raise ValueError("beep mode requires the payload relay to be disabled")
-        return config
-    relay = config.relay
-    if release_mode == "simulate":
-        if relay_port is not None:
-            raise ValueError("--relay-port requires explicit --release-mode relay")
-        return replace(config, relay=replace(relay, enabled=False, channel_count=4,
-                                             disconnect_on_shutdown=True))
-    if relay_port is not None:
-        if not relay_port.strip():
-            raise ValueError("--relay-port must not be empty")
-        relay = replace(relay, enabled=True, port=relay_port)
-    if relay_channels is not None:
-        relay = replace(relay, channel_count=relay_channels)
-    if not relay.enabled:
-        raise ValueError("drop mode requires an enabled relay in config or explicit --relay-port")
-    if relay.channel_count < 4:
-        raise ValueError("drop mode requires relay channels 2, 3 and 4")
-    # Exiting a program must disconnect latched contacts even if a profile opted out.
-    return configure_payload_relay(replace(config, relay=relay))
-
-
-def park_servo(servo, angle, *, clock=time.monotonic, sleep=time.sleep):
-    """Allow udev's group permissions to settle after the first PWM export."""
-    deadline = clock() + 2.0
-    while True:
-        try:
-            servo.start(home=False)
-            break
-        except PWMBackendError as exc:
-            if not isinstance(exc.__cause__, PermissionError) or clock() >= deadline:
-                raise
-            sleep(0.05)
-    servo.set_angle(angle, settle=True)
 
 
 def startup_countdown(relay, alarm, slot, seconds, *, verify=True, abort=lambda: False,

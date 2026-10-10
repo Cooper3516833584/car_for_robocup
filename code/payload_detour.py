@@ -8,7 +8,7 @@ import time
 from core.frames import normalize_angle_rad
 from components.basic_motion_controller import MotionActionState
 from components.payload_task import drop_payload, payload_channel
-from competition_task import _step, _usable_pose
+from mission_control import step_runtime as _step, usable_pose as _usable_pose
 from robocup_runtime import RobocupMissionState
 
 PERIOD_S = 0.05

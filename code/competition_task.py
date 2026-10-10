@@ -15,7 +15,7 @@ from components.payload_task import drop_payload as release_payload
 from components.payload_task import (PAYLOAD_ACTIVE_ON as DEFAULT_PAYLOAD_ACTIVE_ON,
                                      PAYLOAD_SLOT_TO_RELAY as DEFAULT_PAYLOAD_SLOT_TO_RELAY,
                                      payload_channel, prepare_payload)
-from components.pose_fusion import PoseFusionState
+from mission_control import LocalizationLostError, step_runtime as _step, usable_pose as _usable_pose
 from components.yellow_yolo_adapter import load_detector, select_yellow
 from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
 from robocup_runtime import RobocupMissionState
@@ -30,8 +30,8 @@ CONTROL_DT_S = 0.05
 LOCALIZATION_WAIT_S = 30.0
 TASK_BOARD_CAMERA = 0
 YELLOW_CAMERA = 0
-# Servo 90 deg points the camera left. No servo control in this task.
-# TODO(field): add servo scanning only if an outside marker is out of view.
+# Continuous target search holds the calibrated servo at +90 deg, facing left.
+# Task-board acquisition still completes before the camera is parked for search.
 
 # START_* are field notes only.
 # All route coordinates below use the current fused pose frame directly.
@@ -75,22 +75,22 @@ HC_CONNECT_WAIT_S = 2.0
 # The model is not trained or downloaded by this program.
 YELLOW_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "best_car.pt"
 YELLOW_CLASS_NAME = "yellow"  # target_yolo/config.py: red, blue, green, yellow
-YELLOW_MIN_CONF = 0.55
+YELLOW_MIN_CONF = 0.8
 YELLOW_IMGSZ = IMGSZ
 YELLOW_DEVICE = "cpu"
 YELLOW_CONFIRM_FRAMES = 2
 YELLOW_SEARCH_STEP_M = 0.08
 YELLOW_TARGET_CX_PX = CAMERA_WIDTH / 2
-YELLOW_CX_TOL_PX = 10  # Same horizontal fraction as 20 px at the old 1280 width.
+YELLOW_CX_TOL_PX = CAMERA_WIDTH * .05  # Verified middle 10%; no vertical gate.
 YELLOW_TARGET_CY_PX = CAMERA_HEIGHT / 2  # Observation/logging only.
 ALIGN_PIXEL_TO_DRIVE_SIGN = 1
 ALIGN_STEP_M = 0.02
 ALIGN_MAX_STEPS = 20
-# The existing general route tolerance is 3 cm; a 2 cm alignment action needs
-# a smaller tolerance. Applied to move_local_distance only and restored afterwards.
+# A 2 cm alignment action needs smaller tolerance than the general 3 cm route.
+# Relative short moves now construct endpoints in the fused frame.
 SHORT_MOVE_TOLERANCE_M = 0.005
 
-# TODO(field): measure this sequence from the aligned camera pose to release.
+# Legacy standalone drop-route tuning; full uses the shared fused payload detour.
 # Only ("drive", m), ("rotate", deg), ("rotate_to", deg) are supported.
 FIXED_DROP_ROUTE = [("drive", 0.00)]
 PAYLOAD_SLOT_TO_RELAY = dict(DEFAULT_PAYLOAD_SLOT_TO_RELAY)  # 1=右前CH2，2=中间CH3，3=左前CH4。
@@ -103,28 +103,6 @@ LOG = logging.getLogger(__name__)
 STAGES = ("full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
           "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop",
           "corner2", "finish")
-
-
-class LocalizationLostError(RuntimeError):
-    """Fused localization cannot support further motion."""
-
-
-def _usable_pose(result):
-    estimate = result.estimate
-    return (estimate.pose is not None and estimate.state not in {
-        PoseFusionState.LOST, PoseFusionState.UNANCHORED, PoseFusionState.INITIALIZING})
-
-
-def _step(runtime):
-    result = runtime.step()
-    if result.error or runtime.mission.state in {
-            RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR,
-            RobocupMissionState.FINISHED}:
-        reason = runtime.mission.last_error or result.error or runtime.mission.state.value
-        if not _usable_pose(result):
-            raise LocalizationLostError(reason)
-        raise RuntimeError(reason)  # Preserve all existing runtime safety paths.
-    return result
 
 
 def wait_for_fused_localization(runtime):
@@ -197,17 +175,16 @@ def turn_to_deg(runtime, yaw_deg):
 
 
 def move_local_distance(runtime, distance_m):
+    """Relative chassis distance with endpoints in the current fused frame."""
     original = runtime.motion.navigation
     runtime.motion.navigation = replace(original, position_tolerance_m=min(
         original.position_tolerance_m, SHORT_MOVE_TOLERANCE_M))
     def start():
-        pose = runtime.current_local_pose()
-        if pose is None:
-            raise LocalizationLostError("fresh continuous T265 local pose unavailable")
+        pose = wait_for_fused_localization(runtime).estimate.pose
         A = (pose.x_m, pose.y_m)
         B = (A[0] + distance_m * math.cos(pose.yaw_rad),
              A[1] + distance_m * math.sin(pose.yaw_rad))
-        runtime.motion.track_local_line(A, B, reverse=distance_m < 0)
+        runtime.motion.track_global_line(A, B, reverse=distance_m < 0)
     try:
         if not math.isfinite(distance_m):
             raise ValueError("local distance must be finite")
@@ -398,10 +375,64 @@ def search_yellow_drop_zone(runtime, camera, detector):
             capture.release()
 
 
+def search_centered_yellow_on_line(runtime, camera, detector):
+    """Reuse tested continuous vision on the competition's own search segment."""
+    from target_patrol import YoloVision, find_centered_target
+    from config.v2_factory import build_servo
+    from components.servo_positioning import park_servo
+
+    if detector is None:
+        runtime.drive.stop()
+        runtime.record_event("yellow_not_found", reason="detector unavailable")
+        return None
+    servo = build_servo(runtime.config)
+    if servo is None:
+        raise RuntimeError("continuous target search requires the calibrated camera servo")
+    vision = YoloVision(YELLOW_MODEL_PATH, camera, confidence=YELLOW_MIN_CONF,
+                        target_region="frame", target_class_name=YELLOW_CLASS_NAME,
+                        drop_center_width_ratio=2 * YELLOW_CX_TOL_PX / CAMERA_WIDTH,
+                        detector=detector)
+    runtime.drive.stop()
+    try:
+        park_servo(servo, 90)
+        runtime.record_event("competition_camera_hold", angle_deg=90, pulse_us=servo.pulse_us)
+        move_to_pose(runtime, YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y, CROSS_LANE_YAW_DEG)
+        vision.start()
+        box = find_centered_target(runtime, vision,
+            (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y),
+            (YELLOW_SEARCH_END_X, YELLOW_SEARCH_END_Y),
+            slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale,
+            clock=runtime.clock, sleep=time.sleep)
+        if box is None:
+            runtime.record_event("yellow_not_found", reason="search segment exhausted")
+            return None
+        from components.yellow_yolo_adapter import YellowDetection
+        x1,y1,x2,y2,confidence,_ = box
+        width,height = vision.frame_size
+        sx,sy = CAMERA_WIDTH/width, CAMERA_HEIGHT/height
+        return YellowDetection((x1+x2)/2*sx, (y1+y2)/2*sy, (x2-x1)*sx, (y2-y1)*sy, confidence)
+    finally:
+        primary_error = sys.exc_info()[0] is not None
+        cleanup_error = None
+        for name, cleanup in (("drive_stop",runtime.drive.stop), ("vision_close",vision.close),
+                              ("servo_close",lambda:servo.close(hold=True) if servo.is_running else None)):
+            try:
+                cleanup()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+                runtime.record_event("competition_cleanup_failed", resource=name, reason=str(exc))
+        if cleanup_error is not None and not primary_error:
+            raise cleanup_error
+
+
 def align_yellow_drop_zone(runtime, camera, detector, initial_detection=None):
     runtime.drive.stop()
     if detector is None:
         return None
+    if initial_detection is not None and abs(initial_detection.cx_px - YELLOW_TARGET_CX_PX) <= YELLOW_CX_TOL_PX:
+        runtime.record_event("yellow_align", success=True, cx_px=initial_detection.cx_px,
+                             cy_px=initial_detection.cy_px, source="continuous_search")
+        return initial_detection
     capture, owned = None, False
     try:
         try:
@@ -461,6 +492,23 @@ def drop_payload(relay, slot=1):
                            verify=PAYLOAD_VERIFY_RELAY)
 
 
+def perform_payload_detour(runtime, slot=1):
+    """The validated fused 7/47 cm out-and-back, independent of field route."""
+    from payload_detour import DetourSettings, run_payload_detour
+    settings = DetourSettings(
+        payload_slot=slot, release_hold_s=PAYLOAD_RELEASE_HOLD_S,
+        verify_relay=runtime.config.relay.verify_writes,
+        patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
+    original_drive = runtime.motion.drive
+    runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
+        original_drive.max_linear_speed_m_s, settings.patrol_slow_speed_m_s))
+    try:
+        return run_payload_detour(runtime, settings, clock=runtime.clock,
+                                  sleep=time.sleep, travel_drive=original_drive)
+    finally:
+        runtime.motion.drive = original_drive
+
+
 def go_to_second_corner(runtime):
     return track_lane_line(runtime, (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y),
                                (CORNER_2_X, CORNER_2_Y))
@@ -489,6 +537,10 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     wait_for_fused_localization(runtime)
     channel = payload_channel(slot, PAYLOAD_SLOT_TO_RELAY)
+    if runtime.relay is None:
+        runtime.drive.stop()
+        runtime.mission.request_safe_stop("payload relay unavailable")
+        raise RuntimeError("payload relay unavailable; mission will not move")
     if runtime.relay is not None:
         if not prepare_payload(runtime.relay, slot, slot_to_relay=PAYLOAD_SLOT_TO_RELAY,
                                active_on=PAYLOAD_ACTIVE_ON, verify=PAYLOAD_VERIFY_RELAY):
@@ -503,18 +555,14 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
     _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime))
     _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
     _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
-    detection = _stage(runtime, "yellow-search", lambda: search_yellow_drop_zone(
+    detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
         runtime, yellow_camera, detector))
     aligned = None if detection is None else _stage(runtime, "yellow-align", lambda: align_yellow_drop_zone(
         runtime, yellow_camera, detector, initial_detection=detection))
     if aligned is not None:
-        _stage(runtime, "drop-route", lambda: run_fixed_drop_route(runtime))
-        ok = _stage(runtime, "drop", lambda: drop_payload(runtime.relay, slot))
-        runtime.record_event("payload_drop", slot=slot, channel=channel, success=ok)
-        if not ok:
-            runtime.drive.stop()
-            runtime.mission.request_safe_stop("payload release was not confirmed")
-            raise RuntimeError("payload release was not confirmed; mission stopped")
+        _stage(runtime, "payload-detour", lambda: perform_payload_detour(runtime, slot))
+        runtime.record_event("payload_drop", slot=slot, channel=channel, success=True,
+                             pose_reference="fused")
     else:
         runtime.record_event("payload_drop", slot=slot, channel=channel, success=False, skipped=True,
                              reason="yellow search or alignment failed")
@@ -569,7 +617,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
         "lane": lambda: go_to_lane(runtime),
         "corner1": lambda: go_to_first_corner(runtime),
         "cross-lane": lambda: enter_cross_lane(runtime),
-        "yellow-search": lambda: search_yellow_drop_zone(runtime, yellow_camera, detector),
+        "yellow-search": lambda: search_centered_yellow_on_line(runtime, yellow_camera, detector),
         "yellow-align": lambda: align_yellow_drop_zone(runtime, yellow_camera, detector),
         "drop-route": lambda: run_fixed_drop_route(runtime),
         "corner2": lambda: go_to_second_corner(runtime),

@@ -2,13 +2,13 @@
 
 入口仍是 `code/main_robocup.py`。比赛流程在 `code/competition_task.py`，复用现有
 融合定位、BasicMotionController、DifferentialDrive、OCR、HC15SerialDriver、LCUSRelay。
-本次未改动 D500/T265/融合算法、C10B 帧发送器或底盘 watchdog。
+本次任务层整合未改动 D500/T265/融合算法、C10B 帧发送器或底盘 watchdog。
 
 完整流程：等待融合定位 → 车道入口 → 任务板观察点 → OCR → HC 单发 → 第一转角
-→ 横向车道 → 黄色搜索 → 像素对齐 → 固定投放路线 → 所选 slot 投放 → 第二转角
+→ 横向车道 → 连续黄色搜索至画面横向中部 → 融合位置投放往返 → 第二转角
 → 终点坐标停车。
 
-正式车道使用现有 `follow_segment()`，按测定的线段方向运行和回线：
+正式车道使用现有 `track_global_line()`，按测定的线段方向运行和回线：
 
 | 函数 | 固定路线段/动作 |
 |---|---|
@@ -22,6 +22,43 @@
 `TASK_BOARD_X/Y` 是车道上的读板观察位置，不是任务板实体中心。若现场观察点离开
 车道，应在任务层明确安排观察和回车道路线后再运行，不改变底层导航算法。
 
+## 2026-10-10 验证能力合入
+
+保留上述比赛路线坐标、OCR 读板、任务数量和 HC 单发顺序；不调用验证程序的
+280/420/250 cm 路线生成器。主程序与验证程序现在共用 `code/target_patrol.py`
+的视觉、`code/payload_detour.py` 的投放动作、`code/config/mission_profile.py`
+的速度/继电器策略，以及相机舵机的 PWM 导出重试。旧 `center_target_route.py`
+仅保留导入兼容入口。
+
+读板结束后，在黄色搜索阶段把相机舵机保持在标定的 +90°（2500 us）。沿主程序
+`YELLOW_SEARCH_START → YELLOW_SEARCH_END` 连续推理，只接受 yellow 类且置信度
+至少 0.8 的目标。目标可见时将速度限制到 `8 cm/s × translation_speed_scale`，
+目标中心 X 进入画面横向 45%～55% 即停止搜索；Y 不作为触发条件。
+未找到目标则跳过投放并继续原第二转角和终点。相机/推理故障与过期结果结束任务。
+
+成功找到目标后，按保存的融合道路朝向前进 7 cm → 左转 90° → 前进 47 cm
+→ 释放所选仓位并等待 0.5 s → 倒车返回保存的侧向起点 → 恢复道路朝向。
+前进 7 cm 维持目标可见时的速度限制；侧向行驶和倒车恢复原巡航速度上限。
+7 cm、47 cm 和倒车端点、进度、纠偏及到达判断均使用 T265+D500/SLAM 融合位置，
+倒车复用去程端点；转向完成继续使用已有实测角速度条件。随后使用原有
+`YELLOW_SEARCH_START → CORNER_2` 车道端点继续行驶。
+几何误差停车门限和投放前停稳检测保持已删除状态，横偏/终点残差仅纠偏和记录。
+
+长直线沿用已验证的随计划速度增加前视距离；短于或等于 0.50 m 的直线仍使用
+基础前视。`--speed-scale` 默认 1，显式使用 2 可选择此前验证的速度倍率，
+同时缩放轮速上限和转角控制增益，不修改路线、加速度或活动 TOML。
+自适应参数和计算式见 [巡线测试说明](CENTER_TARGET_ROUTE_TEST.md)。
+
+主程序的整场默认仍按继电器配置运行。`--release-mode simulate` 强制禁用真实
+继电器并使用四路内存继电器；`--release-mode relay` 要求已启用的确认端口，
+模拟模式不能同时传 `--relay-port`。只有 full 接受 `--release-mode`。
+整场没有继电器对象或吸持/释放回读失败会结束任务。
+
+定位运动任务默认总时限 300 s，`--max-seconds` 可设为 1～600 s。
+`<log-dir>/STOP`（默认 `logs/competition/STOP`）、SIGINT 和 SIGTERM 均能中断
+搜索及嵌套投放动作，并执行底盘停车、继电器退出、视觉关闭与舵机保持清理。
+四个 direct 阶段仍走原有独立设备路径。
+
 ## 现场参数
 
 现场高频参数统一在 `code/competition_task.py` 顶部的
@@ -34,11 +71,12 @@
 | `LANE_ENTRY_* / TASK_BOARD_* / CORNER_1_* / CORNER_2_* / FINISH_*` | 全部为 0 的未实测占位值，填写真实融合 XY；入口、任务板观察朝向分别设置 |
 | `FINISH_YAW_DEG / CORNER_1_YAW_DEG / CORNER_2_YAW_DEG` | 保留记录值，当前正式车道和终点不以它们做最终朝向对齐 |
 | `CROSS_LANE_YAW_DEG / YELLOW_SEARCH_START_* / YELLOW_SEARCH_END_*` | 测量横向车道朝向、搜索起止点；默认搜索段长度为 0 |
-| `FIXED_DROP_ROUTE` | 当前仅 `[("drive", 0.0)]`；实测后填写 drive/rotate/rotate_to 序列 |
-| `YELLOW_TARGET_CX_PX / YELLOW_CX_TOL_PX` | 当前 320 / 10，基于 640×480 参考画面；非此尺寸的检测坐标先按比例换算 |
+| `FIXED_DROP_ROUTE` | 当前仅 `[("drive", 0.0)]`，只用于独立 `drop-route` 调试；full 使用共享融合投放往返 |
+| `YELLOW_MIN_CONF` | 0.8，主程序仍只搜索 yellow 类 |
+| `YELLOW_TARGET_CX_PX / YELLOW_CX_TOL_PX` | 当前 320 / 32，即横向中央 10%，基于 640×480 参考画面；检测坐标按实际画面尺寸换算 |
 | `YELLOW_IMGSZ / CAMERA_WIDTH / CAMERA_HEIGHT / CAMERA_FPS` | 共用 `components/yolo_cpu.py` 的 320 / 640 / 480 / 30；OCR 仍使用自己的采集设置 |
 | `ALIGN_PIXEL_TO_DRIVE_SIGN / ALIGN_STEP_M` | 当前 +1 / 0.02 m，实测前后移动对 cx 的影响 |
-| `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作按纵向距离完成，横向边界保留原配置，动作后恢复；到位后不转向追点 |
+| `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作使用融合位置，按纵向距离完成，动作后恢复配置；到位后不转向追点 |
 | `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 选项1/2/3对应右前CH2/中间CH3/左前CH4、False（通电吸住/断电释放）、0.5 s；与组件及路线测试共用已确认接线 |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
 | `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
@@ -48,7 +86,7 @@
 这些数值尚未完成实车路线验收。全零坐标会产生零长度车道段，现有 motion 会拒绝，
 必须先测量填写不同的端点。使用 `get_current_pose(runtime)` 读取当前融合坐标，直接
 填写路线常量；`START_*` 不参与相对坐标变换。
-没有加入场地 TOML、路线 loader、舵机扫描、相机标定、障碍绕行或 footprint 判定。
+没有加入场地 TOML、路线 loader、舵机扫描、重新标定、障碍绕行或 footprint 判定。
 
 ## 原子函数
 
@@ -60,8 +98,8 @@
 - 路线：`go_to_lane`、`go_to_task_board`、`go_to_first_corner`、`enter_cross_lane`、
   `go_to_second_corner`、`go_to_finish`。
 - 感知与通信：`read_task_board`、`send_task_to_drone_once`、`detect_yellow_once`、`detect_yellow_from_camera`、
-  `search_yellow_drop_zone`、`align_yellow_drop_zone`。
-- 投放与串联：`run_fixed_drop_route`、`drop_payload`、`run_full_mission`、
+  `search_centered_yellow_on_line`、`align_yellow_drop_zone`。
+- 投放与串联：`perform_payload_detour`、`run_fixed_drop_route`、`drop_payload`、`run_full_mission`、
   `run_competition_stage`。
 
 `drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认1。
@@ -76,6 +114,10 @@
 `detect_yellow_once` 接收已打开且有 `read()` 的 camera 以及 Ultralytics detector。
 搜索/对齐函数也支持相机索引或设备路径：内部打开的相机会释放，外部传入的
 camera 由调用者关闭。`run_full_mission` 的直接调用需传入 detector；CLI 自动加载。
+
+`search_yellow_drop_zone` 保留旧停车分步搜索的直接调用兼容性，full 和 CLI
+`yellow-search` 均使用连续搜索；`yellow-align` 仍可独立执行 2 cm 微调。
+full 已在中央范围的检测直接通过对齐，不再重复采集或微调。
 
 CLI 加载的 detector 复用路线测试的 CPU 优化：单线程推理，临时选择当前允许的
 最高频 CPU 核心，推理返回或异常后恢复调用线程的亲和性。Ultralytics 首次后端
@@ -104,7 +146,7 @@ python3 code/main_robocup.py --competition-stage hc-send
 # 只看黄色目标，车不动。沿用已有权重，不训练或下载模型。
 python3 code/main_robocup.py --competition-stage yellow-detect --yellow-model /absolute/path/best_car.pt
 
-# 搜索会先导航到 YELLOW_SEARCH_START，然后在该段停车识别、短步前进。
+# 导航到 YELLOW_SEARCH_START，沿搜索线连续识别并在目标横向居中时停车。
 python3 code/main_robocup.py --mode hardware-mission --competition-stage yellow-search --yellow-model /absolute/path/best_car.pt
 
 # 从当前位置前后微调；不会先跑搜索或完整路线。
@@ -118,6 +160,9 @@ python3 code/main_robocup.py --competition-stage drop --config configs/robocup_d
 
 # 整场：先填写路线常量，再完成单项验收后使用。
 python3 code/main_robocup.py --mode hardware-mission --competition --yellow-model /absolute/path/best_car.pt
+
+# 同一正式场地路线，速度倍率 2，模拟释放（仍会启动真实电机）。
+python3 code/main_robocup.py --mode hardware-mission --competition --speed-scale 2 --release-mode simulate
 ```
 
 其它 stage：`lane`、`corner1`、`cross-lane`、`corner2`、`finish`、`full`。
@@ -138,12 +183,12 @@ python3 code/main_robocup.py --mode hardware-mission --competition --yellow-mode
 | `drop-route` | 0，所有固定动作正常完成 | 1，动作失败或异常 |
 | 其它运动阶段 | 0，正常完成 | 1，runtime safe-stop/error 或异常 |
 
-键盘中断退出码为 130。full 的 OCR/HC/黄色视觉/投放失败继续遵循比赛容错规则；
+键盘中断或 SIGTERM 退出码为 130。full 的 OCR/HC/未找到黄色目标沿用比赛容错规则；
 完成到终点才返回 0，runtime safety stop/error 或未完成返回 1。
 
 ## 视觉资产与依赖
 
-使用现有 `target_yolo/best_car.pt`，权重内类别是 red/blue/green/yellow。
+使用现有 `models/best_car.pt`，权重内类别是 red/blue/green/yellow。
 推理调用沿用 `target_yolo/verify_model.py` 中的 `model.predict(frame, ...)`。
 `yellow_yolo_adapter.py` 仅提取黄色最高置信度 bbox 的中心和大小。
 `target_yolo/vision.py` 是数据标注用 HSV 代码，比赛主程序不调用它。
@@ -155,7 +200,7 @@ Ultralytics/PyTorch 环境。Ultralytics、模型和相机仅在视觉 stage 中
 ## 失败与日志
 
 OCR 重试失败返回 `(1,2,1)`；HC 单发失败继续路线；黄色未找到或对齐失败跳过投放；
-继电器投放失败继续第二转角和终点。`cy` 仅记录，不作投放条件。
+继电器投放或回读失败结束任务，不继续第二转角和终点。`cy` 仅记录，不作投放条件。
 
 融合定位短暂掉线沿用 runtime 的停车和恢复策略；完全失效由原安全路径结束。
 在停车状态等待融合定位超过 `LOCALIZATION_WAIT_S` 时，也结束定位运动。
@@ -165,7 +210,7 @@ OCR 重试失败返回 `(1,2,1)`；HC 单发失败继续路线；黄色未找到
 `--log-dir` 选择目录。四个 direct 阶段直接在终端报告结果，不创建定位事件日志。
 事件包括阶段开始/完成、任务数量及 fallback、HC 内容/结果、黄色中心、对齐误差、
 固定动作、投放结果和终点实际坐标。HC 的 success 表示本地 write 完成，不代表接收
-确认；投放的 success 依循继电器驱动返回值，默认不回读。
+确认；整场投放要求继电器驱动状态回读确认。
 
 ## 无硬件验收
 
@@ -175,10 +220,17 @@ py -3 -m unittest discover -s code/test -p "test_*.py"
 git diff --check
 ```
 
-新增测试覆盖：三仓映射/极性/恢复，HC 一次 write/关闭，YOLO 类别/置信度/中心，
-连续运动衔接，2 cm 实际步进，搜索段末步限制，多帧确认，对齐方向/丢失/次数上限，
-定位短暂掉线恢复和完全失效停车，以及整场 HC/投放失败后继续到终点。
-运动验收使用生产 runtime 和 motion 配合假底盘反馈，未接真实硬件。
+当前回归覆盖三仓映射/极性/清理、HC 单发、YOLO 类别/0.8 置信度/中心，
+不同于测试矩形的正式路线衔接、速度倍率和自适应前视、原始 T265 平移停滞下的
+融合投放往返、不同画面尺寸的中心换算、无目标跳过投放、视觉/释放失败停车，
+嵌套动作中的 STOP、整场超时、SIGTERM 和清理。旧独立微调/分步搜索兼容测试保留。
+运动验收使用生产 runtime 和 motion 配合假底盘反馈，本轮整合未接真实硬件。
+
+2026-10-10 本次整合验收：本地 Python 3.13 执行 914 项测试，907 项通过、
+7 项因环境限制跳过；compileall、git diff --check 和原有 dry-run 均通过。
+新增 11 项验收包含主程序完整假设备任务与共享视觉工作线程的实际控制逻辑。
+
+以下 2026-10-07 初版验收记录仅描述当时实现与环境。
 
 2026-10-07 初版本地结果：compileall、git diff --check 和原有 dry-run 通过；
 同步 GitHub 最新继电器修复后，默认测试共 775 项，759 项通过、16 项因环境限制

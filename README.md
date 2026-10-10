@@ -38,6 +38,15 @@ The `task-board`, `hc-send`, `yellow-detect`, and `drop` CLI stages operate thei
 devices directly without starting localization or drive runtime. Measured lane
 segments guide the main route, and the finish requires position only.
 
+The main mission now shares the validated target vision and fused payload detour
+with the patrol test. It searches its own measured yellow segment continuously
+at confidence 0.8, uses speed-dependent lookahead, and performs the 7/47 cm
+out-and-back using fused positions. The test's 280/420/250 cm fixture is not used
+by the competition route. `--speed-scale 2` selects the faster profile;
+`--release-mode simulate` disables physical relay output for a full mission.
+Field coordinates still require measurements. This integration has software
+coverage; it has not been run as a complete physical competition mission.
+
 ## Task-board recognition
 
 Task-board startup acquisition is available in `hardware-mission` with

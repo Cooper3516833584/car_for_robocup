@@ -30,6 +30,8 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime = build_runtime(load_runtime_config(), RuntimeMode.DRY_RUN,
                                      clock=lambda: self.now)
         self.runtime.start()
+        self.runtime.relay = FakeLCUSRelay(4)
+        self.runtime.relay.open()
         self.addCleanup(self.runtime.close)
         # Fake canonical pose observations, propagated from the fake drive.
         # All production fusion/motion/drive algorithms remain unmodified.
@@ -146,12 +148,12 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
     def test_alignment_forward_reverse_then_within_tolerance(self):
-        detections = iter([YellowDetection(300, 1000, 80, 80, 0.9),
+        detections = iter([YellowDetection(260, 1000, 80, 80, 0.9),
                            YellowDetection(321, 1000, 80, 80, 0.9)])
         self.stack.enter_context(patch.object(task, "_detect_stopped", side_effect=lambda *_: next(detections)))
         with patch.object(task, "move_local_distance", wraps=task.move_local_distance) as move:
             aligned = task.align_yellow_drop_zone(self.runtime, Mock(), Mock(),
-                initial_detection=YellowDetection(340, 1000, 80, 80, 0.9))
+                initial_detection=YellowDetection(380, 1000, 80, 80, 0.9))
         self.assertEqual([c.args[1] for c in move.call_args_list], [0.02, -0.02])
         self.assertIsNotNone(aligned)  # cy is not a gate.
 
@@ -194,15 +196,16 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_continues_after_hc_failure_but_stops_on_payload_failure(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
-        self.stack.enter_context(patch.object(task, "_detect_stopped",
+        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
             return_value=YellowDetection(320, 240, 80, 80, 0.9)))
-        drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=False))
+        drop = self.stack.enter_context(patch.object(self.runtime.relay, "turn_off", return_value=False))
         with patch.object(task, "go_to_second_corner") as corner:
             with self.assertRaisesRegex(RuntimeError, "release"):
                 task.run_full_mission(self.runtime, yellow_camera=Mock(), detector=Mock())
             corner.assert_not_called()
         send.assert_called_once()
-        drop.assert_called_once_with(self.runtime.relay, 1)
+        self.assertGreater(drop.call_count, 0)
+        self.assertTrue(all(c.args == (2,) for c in drop.call_args_list))
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
@@ -234,10 +237,10 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_alignment_failure_skips_drop_and_finishes(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
-        self.stack.enter_context(patch.object(task, "search_yellow_drop_zone",
+        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
             return_value=YellowDetection(640, 360, 80, 80, 0.9)))
         self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=None))
-        drop = self.stack.enter_context(patch.object(task, "drop_payload"))
+        drop = self.stack.enter_context(patch.object(task, "perform_payload_detour"))
         task.run_full_mission(self.runtime, detector=Mock())
         drop.assert_not_called()
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
@@ -257,7 +260,7 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_without_yellow_skips_drop_and_finishes(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
-        drop = self.stack.enter_context(patch.object(task, "drop_payload"))
+        drop = self.stack.enter_context(patch.object(task, "perform_payload_detour"))
         task.run_full_mission(self.runtime, detector=None)
         drop.assert_not_called()
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
@@ -316,10 +319,15 @@ class CompetitionTaskTests(unittest.TestCase):
                       expected_code=0):
         self.stack.enter_context(patch.object(task, "load_detector", return_value=Mock()))
         self.stack.enter_context(patch.object(task, "_open_yellow_camera", return_value=(Mock(), False)))
-        self.stack.enter_context(patch.object(task, "_detect_stopped", return_value=(
+        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=(
             YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
         self.stack.enter_context(patch.object(task, "send_task_once", return_value=hc_ok))
-        drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=drop_ok))
+        def detour(runtime, slot):
+            if not drop_ok:
+                runtime.mission.request_safe_stop("payload release was not confirmed")
+                raise RuntimeError("payload release was not confirmed")
+            return self.estimate(self.now).pose
+        drop = self.stack.enter_context(patch.object(task, "perform_payload_detour", side_effect=detour))
         if not align_ok:
             self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=None))
         if ocr_ok:
@@ -346,7 +354,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self._run_full_cli(align_ok=False).assert_not_called()
 
     def test_full_cli_drop_failure_stops_and_returns_failure(self):
-        self._run_full_cli(drop_ok=False, expected_code=1).assert_called_once_with(self.runtime.relay, 1)
+        self._run_full_cli(drop_ok=False, expected_code=1).assert_called_once_with(self.runtime, 1)
 
     def test_full_mission_uses_selected_left_front_magnet_and_holds_before_motion(self):
         relay = FakeLCUSRelay(4)
@@ -354,7 +362,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime.relay = relay
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
-        self.stack.enter_context(patch.object(task, "search_yellow_drop_zone", return_value=Mock()))
+        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=Mock()))
         self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=Mock()))
         go = task.go_to_lane
 
