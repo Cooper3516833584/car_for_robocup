@@ -28,6 +28,18 @@ class CenterTargetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no class"):
             task.filter_target_boxes([], {0: "red"}, "yellow")
 
+    def test_route_confidence_rejects_recorded_false_trigger_and_accepts_strong_target(self):
+        vision=task.YoloVision()
+        self.assertEqual(vision.confidence,.8)
+        false_trigger=(7.6735,0,640,480,.5173988342,3)
+        strong_target=(187.9529,6.6476,509.4691,201.0673,.9397047162,0)
+        for box in (false_trigger,(290,0,350,40,.799,3)):
+            self.assertIsNone(task.visible_target([box],640,480,vision.confidence))
+            self.assertIsNone(task.horizontal_target([box],640,vision.confidence))
+        for box in (strong_target,(290,0,350,40,.8,3)):
+            self.assertEqual(task.visible_target([box],640,480,vision.confidence),box)
+            self.assertEqual(task.horizontal_target([box],640,vision.confidence),box)
+
     def test_all_classes_and_actual_frame_dimensions(self):
         for cls in range(4):
             box = (240, 160, 400, 320, 0.9, cls)

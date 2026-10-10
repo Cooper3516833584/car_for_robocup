@@ -150,31 +150,29 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertNotIn("reverse_47cm", self.stage_poses)
         self.assert_safe_exit()
 
-    def test_drift_after_arrival_is_logged_and_release_waits_for_stop(self):
+    def test_position_drift_after_arrival_is_logged_without_stop_wait(self):
         self.fixture()
-        advance=self.advance
-        injected=False
-        def coast(dt):
-            nonlocal injected
-            if self.stage == 'forward_47cm' and self.runtime.motion.state is MotionActionState.CANCELLED and not injected:
-                self.pose[1] += .02
-                injected=True
-            advance(dt)
-        self.run_detour(sleep=coast)
-        self.assertTrue(injected)
+        self.run_detour(check_vision=self.drop_pose_check([0],along_error=.02))
         self.assertEqual(len(self.releases),1)
-        checks=[d for e,d in self.events if e=="payload_stop_verification"]
-        self.assertGreater(abs(checks[-1]["along_track_error_m"]),.005)
-        self.assertEqual(checks[-1]["stable_frames"],4)
+        checks=[d for e,d in self.events if e=="payload_drop_pose"]
+        self.assertAlmostEqual(checks[-1]["along_track_error_m"],.02)
+        self.assertNotIn("stable_frames",checks[-1])
         self.assert_safe_exit()
 
-    def test_release_requires_four_new_stationary_samples(self):
+    def test_release_starts_without_waiting_for_fresh_stationary_samples(self):
         self.fixture()
+        record=self.runtime.record_event
+        def observe(event, **values):
+            if event=="payload_release_start":
+                self.assertEqual(self.now,self.stage_poses["forward_47cm"].timestamp_s)
+            record(event,**values)
+        self.runtime.record_event=observe
         self.run_detour()
-        checks=[d for e,d in self.events if e=='payload_stop_verification']
-        self.assertGreaterEqual(len(checks),5)
-        self.assertEqual(checks[-1]['stable_frames'],4)
-        self.assertEqual(checks[-1]['pose_reference'],'t265_local')
+        checks=[d for e,d in self.events if e=="payload_drop_pose"]
+        self.assertEqual(len(checks),1)
+        self.assertNotIn("stable_frames",checks[-1])
+        self.assertEqual(checks[-1]["pose_reference"],"t265_local")
+        self.assertEqual(len(self.releases),1)
 
     def drop_pose_check(self, offsets, *, along_error=0., cross_error=0., measured_yaw=None):
         """Inject measured stop poses after translation has completed, before release."""
@@ -199,10 +197,10 @@ class PayloadDetourTests(unittest.TestCase):
                 self.fixture()
                 self.run_detour(check_vision=self.drop_pose_check([0],along_error=along_error,cross_error=.02))
                 self.assertEqual(len(self.releases),1)
-                checks=[d for e,d in self.events if e=="payload_stop_verification"]
-                self.assertEqual(checks[-1]["stable_frames"],4)
+                checks=[d for e,d in self.events if e=="payload_drop_pose"]
+                self.assertNotIn("stable_frames",checks[-1])
                 self.assertAlmostEqual(checks[-1]["yaw_error_rad"],0)
-                self.assertGreaterEqual(len(checks),5)
+                self.assertEqual(len(checks),1)
                 self.assert_stopped()
 
     def test_stationary_yaw_residual_is_logged_and_allows_release(self):
@@ -212,9 +210,9 @@ class PayloadDetourTests(unittest.TestCase):
                 self.run_detour(check_vision=self.drop_pose_check([offset]))
                 self.assertEqual(len(self.releases),1)
                 self.assertIn("reverse_47cm",self.stage_poses)
-                checks=[d for e,d in self.events if e=="payload_stop_verification"]
+                checks=[d for e,d in self.events if e=="payload_drop_pose"]
                 self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(offset))
-                self.assertEqual(checks[-1]["stable_frames"],4)
+                self.assertNotIn("stable_frames",checks[-1])
                 self.assertFalse(any(e=="payload_detour_failed" for e,d in self.events))
                 self.assert_safe_exit()
 
@@ -224,34 +222,34 @@ class PayloadDetourTests(unittest.TestCase):
                 self.fixture()
                 self.run_detour(check_vision=self.drop_pose_check([0],along_error=along_error,cross_error=cross_error))
                 self.assertEqual(len(self.releases),1)
-                checks=[d for e,d in self.events if e=="payload_stop_verification"]
+                checks=[d for e,d in self.events if e=="payload_drop_pose"]
                 self.assertAlmostEqual(checks[-1]["along_track_error_m"],along_error)
                 self.assertAlmostEqual(checks[-1]["cross_track_m"],cross_error)
-                self.assertEqual(checks[-1]["stable_frames"],4)
+                self.assertNotIn("stable_frames",checks[-1])
                 self.assert_safe_exit()
 
     def test_stationary_yaw_inside_tolerance_allows_release(self):
         self.fixture()
         self.run_detour(check_vision=self.drop_pose_check([2.9]))
         self.assertEqual(len(self.releases),1)
-        checks=[d for e,d in self.events if e=="payload_stop_verification"]
+        checks=[d for e,d in self.events if e=="payload_drop_pose"]
         self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(2.9))
 
     def test_release_yaw_across_pi_uses_normalized_one_degree_error(self):
         self.fixture((0,0,math.radians(89)))
         self.run_detour(check_vision=self.drop_pose_check([0],measured_yaw=-math.pi))
         self.assertEqual(len(self.releases),1)
-        checks=[d for e,d in self.events if e=="payload_stop_verification"]
+        checks=[d for e,d in self.events if e=="payload_drop_pose"]
         self.assertAlmostEqual(checks[-1]["target_yaw_rad"],math.radians(179))
         self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(1))
 
-    def test_yaw_drift_waits_for_four_stationary_samples_then_releases(self):
+    def test_release_with_yaw_residual_has_no_stationary_sample_gate(self):
         self.fixture()
-        self.run_detour(check_vision=self.drop_pose_check([2,2,2,4]))
-        checks=[d for e,d in self.events if e=="payload_stop_verification"]
+        self.run_detour(check_vision=self.drop_pose_check([4]))
+        checks=[d for e,d in self.events if e=="payload_drop_pose"]
         self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(4))
-        self.assertEqual(checks[-1]["stable_frames"],4)
-        self.assertGreaterEqual(len(checks),8)
+        self.assertNotIn("stable_frames",checks[-1])
+        self.assertEqual(len(checks),1)
         self.assertEqual(len(self.releases),1)
         self.assert_safe_exit()
 

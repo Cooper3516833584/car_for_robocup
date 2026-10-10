@@ -87,37 +87,20 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             hold_failure = exc
             raise
 
-    def verify_stopped_at_drop(A, B, side_yaw):
-        previous = None
-        stable = 0
-        deadline = clock() + 2.0
+    def record_drop_pose(A, B, side_yaw):
+        check()
+        result = _step(runtime)  # Motion cancelled: maintain zero output.
+        pose = runtime.current_local_pose(result.estimate, now_s=result.now_s)
+        if pose is None:
+            raise RuntimeError("payload release T265 unavailable")
         ux, uy = (B[0]-A[0])/settings.approach_m, (B[1]-A[1])/settings.approach_m
-        while clock() < deadline:
-            check()
-            result = _step(runtime)
-            pose = runtime.current_local_pose(result.estimate, now_s=result.now_s)
-            if pose is None:
-                raise RuntimeError("payload stop verification T265 unavailable")
-            raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
-            cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
-            yaw_error = normalize_angle_rad(pose.yaw_rad - side_yaw)
-            if previous is None or pose.timestamp_s > previous.timestamp_s:
-                speed = rate = None
-                if previous is not None and pose.timestamp_s-previous.timestamp_s <= runtime.config.fusion.t265_max_age_s:
-                    dt = pose.timestamp_s-previous.timestamp_s
-                    speed = math.hypot(pose.x_m-previous.x_m,pose.y_m-previous.y_m)/dt
-                    rate = abs((pose.yaw_rad-previous.yaw_rad+math.pi)%(2*math.pi)-math.pi)/dt
-                stable = stable+1 if speed is not None and speed <= .02 and rate <= math.radians(3) else 0
-                previous = pose
-                runtime.record_event("payload_stop_verification", pose_reference="t265_local",
-                                     raw_progress_m=raw,cross_track_m=cross,
-                                     along_track_error_m=raw-settings.approach_m,
-                                     linear_speed_m_s=speed,t265_yaw_rate_rad_s=rate,stable_frames=stable,
-                                     yaw_error_rad=yaw_error,target_yaw_rad=side_yaw)
-                if stable >= 4:
-                    return
-            sleep(PERIOD_S)
-        raise RuntimeError("payload did not settle before release timeout")
+        raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
+        cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
+        runtime.record_event("payload_drop_pose", pose_reference="t265_local",
+                             raw_progress_m=raw,cross_track_m=cross,
+                             along_track_error_m=raw-settings.approach_m,
+                             yaw_error_rad=normalize_angle_rad(pose.yaw_rad-side_yaw),
+                             target_yaw_rad=side_yaw)
 
     try:
         channel = payload_channel(settings.payload_slot)
@@ -146,7 +129,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         motion("forward_47cm", "track_local_line", A2, B2)
         runtime.motion.stop()
         runtime.drive.stop()
-        verify_stopped_at_drop(A2, B2, side_yaw)
+        record_drop_pose(A2, B2, side_yaw)
         check()
         runtime.record_event("payload_release_start", slot=settings.payload_slot, channel=channel)
         released = drop_payload(relay, settings.payload_slot, hold_s=settings.release_hold_s,

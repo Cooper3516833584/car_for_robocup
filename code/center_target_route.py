@@ -102,7 +102,7 @@ class YoloVision:
     movement. The worker cannot access the runtime or motor interfaces.
     """
 
-    def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=IMGSZ, confidence=0.5,
+    def __init__(self, weights=MODEL_PATH, camera=0, *, imgsz=IMGSZ, confidence=0.8,
                  target_region="center", drop_center_width_ratio=0.1, target_class_name=None):
         if target_region not in {"frame", "center"}:
             raise ValueError("target region must be frame or center")
@@ -161,7 +161,7 @@ class YoloVision:
                 frames += 1
                 if frames == 1:
                     print(f"[vision] cpus={cpus}; imgsz={self.imgsz}; "
-                          f"steady_threads={torch.get_num_threads()}; "
+                          f"steady_threads={torch.get_num_threads()}; confidence={self.confidence:g}; "
                           f"camera={frame.shape[1]}x{frame.shape[0]} "
                           f"fps={capture.get(cv2.CAP_PROP_FPS):g}", flush=True)
                 if frames <= 3:
