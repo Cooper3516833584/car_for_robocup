@@ -68,7 +68,7 @@ def build_parser():
     parser.add_argument("--config", default=str(ROOT / "configs/robocup_diffdrive.toml"))
     parser.add_argument("--weights", type=Path, default=MODEL_PATH)
     parser.add_argument("--camera", type=camera_value, default=0,
-                        help="camera index or stable device path used at both angles")
+                        help="camera index or stable device path used for +90 horizontal centring")
     parser.add_argument("--target-class-name", default="yellow")
     parser.add_argument("--drop-center-width-ratio", type=float, default=0.1,
                         help="horizontal trigger band, default middle 10%%; vertical position is unrestricted")
@@ -242,17 +242,17 @@ def main(argv=None):
                                        sleep=time.sleep)
             if box is not None:
                 box = fine_center_on_road(runtime, vision, box)
-            # The 0 deg refinement below opens the same camera: release it first.
+            # Blind drop needs no camera frames after horizontal centring.
             vision.close()
             if box is None:
                 runtime.record_event("ch3_drop_test_not_found", start_xy=start_xy, end_xy=end_xy)
-                print("[ch3] TARGET NOT FOUND on the search line", file=sys.stderr, flush=True)
+                print("[ch3] TARGET NOT FOUND OR NOT HORIZONTALLY CENTRED", file=sys.stderr, flush=True)
                 (log_dir / "result.txt").write_text("NOT_FOUND\n")
                 return 1
             runtime.record_event("ch3_drop_test_target", box=box)
             print(f"[ch3] TARGET CENTRED {box}", flush=True)
             runtime.record_event("ch3_drop_test_drop_start", slot=args.payload_slot)
-            print("[ch3] DROP: 7cm, left90, 0deg refine, release, fused return", flush=True)
+            print(f"[ch3] DROP: 7cm, left90, blind fused {args.drop_safe_m:g}m, release, fused return", flush=True)
             returned = perform_payload_detour(runtime, args.payload_slot, servo=servo,
                                               camera=args.camera,
                                               color=args.target_class_name or "yellow",

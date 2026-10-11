@@ -127,9 +127,9 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(kwargs["confidence"],.8)
         self.assertEqual(kwargs["target_class_name"],"yellow")
         self.assertAlmostEqual(kwargs["drop_center_width_ratio"],.1)
-        # +90 search, 0 deg refinement, then back to the +90 search angle.
+        # +90 search; blind drop never moves the camera servo.
         self.assertEqual(self.servo.set_angle.call_args_list,
-                         [call(90, settle=True), call(0, settle=True), call(90, settle=True)])
+                         [call(90, settle=True)])
         self.servo.close.assert_called_once_with(hold=True)
         self.vision.close.assert_called_once()
         calls=self.runtime.motion.track_global_line.call_args_list
@@ -147,7 +147,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertFalse(self.runtime.relay.connected)
         self.assertEqual(self.detour_caps["advance_7cm"],{.16})
         cruise_cap = self.config.drive.max_linear_speed_m_s * 2
-        self.assertEqual(self.detour_caps["safe_side_approach"],{task.DROP_FINE_SPEED_M_S,cruise_cap})
+        self.assertEqual(self.detour_caps["safe_side_approach"],{task.DROP_FINE_SPEED_M_S,.012,cruise_cap})
         # 1-2 cm refinements run at the dedicated fine speed; the release hold
         # afterwards is already back on the route drive.
         self.assertNotIn("creep_to_fallback",self.detour_caps)
@@ -186,7 +186,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         release=[v for e,v in self.events if e=='payload_release_done']
         self.assertEqual(len(release),1)
         self.assertEqual(release[0]['channel'],3)
-        self.assertTrue(any(e=='drop_align_done' and v['source']=='fused_safe_endpoint' for e,v in self.events))
+        self.assertTrue(any(e=='drop_align_done' and v['source']=='blind_fused_endpoint' for e,v in self.events))
 
     def test_unstable_zero_degree_arc_uses_fused_endpoint_and_continues_track(self):
         from components import drop_target_vision as vision
@@ -198,7 +198,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.stack.enter_context(patch.object(vision,'extract_target_arc',
             side_effect=[(209. if i%2 else 582.,300.,w) for i,w in enumerate(widths)]*100))
         self.assertEqual(self.run_main('--payload-slot','2'),0)
-        self.assertTrue(any(e=='drop_align_done' and v['source']=='fused_safe_endpoint' for e,v in self.events))
+        self.assertTrue(any(e=='drop_align_done' and v['source']=='blind_fused_endpoint' for e,v in self.events))
         starts=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
         self.assertEqual(starts,['advance_7cm','left_90deg','safe_side_approach','return_from_drop','right_90deg'])
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)

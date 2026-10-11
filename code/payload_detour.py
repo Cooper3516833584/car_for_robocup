@@ -40,7 +40,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
     """Advance 7cm, left90, approach the target, release, return, restore road yaw.
 
     Without ``fine_align`` the approach uses settings.approach_m. With it, the
-    callback owns a bounded side-axis approach and optional visual Y stop.
+    callback owns a fused side-axis approach and stopped distance verification.
     Return starts at the latest fused pose and reverses parallel to side_yaw
     into the pivot's inner cross-section before the single inward turn.
 

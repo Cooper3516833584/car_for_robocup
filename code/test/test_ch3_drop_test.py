@@ -63,7 +63,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
                            "--relay-port", "/dev/test-relay", "--weights", str(self.weights),
                            "--log-dir", str(self.log), *extra])
 
-    def test_search_then_visual_drop_then_return_finishes_the_program(self):
+    def test_search_then_blind_drop_then_return_finishes_the_program(self):
         self.fixture()
         self.assertEqual(self.run_entry("--search-distance-m", "2.5"), 0)
         self.assertEqual((self.log / "result.txt").read_text(), "FINISHED\n")
@@ -80,7 +80,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.assertAlmostEqual(end_xy[0], 1.0, delta=1e-9)
         self.assertAlmostEqual(end_xy[1], 4.5, delta=1e-9)
         self.assertEqual(self.search.call_args.kwargs["abort"] is not None, True)
-        # The drop uses the middle CH3 slot, the borrowed servo and the 0 deg camera.
+        # The drop uses the middle CH3 slot and the shared fused motion.
         self.detour.assert_called_once_with(self.runtime, 2, servo=self.servo, camera=0,
                                             color="yellow", safe_distance_m=.47)
         done = [values for event, values in self.events if event == "ch3_drop_test_drop_done"]
@@ -108,6 +108,14 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.search.assert_not_called()
         self.detour.assert_not_called()
         self.assertFalse(self.servo.start.called)
+
+    def test_horizontal_fine_alignment_failure_never_starts_blind_drop(self):
+        self.fixture()
+        self.fine.return_value = None
+        self.assertEqual(self.run_entry(), 1)
+        self.assertEqual((self.log / "result.txt").read_text(), "NOT_FOUND\n")
+        self.detour.assert_not_called()
+        self.runtime.close.assert_called_once()
 
     def test_search_failure_keeps_the_failed_result_and_closes_every_resource(self):
         self.fixture(search_error=ValueError("camera/model failure"))

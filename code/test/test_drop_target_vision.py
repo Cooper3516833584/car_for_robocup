@@ -55,7 +55,8 @@ class DropAlignLoopTests(unittest.TestCase):
         self.config = load_runtime_config()
         self.events = []
         self.chassis = ChassisModel()
-        self.runtime = SimpleNamespace(motion=SimpleNamespace(drive=self.config.drive),
+        self.runtime = SimpleNamespace(motion=SimpleNamespace(drive=self.config.drive,
+            navigation=self.config.navigation, stop=Mock()), drive=Mock(),
             clock=lambda:self.chassis.now,record_event=lambda e,**v:self.events.append((e,v)))
         self.camera = Mock()
         self.camera.read.return_value = (True,object())
@@ -68,22 +69,31 @@ class DropAlignLoopTests(unittest.TestCase):
             side_effect=lambda *_:self.chassis.arc()))
         self.opener = self.stack.enter_context(patch.object(task,"_open_yellow_camera",
             return_value=(self.camera,False)))
+        self.stack.enter_context(patch.object(task, "_step", return_value=Mock()))
+        self.stack.enter_context(patch.object(task.time, "sleep", side_effect=self.advance))
+        self.stack.enter_context(patch.object(task, "wait_for_fused_localization",
+            side_effect=lambda _:SimpleNamespace(estimate=SimpleNamespace(pose=SimpleNamespace(
+                x_m=self.chassis.pose[0], y_m=self.chassis.pose[1], yaw_rad=self.chassis.pose[2])))))
+
+    def advance(self, dt):
+        self.chassis.now += dt
 
     def align(self, **kwargs):
         return task.align_drop_position(self.runtime,self.camera,
             SimpleNamespace(x_m=0.,y_m=0.,yaw_rad=math.pi/2),0.,math.pi/2,
             self.chassis.motion,safe_distance_m=.47,**kwargs)
 
-    def test_visual_alignment_uses_y_only_and_one_continuous_line(self):
+    def test_reference_y_cannot_stop_blind_fused_approach_early(self):
         pose = self.align()
         self.assertEqual(self.chassis.stages,[("safe_side_approach","track_global_line")])
         self.assertEqual(len(self.chassis.lines),1)
         self.assertAlmostEqual(pose.x_m,0.)
-        self.assertAlmostEqual(pose.y_m,.43,delta=.025)
+        self.assertAlmostEqual(pose.y_m,.47)
         done = [v for e,v in self.events if e=="drop_align_done"][-1]
         self.assertTrue(done["success"])
-        self.assertTrue(any(v["error_x_px"]==40 for e,v in self.events
-                            if e=="drop_align_observation" and v["error_x_px"] is not None))
+        self.assertEqual(done["source"], "blind_fused_endpoint")
+        self.opener.assert_not_called()
+        self.extract.assert_not_called()
 
     def test_lost_arc_goes_to_safe_endpoint_without_turning(self):
         self.chassis.visible = False
@@ -126,11 +136,42 @@ class DropAlignLoopTests(unittest.TestCase):
                 safe_distance_m=.47)
         self.assertIs(self.runtime.motion.drive,self.config.drive)
 
-    def test_missing_reference_keeps_collecting_but_never_enables_visual_stop(self):
+    def test_terminal_speed_reduces_before_fixed_endpoint(self):
         with patch.object(task,"DROP_REFERENCE",Path("not-a-field-reference.jpg")):
             pose=self.align()
         self.assertAlmostEqual(pose.y_m,.47)
-        self.assertTrue(any(e=="drop_align_observation" for e,_ in self.events))
+        caps=[v["speed_cap_m_s"] for e,v in self.events if e=="drop_fused_tracking"]
+        self.assertEqual(set(caps), {.012, task.DROP_FINE_SPEED_M_S})
+        self.assertIs(self.runtime.motion.navigation, self.config.navigation)
+
+    def test_stop_coast_is_measured_and_corrected_parallel_to_saved_axis(self):
+        original = self.chassis.motion
+        def coast(label, method, *args, **kwargs):
+            pose = original(label, method, *args, **kwargs)
+            if label == "safe_side_approach":
+                self.chassis.pose[0] += .015  # Cross-track residual is not chased at the edge.
+                self.chassis.pose[1] += .020  # Coast visible only in stopped fusion.
+            return pose
+        self.chassis.motion = coast
+        pose = self.align()
+        self.assertAlmostEqual(pose.y_m, .47)
+        self.assertAlmostEqual(pose.x_m, .015)
+        self.assertEqual(self.chassis.stages[-1], ("drop_fused_distance_adjust", "track_global_line"))
+        start, end, reverse = self.chassis.lines[-1]
+        self.assertTrue(reverse)
+        self.assertAlmostEqual(start[0], end[0])
+
+    def test_repeated_fused_coast_prevents_release_at_wrong_reach(self):
+        original = self.chassis.motion
+        def coast(label, method, *args, **kwargs):
+            pose = original(label, method, *args, **kwargs)
+            self.chassis.pose[1] += .020
+            return pose
+        self.chassis.motion = coast
+        with self.assertRaisesRegex(RuntimeError, "within 3 mm"):
+            self.align()
+        self.assertIs(self.runtime.motion.navigation, self.config.navigation)
+        self.assertIs(self.runtime.motion.drive, self.config.drive)
 
     def test_stationary_drop_align_never_calls_motion(self):
         runtime=Mock()
@@ -246,19 +287,34 @@ class RoadAlignmentTests(unittest.TestCase):
                 self.assertEqual(self.moves[0][0],'search_gain_probe')
                 self.assertFalse(any('flip' in e for e,_ in self.events))
 
-    def test_unidentifiable_gain_and_lost_new_frames_restore_original_stop(self):
+    def test_unidentifiable_gain_and_lost_new_frames_skip_uncentred_drop(self):
         for gain,fail in ((0.,None),(-800.,1),(-800.,2)):
             with self.subTest(gain=gain,fail=fail):
                 self.fixture(gain,fail_after_moves=fail)
                 box=task.fine_center_on_road(self.runtime,self.vision,self.initial)
-                self.assertEqual(box,self.initial)
-                self.assertAlmostEqual(self.x,0.)
-                self.assertTrue(self.moves[-1][3]['reverse'])
+                self.assertIsNone(box)
+                self.assertTrue(any(e=='search_road_align_done' and not v['success']
+                                    for e,v in self.events))
 
     def test_repeated_timestamp_is_not_three_fresh_frames(self):
         self.fixture(same_timestamp=True)
-        self.assertEqual(task.fine_center_on_road(self.runtime,self.vision,self.initial),self.initial)
+        self.assertIsNone(task.fine_center_on_road(self.runtime,self.vision,self.initial))
         self.assertFalse(self.moves)
+
+    def test_search_coast_does_not_consume_gain_probe(self):
+        self.fixture()
+        initial_observation=self.vision.observe_drop
+        def observation(now):
+            if not self.moves:
+                self.x=.018  # Search has coasted while fresh images arrive.
+            return initial_observation(now)
+        self.vision.observe_drop=observation
+        box=task.fine_center_on_road(self.runtime,self.vision,self.initial)
+        self.assertIsNotNone(box)
+        probe=self.moves[0]
+        self.assertAlmostEqual(probe[1][0], .018)
+        self.assertAlmostEqual(probe[2][0]-probe[1][0], .02)
+        self.assertAlmostEqual((box[0]+box[2])/2, 320, delta=4)
 
 
 class DetourFineAlignTests(unittest.TestCase):
@@ -266,6 +322,7 @@ class DetourFineAlignTests(unittest.TestCase):
 
     def fixture(self, pose=(5., 7., math.pi / 2)):
         self.now, self.steps = 10., 0
+        self.wheel_bias = 0.
         self.pose = list(pose)
         self.releasing = False
         self.stage_poses, self.events, self.releases = {}, [], []
@@ -298,10 +355,11 @@ class DetourFineAlignTests(unittest.TestCase):
         self.steps += 1
         self.assertLess(self.steps, 15000)
         twist = self.runtime.drive.last_limited_twist
-        yaw = self.pose[2] + twist.angular_z_rad_s * dt / 2
+        omega = twist.angular_z_rad_s + self.wheel_bias * max(0., twist.linear_x_m_s)
+        yaw = self.pose[2] + omega * dt / 2
         self.pose[0] += twist.linear_x_m_s * math.cos(yaw) * dt
         self.pose[1] += twist.linear_x_m_s * math.sin(yaw) * dt
-        self.pose[2] += twist.angular_z_rad_s * dt
+        self.pose[2] += omega * dt
         self.now += dt
 
     def fine_align(self, side_pose, road_yaw, side_yaw, motion):
@@ -313,6 +371,23 @@ class DetourFineAlignTests(unittest.TestCase):
         return payload_detour.run_payload_detour(
             self.runtime, payload_detour.DetourSettings(payload_slot=2),
             clock=lambda: self.now, sleep=self.advance, fine_align=fine_align)
+
+    def test_unequal_wheels_correct_cross_track_without_extending_47cm_reach(self):
+        self.fixture(pose=(0., 0., 0.))
+        self.wheel_bias = .9  # Without steering, 47 cm curves by about 24 degrees.
+        def blind(side_pose, road_yaw, side_yaw, motion):
+            return task.align_drop_position(self.runtime, None, side_pose, road_yaw,
+                                            side_yaw, motion, safe_distance_m=.47)
+        with patch.object(task.time, "sleep", side_effect=self.advance), \
+             patch.object(task, "_open_yellow_camera", side_effect=AssertionError("blind drop")):
+            self.run_detour(blind)
+        drop=[v for e,v in self.events if e=="payload_drop_pose"][-1]
+        self.assertAlmostEqual(drop['raw_progress_m'], .47, delta=.003)
+        self.assertLess(abs(drop['cross_track_m']), .015)
+        stages=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
+        self.assertEqual(sum(s in ('left_90deg', 'right_90deg') for s in stages), 2)
+        self.assertEqual(len(self.releases), 1)
+        self.assertEqual(self.releases[0][0], 3)
 
     def test_turn_translation_3_to_8cm_uses_actual_pivot_and_only_two_turns(self):
         for drift in (.03,.05,.08):

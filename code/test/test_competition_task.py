@@ -243,11 +243,11 @@ class CompetitionTaskTests(unittest.TestCase):
             ((0.45, 0.0), (0.55, 0.0))])
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
 
-    def test_full_route_keeps_search_stop_fallback_without_reopening_camera(self):
+    def test_full_route_uses_verified_horizontal_centre_without_reopening_camera(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
-            return_value=YellowDetection(349.5, 360, 80, 80, .9)))
+            return_value=YellowDetection(320, 360, 80, 80, .9)))
         with patch.object(task,"align_yellow_drop_zone",side_effect=AssertionError("duplicate alignment")), \
              patch.object(task,"perform_payload_detour") as drop:
             task.run_full_mission(self.runtime,detector=Mock())

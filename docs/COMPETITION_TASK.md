@@ -38,20 +38,20 @@
 
 2026-10-11 修复后，中央 10% 仅触发停车。仍借用同一个 +90° YOLO worker，
 取 3 个不同时间戳的新框中心中位数；需要时在车道内先前进 2 cm 测一次像素增益，
-固定符号并沿原道路朝向正/反微调。失去可靠框或增益不可辨识时直退回原搜索停点，
-继续融合定距投放。随后前进 7 cm、只左转 90° 一次，记录实际转后 pivot。
-相机设 0°，只发起一次 pivot → `DROP_SAFE_M` 的侧向融合直线；稳定的 Y 特征
-可以提前停车，X 只记录。图像不可靠则继续到安全端点，不结束整场。
+固定符号并沿原道路朝向正/反微调到水平中心 ±4 px。探测起点使用采样后的最新融合位置。
+失去可靠框或增益不可辨识时跳过投放。随后前进 7 cm、只左转 90° 一次，记录实际转后 pivot。
+按用户最新要求，保持相机 +90°，完全按融合定位盲投；固定 pivot → `DROP_SAFE_M` 的
+侧向直线仅修正行进横偏。停车复测轴向距离，必要时沿同轴低速正/反微调，保留横向坐标。
+不再使用 0° 视觉 Y 提前停车。
 投放后从最新融合位置沿 side_yaw 平行直倒，回到 pivot 内侧截面后才右转 90°。
 靠边段没有横移、原地旋转、误差方向自动翻转或历史最佳 XY 回跑。
 
 `DROP_SAFE_M=0.47 m` 来自用户 2026-10-11 提供的安全行程；这不是软件自行认定
 47 cm 永远合法。+90° 中心暂用 `SEARCH_REFERENCE_CX=320 px`，机械补偿保留
 `DROP_ADVANCE_M=0.07 m`。侧向接近限速 0.05 m/s，返回使用原巡航上限。
-默认未启用 0° 视觉提前停车：旧照片只保留对比。先在 CH3 真正对准圆心时通过
-停车预览采集参考及前后各 2 cm 验证帧，确认拟合纵向变化稳定后，再在 PC 保存
-`assets/ch3_yellow_servo0_field_reference.jpg` 并按仓库部署流程更新。
-其它颜色、其它仓位继续融合定距。步骤和验收见
+最后 6 cm 限速 0.012 m/s；停车更新融合 0.6 s，距离容差 ±0.003 m，最多 4 次轴向微调。
+始终不能收敛则停止动作，不释放。该容差只描述融合结果，不代表物理定位精度。
+0° 参考照片仅用于独立停车预览。其它颜色、其它仓位同样融合定距。步骤和验收见
 [CH3 车道边界修复](CH3_LANE_SAFE_20261011.md)。定位损坏、设备故障、STOP、
 总超时及继电器清理保持原处理。返回车道后继续原固定路线段。
 
@@ -92,9 +92,9 @@
 | `CH3_PAYLOAD_SLOT / TARGET_COLOR` | 2 / `yellow`；正式比赛默认中间 CH3，`--payload-slot` 缺省值同为 2 |
 | `SEARCH_REFERENCE_CX / DROP_ADVANCE_M` | +90° 车道内参考中心 320 px / 机械补偿 0.07 m，待现场确认 |
 | `DROP_SAFE_M` | 0.47 m；用户 2026-10-11 提供，需重复验证停车超程、漂移和全部车轮范围 |
-| `DROP_Y_TOL_PX / DROP_FRAME_TRIES` | 10 px / 3 帧，仅用于可靠沿线提前停车 |
+| `DROP_Y_TOL_PX / DROP_FRAME_TRIES` | 10 px / 3 帧，保留独立预览接口；不参与盲投距离控制 |
 | `DROP_FINE_SPEED_M_S` | 0.05 m/s，整条侧向接近限速，不分段重启 PP |
-| `DROP_REFERENCE` | `assets/ch3_yellow_servo0_field_reference.jpg`，重新现场采集及验证后才保存；缺省不存在 |
+| `DROP_REFERENCE` | 0° 照片历史接口，仅预览；盲投不加载参考照片 |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
 | `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
 | `HC_TASK_MESSAGE_TEMPLATE` | `TASK,{red},{blue},{green}\n`，需要无人机接收程序按此格式解析 |
@@ -120,7 +120,7 @@
   `run_fixed_drop_route`、`drop_payload`、`run_full_mission`、`run_competition_stage`。
 
 `drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认2
-（中间 CH3，继电器通道 3）。完整的 0° 精对准由 `align_drop_position` 完成，可由
+（中间 CH3，继电器通道 3）。盲投的定距接近与停车复测由 `align_drop_position` 完成，可由
 `payload_detour.run_payload_detour(..., fine_align=...)` 直接调用，只使用调用方传入的
 融合运动闭包，不新建运动控制器；不传 `fine_align` 时仍走原固定 7/47 cm 往返。
 完整流程在首段移动前给所选电磁铁通电吸住；投放组件断电释放后保持 OFF，
@@ -228,12 +228,8 @@ python3 tools/run_ch3_drop_test.py --confirm-motor-test --search-distance-m 3 \
 `yellow_yolo_adapter.py` 仅提取黄色最高置信度 bbox 的中心和大小。
 `target_yolo/vision.py` 是数据标注用 HSV 代码，比赛主程序不调用它。
 
-0° 精对准另用 `components/drop_target_vision.py`（只用 OpenCV/numpy，不加载 YOLO），
-在外圆弧 HSV 范围内挑最宽的细长弧并返回弧顶 `(x, y)` 与弧宽；参考特征只在运行时
-从 `assets/ch3_yellow_servo0_reference.jpg` 提取一次，实时帧与该参考相减，不使用
-画面中心 `(320, 240)`，也不做整图模板匹配。该文件为 red/blue/green 预留了 HSV 阈值，
-但本轮只有 yellow+CH3 有现场正确参考照片，其他颜色继续使用融合回退。
-现场若发现 0° 镜头视角不同，可直接用同尺寸的新照片替换该 JPG，不新增标定配置。
+`components/drop_target_vision.py` 的 HSV 全弧拟合仅供 0° 停车预览，不控制投放运动。
+正式投放只在左转前用 YOLO 对齐水平画面中心，左转后按融合定位固定前进 47 cm。
 
 板端需要原有 OCR 环境（`requirements-task-board.txt`）和可运行既有模型的
 Ultralytics/PyTorch 环境。Ultralytics、模型和相机仅在视觉 stage 中按需加载；
