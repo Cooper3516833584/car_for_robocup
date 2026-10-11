@@ -113,11 +113,14 @@ class PayloadDetourTests(unittest.TestCase):
             with self.subTest(slot=slot):
                 self.fixture((5., 7., math.pi / 2))
                 returned = self.run_detour(DetourSettings(payload_slot=slot))
-                road = self.stage_poses["advance_7cm"]
+                road = self.stage_poses["left_90deg"]
                 side = self.stage_poses["forward_47cm"]
                 reverse = self.stage_poses["reverse_47cm"]
                 self.assertAlmostEqual(road.x_m, 5., delta=.006)
-                self.assertAlmostEqual(road.y_m, 7.07, delta=.006)
+                self.assertAlmostEqual(road.y_m, 7., delta=.006)
+                stages = [v for e,v in self.events if e == "payload_detour_stage_start"]
+                self.assertEqual(stages[0]["stage"], "left_90deg")
+                self.assertFalse(any(v["stage"] == "advance_7cm" for v in stages))
                 self.assertAlmostEqual(math.dist((road.x_m, road.y_m), (side.x_m, side.y_m)), .47, delta=.006)
                 self.assertLess(side.x_m, road.x_m - .45)
                 self.assertLess(math.dist((road.x_m, road.y_m), (reverse.x_m, reverse.y_m)), .03)
@@ -126,7 +129,7 @@ class PayloadDetourTests(unittest.TestCase):
                 self.assert_safe_exit()
 
     def test_abort_at_each_moving_stage_stops_and_switches_all_relays_off(self):
-        for stage in ("advance_7cm", "left_90deg", "forward_47cm", "reverse_47cm", "right_90deg"):
+        for stage in ("left_90deg", "forward_47cm", "reverse_47cm", "right_90deg"):
             with self.subTest(stage=stage):
                 self.fixture()
 
@@ -278,17 +281,17 @@ class PayloadDetourTests(unittest.TestCase):
         self.runtime.motion.track_global_line = Mock(wraps=global_line)
         self.runtime.motion.track_local_line = Mock(side_effect=AssertionError("local distance reference"))
         returned = self.run_detour()
-        road = self.stage_poses["advance_7cm"]
+        road = self.stage_poses["left_90deg"]
         side = self.stage_poses["forward_47cm"]
-        self.assertAlmostEqual(road.y_m, 7.07, delta=.006)
+        self.assertAlmostEqual(road.y_m, 7., delta=.006)
         self.assertAlmostEqual(side.x_m, road.x_m - .47, delta=.006)
         self.assertLess(math.dist((returned.x_m, returned.y_m), (road.x_m, road.y_m)), .03)
         calls = self.runtime.motion.track_global_line.call_args_list
-        self.assertEqual(len(calls), 3)
-        back_start,back_end=calls[2].args
+        self.assertEqual(len(calls), 2)
+        back_start,back_end=calls[1].args
         self.assertAlmostEqual(back_start[1],back_end[1])
-        self.assertAlmostEqual(back_end[0],calls[1].args[0][0])
-        self.assertTrue(calls[2].kwargs["reverse"])
+        self.assertAlmostEqual(back_end[0],calls[0].args[0][0])
+        self.assertTrue(calls[1].kwargs["reverse"])
         self.assertTrue(all(d["pose_reference"] == "fused" for e,d in self.events
                             if e in {"payload_detour_stage_start", "payload_drop_pose"}))
         self.assert_safe_exit()
@@ -483,11 +486,11 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertTrue(before_center_speeds)
         self.assertLessEqual(max(before_center_speeds), .081)
-        road = self.stage_poses["advance_7cm"]
-        self.assertAlmostEqual(road.x_m, .77, delta=.012)
+        road = self.stage_poses["left_90deg"]
+        self.assertAlmostEqual(road.x_m, .70, delta=.012)
         self.assertIs(self.runtime.motion.drive, original)
 
-    def test_visible_target_slow_cap_only_applies_to_patrol_and_extra_7cm(self):
+    def test_visible_target_slow_cap_only_applies_to_patrol_before_direct_turn(self):
         self.fixture(started=False)
         original = self.runtime.motion.drive
         advance = self.advance
@@ -495,18 +498,15 @@ class PayloadDetourTests(unittest.TestCase):
         vision = self.vision(lambda: BOX if self.pose[0] > .5 or self.releases else None)
 
         def check_speed_scope(dt):
-            if (self.stage in ("advance_7cm", "left_90deg", "forward_47cm", "reverse_47cm", "right_90deg")
+            if (self.stage in ("left_90deg", "forward_47cm", "reverse_47cm", "right_90deg")
                     and self.runtime.motion.navigation is not self.original_navigation):
                 stages_seen.add(self.stage)
-                if self.stage == "advance_7cm":
-                    self.assertLessEqual(self.runtime.motion.drive.max_linear_speed_m_s, .08)
-                else:
-                    self.assertIs(self.runtime.motion.drive, original)
+                self.assertIs(self.runtime.motion.drive, original)
             advance(dt)
 
         route.run_route(self.runtime, vision, None, detour=DetourSettings(),
                         clock=lambda: self.now, sleep=check_speed_scope)
-        self.assertEqual(stages_seen, {"advance_7cm", "left_90deg", "forward_47cm",
+        self.assertEqual(stages_seen, {"left_90deg", "forward_47cm",
                                       "reverse_47cm", "right_90deg"})
         self.assertIs(self.runtime.motion.drive, original)
         self.assert_safe_exit()

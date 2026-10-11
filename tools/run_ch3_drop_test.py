@@ -4,7 +4,7 @@
 Flow: hold the selected magnet -> camera servo to the search angle (+90) ->
 drive forward along the current fused heading while YOLO looks for the target ->
 the horizontally centred target stops the car and starts the shared fused
-payload detour (7 cm advance, left 90, one measured side line, release, straight
+payload detour (left 90 at the centred stop, one measured side line, release, straight
 reverse into the lane, road heading restored) -> stop, release the relay, exit.
 
 No task board, no HC radio and no competition lane: the search line is derived
@@ -252,7 +252,7 @@ def main(argv=None):
             runtime.record_event("ch3_drop_test_target", box=box)
             print(f"[ch3] TARGET CENTRED {box}", flush=True)
             runtime.record_event("ch3_drop_test_drop_start", slot=args.payload_slot)
-            print(f"[ch3] DROP: 7cm, left90, blind fused {args.drop_safe_m:g}m, release, fused return", flush=True)
+            print(f"[ch3] DROP: left90 at centred stop, blind fused {args.drop_safe_m:g}m, release, fused return", flush=True)
             returned = perform_payload_detour(runtime, args.payload_slot, servo=servo,
                                               camera=args.camera,
                                               color=args.target_class_name or "yellow",

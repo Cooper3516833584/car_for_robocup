@@ -404,7 +404,7 @@ class DetourFineAlignTests(unittest.TestCase):
                 self.run_detour(self.fine_align)
                 self.assertEqual(len(locations),2)
                 pivot=self.stage_poses['left_90deg']
-                road=self.stage_poses['advance_7cm']
+                road=next(v['pose'] for e,v in self.events if e=='payload_detour_road_pose')
                 self.assertAlmostEqual(pivot.y_m-road.y_m,drift,delta=.001)
                 starts={v['stage']:v for e,v in self.events if e=='payload_detour_stage_start'}
                 self.assertEqual(starts['safe_side_approach']['args'][0],(pivot.x_m,pivot.y_m))
@@ -441,7 +441,7 @@ class DetourFineAlignTests(unittest.TestCase):
         returned = self.run_detour(self.fine_align)
         starts = {values["stage"]: values for event, values in self.events
                   if event == "payload_detour_stage_start"}
-        self.assertIn("advance_7cm", starts)
+        self.assertNotIn("advance_7cm", starts)
         self.assertIn("safe_side_approach", starts)
         self.assertNotIn("forward_47cm", starts)
         turn_xy = starts["safe_side_approach"]["args"][0]

@@ -39,7 +39,7 @@
 2026-10-11 修复后，中央 10% 仅触发停车。仍借用同一个 +90° YOLO worker，
 取 3 个不同时间戳的新框中心中位数；需要时在车道内先前进 2 cm 测一次像素增益，
 固定符号并沿原道路朝向正/反微调到水平中心 ±4 px。探测起点使用采样后的最新融合位置。
-失去可靠框或增益不可辨识时跳过投放。随后前进 7 cm、只左转 90° 一次，记录实际转后 pivot。
+失去可靠框或增益不可辨识时跳过投放。居中后直接左转 90° 一次，记录实际转后 pivot。
 按用户最新要求，保持相机 +90°，完全按融合定位盲投；固定 pivot → `DROP_SAFE_M` 的
 侧向直线仅修正行进横偏。停车复测轴向距离，必要时沿同轴低速正/反微调，保留横向坐标。
 不再使用 0° 视觉 Y 提前停车。
@@ -47,8 +47,8 @@
 靠边段没有横移、原地旋转、误差方向自动翻转或历史最佳 XY 回跑。
 
 `DROP_SAFE_M=0.47 m` 来自用户 2026-10-11 提供的安全行程；这不是软件自行认定
-47 cm 永远合法。+90° 中心暂用 `SEARCH_REFERENCE_CX=320 px`，机械补偿保留
-`DROP_ADVANCE_M=0.07 m`。侧向接近限速 0.05 m/s，返回使用原巡航上限。
+47 cm 永远合法。+90° 中心使用 `SEARCH_REFERENCE_CX=320 px`，按用户要求已删除
+居中后的 7 cm 机械补偿。侧向接近限速 0.05 m/s，返回使用原巡航上限。
 最后 6 cm 限速 0.012 m/s；停车更新融合 0.6 s，距离容差 ±0.003 m，最多 4 次轴向微调。
 始终不能收敛则停止动作，不释放。该容差只描述融合结果，不代表物理定位精度。
 0° 参考照片仅用于独立停车预览。其它颜色、其它仓位同样融合定距。步骤和验收见
@@ -90,7 +90,7 @@
 | `SHORT_MOVE_TOLERANCE_M` | 当前 0.005 m；短距离动作使用融合位置，按纵向距离完成，动作后恢复配置；到位后不转向追点 |
 | `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 选项1/2/3对应右前CH2/中间CH3/左前CH4、False（通电吸住/断电释放）、0.5 s；与组件及路线测试共用已确认接线 |
 | `CH3_PAYLOAD_SLOT / TARGET_COLOR` | 2 / `yellow`；正式比赛默认中间 CH3，`--payload-slot` 缺省值同为 2 |
-| `SEARCH_REFERENCE_CX / DROP_ADVANCE_M` | +90° 车道内参考中心 320 px / 机械补偿 0.07 m，待现场确认 |
+| `SEARCH_REFERENCE_CX` | +90° 画面水平中心 320 px；居中后直接左转，没有前进补偿 |
 | `DROP_SAFE_M` | 0.47 m；用户 2026-10-11 提供，需重复验证停车超程、漂移和全部车轮范围 |
 | `DROP_Y_TOL_PX / DROP_FRAME_TRIES` | 10 px / 3 帧，保留独立预览接口；不参与盲投距离控制 |
 | `DROP_FINE_SPEED_M_S` | 0.05 m/s，整条侧向接近限速，不分段重启 PP |
@@ -122,7 +122,7 @@
 `drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认2
 （中间 CH3，继电器通道 3）。盲投的定距接近与停车复测由 `align_drop_position` 完成，可由
 `payload_detour.run_payload_detour(..., fine_align=...)` 直接调用，只使用调用方传入的
-融合运动闭包，不新建运动控制器；不传 `fine_align` 时仍走原固定 7/47 cm 往返。
+融合运动闭包，不新建运动控制器；不传 `fine_align` 时同样直接左转，再固定 47 cm 往返。
 完整流程在首段移动前给所选电磁铁通电吸住；投放组件断电释放后保持 OFF，
 异常和键盘中断也尝试关闭所选路；完整 runtime 负责继电器统一
 退出。CLI 的独立 drop 阶段自己负责 `all_off()` 和关闭串口，包含失败/中断退出，
@@ -189,7 +189,7 @@ python3 code/main_robocup.py --mode hardware-mission --competition --yellow-mode
 python3 code/main_robocup.py --mode hardware-mission --competition --speed-scale 2 --release-mode simulate
 
 # 单项测试程序：舵机 +90° → 通电吸住所选仓位 → 沿当前融合朝向边走边找目标
-# → 目标横向居中后停车 → 7 cm / 左转 90° / 0° 视觉精对准 → 释放 → 融合返回 → 结束。
+# → 目标横向居中后停车 → 直接左转 90° / 融合盲投 47 cm → 释放 → 融合返回 → 结束。
 # 不走任务板、HC、车道和终点；搜索线由当前位姿生成，不读比赛路线常量。
 python3 tools/run_ch3_drop_test.py --confirm-motor-test --search-distance-m 3 \
   --payload-slot 2 --release-mode relay --relay-port /dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0 \

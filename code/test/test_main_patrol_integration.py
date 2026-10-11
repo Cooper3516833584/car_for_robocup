@@ -145,7 +145,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
         self.assertFalse(any(self.runtime.relay._states.values()))
         self.assertFalse(self.runtime.relay.connected)
-        self.assertEqual(self.detour_caps["advance_7cm"],{.16})
+        self.assertNotIn("advance_7cm", self.detour_caps)
         cruise_cap = self.config.drive.max_linear_speed_m_s * 2
         self.assertEqual(self.detour_caps["safe_side_approach"],{task.DROP_FINE_SPEED_M_S,.012,cruise_cap})
         # 1-2 cm refinements run at the dedicated fine speed; the release hold
@@ -182,7 +182,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task,'_open_yellow_camera',side_effect=OSError('camera lost')))
         self.assertEqual(self.run_main('--payload-slot','2'),0)
         stages=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
-        self.assertEqual(stages,['advance_7cm','left_90deg','safe_side_approach','return_from_drop','right_90deg'])
+        self.assertEqual(stages,['left_90deg','safe_side_approach','return_from_drop','right_90deg'])
         release=[v for e,v in self.events if e=='payload_release_done']
         self.assertEqual(len(release),1)
         self.assertEqual(release[0]['channel'],3)
@@ -200,7 +200,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.run_main('--payload-slot','2'),0)
         self.assertTrue(any(e=='drop_align_done' and v['source']=='blind_fused_endpoint' for e,v in self.events))
         starts=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
-        self.assertEqual(starts,['advance_7cm','left_90deg','safe_side_approach','return_from_drop','right_90deg'])
+        self.assertEqual(starts,['left_90deg','safe_side_approach','return_from_drop','right_90deg'])
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_worker_failure_stops_and_closes_vision_and_servo(self):

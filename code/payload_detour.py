@@ -17,7 +17,6 @@ PERIOD_S = 0.05
 @dataclass(frozen=True)
 class DetourSettings:
     payload_slot: int = 1  # 1=右前CH2，2=中间CH3，3=左前CH4；CH1无电磁铁。
-    advance_m: float = 0.07
     approach_m: float = 0.47
     release_hold_s: float = 0.5
     position_tolerance_m: float = 0.005
@@ -28,7 +27,7 @@ class DetourSettings:
         if (isinstance(self.payload_slot, bool) or not isinstance(self.payload_slot, int)
                 or self.payload_slot not in (1, 2, 3)):
             raise ValueError("payload slot must be 1, 2 or 3")
-        for name in ("advance_m", "approach_m", "release_hold_s", "position_tolerance_m",
+        for name in ("approach_m", "release_hold_s", "position_tolerance_m",
                      "patrol_slow_speed_m_s"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -37,7 +36,7 @@ class DetourSettings:
 def run_payload_detour(runtime, settings, *, guard=lambda: None,
                        check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
                        travel_drive=None, fine_align=None):
-    """Advance 7cm, left90, approach the target, release, return, restore road yaw.
+    """Left90 at the centred stop, approach, release, return, restore road yaw.
 
     Without ``fine_align`` the approach uses settings.approach_m. With it, the
     callback owns a fused side-axis approach and stopped distance verification.
@@ -138,10 +137,6 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         entry = _step(runtime)
         road_pose = fused_pose(entry)
         road_yaw = road_pose.yaw_rad
-        start = (road_pose.x_m, road_pose.y_m)
-        road_end = (start[0] + settings.advance_m * math.cos(road_yaw),
-                    start[1] + settings.advance_m * math.sin(road_yaw))
-        motion("advance_7cm", "track_global_line", start, road_end)
         runtime.record_event("payload_detour_road_pose", pose=road_pose, pose_reference="fused")
         runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
         side_yaw = road_yaw + math.pi / 2

@@ -95,9 +95,8 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
 CH3_PAYLOAD_SLOT = 2  # CH3 = middle electromagnet = relay channel 3.
-SEARCH_REFERENCE_CX = 320.0  # Calibrate at +90 deg before the 7 cm compensation.
+SEARCH_REFERENCE_CX = 320.0  # Horizontal camera centre at +90 deg.
 DROP_SAFE_M = 0.47       # Operator-provided safe pivot-to-drop travel, 2026-10-11.
-DROP_ADVANCE_M = 0.07    # Keep the existing mechanical compensation until measured.
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
 DROP_TERMINAL_RANGE_M = 0.06
@@ -772,10 +771,10 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
 
 def perform_payload_detour(runtime, slot=CH3_PAYLOAD_SLOT, *, servo=None, camera=None,
                            color=TARGET_COLOR, safe_distance_m=None):
-    """Road advance, one outward turn, side line, reverse, one inward turn."""
+    """Turn at the centred stop, side line, reverse, one inward turn."""
     from payload_detour import DetourSettings, run_payload_detour
     settings = DetourSettings(
-        payload_slot=slot, advance_m=DROP_ADVANCE_M,
+        payload_slot=slot,
         approach_m=DROP_SAFE_M if safe_distance_m is None else safe_distance_m,
         release_hold_s=PAYLOAD_RELEASE_HOLD_S,
         verify_relay=runtime.config.relay.verify_writes,
