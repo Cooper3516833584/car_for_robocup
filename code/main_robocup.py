@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-board-turn-deg", type=float,
                         help="measured signed chassis turn toward the board, required with --task-board-camera")
     parser.add_argument("--task-board-debug-dir", type=Path, help="optional task-board images and OCR evidence")
+    parser.add_argument("--task-red-count", type=int, help="hc-send only: actual red quota")
+    parser.add_argument("--task-blue-count", type=int, help="hc-send only: actual blue quota")
+    parser.add_argument("--task-green-count", type=int, help="hc-send only: actual green quota")
     parser.add_argument("--competition", action="store_true", help="run the complete competition mission (hardware-mission)")
     parser.add_argument("--competition-stage", choices=(
         "full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
@@ -98,7 +101,8 @@ def run_direct_competition_stage(args) -> int:
     if stage == "hc-send":
         from components.task_board_reader import TaskCounts
 
-        ok = task.send_task_to_drone_once(TaskCounts(*task.TASK_BOARD_FALLBACK))
+        counts = TaskCounts(args.task_red_count, args.task_blue_count, args.task_green_count)
+        ok = task.send_task_to_drone_once(counts, start_drone=False)
         return 0 if ok is True else 1
     if stage == "yellow-detect":
         detector = task.load_detector(args.yellow_model or task.YELLOW_MODEL_PATH)

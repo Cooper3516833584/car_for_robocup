@@ -201,9 +201,9 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertEqual(detect.call_count, 3)
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
-    def test_full_route_continues_after_hc_failure_but_stops_on_payload_failure(self):
+    def test_full_route_stops_on_payload_failure_after_confirmed_handoff(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
-        send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
             return_value=YellowDetection(320, 240, 80, 80, 0.9)))
         drop = self.stack.enter_context(patch.object(self.runtime.relay, "turn_off", return_value=False))
@@ -234,7 +234,7 @@ class CompetitionTaskTests(unittest.TestCase):
 
     def test_full_route_uses_measured_lane_segments(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
-        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
         with patch.object(task, "track_lane_line", wraps=task.track_lane_line) as follow:
             task.run_full_mission(self.runtime, detector=None)
         self.assertEqual([(c.args[1], c.args[2]) for c in follow.call_args_list], [
@@ -245,7 +245,7 @@ class CompetitionTaskTests(unittest.TestCase):
 
     def test_full_route_uses_verified_horizontal_centre_without_reopening_camera(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
-        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
             return_value=YellowDetection(320, 360, 80, 80, .9)))
         with patch.object(task,"align_yellow_drop_zone",side_effect=AssertionError("duplicate alignment")), \
@@ -268,7 +268,7 @@ class CompetitionTaskTests(unittest.TestCase):
 
     def test_full_route_without_yellow_skips_drop_and_finishes(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
-        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
+        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
         drop = self.stack.enter_context(patch.object(task, "perform_payload_detour"))
         task.run_full_mission(self.runtime, detector=None)
         drop.assert_not_called()
@@ -366,7 +366,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "_open_yellow_camera", return_value=(Mock(), False)))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=(
             YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
-        self.stack.enter_context(patch.object(task, "send_task_once", return_value=hc_ok))
+        self.stack.enter_context(patch.object(task, "send_task_and_start", return_value=hc_ok))
         def detour(runtime, slot, **_kwargs):
             if not drop_ok:
                 runtime.mission.request_safe_stop("payload release was not confirmed")
@@ -389,8 +389,8 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertFalse(self.runtime.is_running)
         return drop
 
-    def test_full_cli_hc_failure_still_returns_success(self):
-        self._run_full_cli(hc_ok=False)
+    def test_full_cli_hc_failure_stops_before_next_stage(self):
+        self._run_full_cli(hc_ok=False, expected_code=1).assert_not_called()
 
     def test_full_cli_yellow_missing_still_returns_success(self):
         self._run_full_cli(found=False).assert_not_called()
@@ -434,11 +434,11 @@ class CompetitionTaskTests(unittest.TestCase):
             go.assert_not_called()
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
-    def test_full_cli_ocr_fallback_still_returns_success(self):
+    def test_full_cli_ocr_failure_never_sends_fallback_to_drone(self):
         with self.assertLogs("competition_task", level="WARNING") as logs:
-            self._run_full_cli(ocr_ok=False)
-        self.assertEqual(self.runtime.mission.task_counts.key, (1, 2, 1))
-        self.assertTrue(any("using fallback task" in message for message in logs.output))
+            self._run_full_cli(ocr_ok=False, expected_code=1).assert_not_called()
+        self.assertIsNone(self.runtime.mission.task_counts)
+        self.assertFalse(any("using fallback task" in message for message in logs.output))
 
     def test_full_cli_does_not_report_success_before_finish(self):
         with patch("main_robocup.build_runtime", return_value=self.runtime), \

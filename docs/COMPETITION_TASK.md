@@ -4,7 +4,7 @@
 融合定位、BasicMotionController、DifferentialDrive、OCR、HC15SerialDriver、LCUSRelay。
 本次任务层整合未改动 D500/T265/融合算法、C10B 帧发送器或底盘 watchdog。
 
-完整流程：等待融合定位 → 车道入口 → 任务板观察点 → OCR → HC 单发 → 第一转角
+完整流程：等待融合定位 → 车道入口 → 任务板观察点 → OCR → 无人机配额/启动确认 → 第一转角
 → 横向车道 → 连续黄色搜索至画面横向中部 → 融合位置投放往返（含 0° 视觉精对准）
 → 第二转角 → 终点坐标停车。
 
@@ -96,8 +96,8 @@
 | `DROP_FINE_SPEED_M_S` | 0.05 m/s，整条侧向接近限速，不分段重启 PP |
 | `DROP_REFERENCE` | 0° 照片历史接口，仅预览；盲投不加载参考照片 |
 | `TASK_BOARD_CAMERA / YELLOW_CAMERA` | 当前索引 0，现场优先填稳定的设备路径 |
-| `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | 用户于 2026-10-07 确认 raw / 115200，默认 `/dev/ttyS4` |
-| `HC_TASK_MESSAGE_TEMPLATE` | `TASK,{red},{blue},{green}\n`，需要无人机接收程序按此格式解析 |
+| `HC_BRIDGE_ENVELOPE / HC_BAUDRATE` | FleetBus BB33 封装 / 115200，默认 `/dev/ttyS4`，机端经飞控 UART2 |
+| `HC_RESPONSE_TIMEOUT_S / HC_COMMAND_RETRIES` | 6 秒 / 3 次重传，实际配额确认保存后才发匹配启动 |
 | `YELLOW_MODEL_PATH` | 仓库已有 `models/best_car.pt`，与路线测试和实测使用相同权重；可用 `--yellow-model` 覆盖 |
 
 这些数值尚未完成实车路线验收。全零坐标会产生零长度车道段，现有 motion 会拒绝，
@@ -160,8 +160,8 @@ CLI 加载的 detector 复用路线测试的 CPU 优化：单线程推理，临�
 # 车停在任务板观察位置，只读 OCR，不导航、不发 HC。
 python3 code/main_robocup.py --competition-stage task-board --task-board-camera 0
 
-# 单发一次；独立进程没有已读任务时使用顶部 fallback=(1,2,1)，不自动 OCR。
-python3 code/main_robocup.py --competition-stage hc-send
+# 独立下发明确配额并等保存确认；不请求起飞、不自动 OCR。
+python3 code/main_robocup.py --competition-stage hc-send --task-red-count 2 --task-blue-count 1 --task-green-count 1
 
 # 只看黄色目标，车不动。沿用已有权重，不训练或下载模型。
 python3 code/main_robocup.py --competition-stage yellow-detect --yellow-model /absolute/path/best_car.pt
@@ -218,7 +218,7 @@ python3 tools/run_ch3_drop_test.py --confirm-motor-test --search-distance-m 3 \
 | `drop-route` | 0，所有固定动作正常完成 | 1，动作失败或异常 |
 | 其它运动阶段 | 0，正常完成 | 1，runtime safe-stop/error 或异常 |
 
-键盘中断或 SIGTERM 退出码为 130。full 的 OCR/HC/未找到黄色目标沿用比赛容错规则；
+键盘中断或 SIGTERM 退出码为 130。full 的 OCR 或配额/启动确认失败会结束任务；未找到黄色目标仍跳过小车投放；
 完成到终点才返回 0，runtime safety stop/error 或未完成返回 1。
 
 ## 视觉资产与依赖
@@ -237,7 +237,7 @@ Ultralytics/PyTorch 环境。Ultralytics、模型和相机仅在视觉 stage 中
 
 ## 失败与日志
 
-OCR 重试失败返回 `(1,2,1)`；HC 单发失败继续路线；黄色未找到或对齐失败跳过投放；
+完整比赛 OCR 重试失败或无人机配额/启动未确认会停车结束任务，不发 fallback；独立 task-board 调试保留 `(1,2,1)` 显示；黄色未找到或对齐失败跳过投放；
 继电器投放或回读失败结束任务，不继续第二转角和终点。`cy` 仅记录，不作投放条件。
 
 融合定位短暂掉线沿用 runtime 的停车和恢复策略；完全失效由原安全路径结束。
@@ -247,7 +247,7 @@ OCR 重试失败返回 `(1,2,1)`；HC 单发失败继续路线；黄色未找到
 使用 runtime 的比赛阶段默认事件文件为 `logs/competition/events.jsonl`，也可传
 `--log-dir` 选择目录。四个 direct 阶段直接在终端报告结果，不创建定位事件日志。
 事件包括阶段开始/完成、任务数量及 fallback、HC 内容/结果、黄色中心、对齐误差、
-固定动作、投放结果和终点实际坐标。HC 的 success 表示本地 write 完成，不代表接收
+固定动作、投放结果和终点实际坐标。HC 的 success 表示无人机配额已保存且匹配启动请求已确认（独立 hc-send 仅确认配额），不代表投放
 确认；整场投放要求继电器驱动状态回读确认。
 
 ## 无硬件验收
@@ -295,7 +295,9 @@ git diff --check
 789 项通过、16 项因环境限制跳过。compileall、git diff --check 和原有 dry-run
 均通过。本轮未操作真实相机、串口、继电器或电机。
 
-## 待做的 HC 现场完整行验收
+## 历史 HC ASCII 现场完整行验收
+
+2026-10-11 已改为 FleetBus 两步确认，当前接口和无硬件联测见 [DROP_TASK_LINK.md](DROP_TASK_LINK.md)。以下为旧 ASCII 发送记录，不再作为正式通信协议。
 
 本轮没有改变 HC 协议或增加发送后的等待。现场独立发送 **20 次** `TASK,2,1,1\n`，
 使用现有 `send_task_to_drone_once(TaskCounts(2,1,1))`，每次都执行当前的

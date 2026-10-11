@@ -56,14 +56,22 @@ class DirectCompetitionStageTests(unittest.TestCase):
 
     def test_direct_hc_sends_once_and_reports_success_or_failure(self):
         for success in (True, False):
-            with self.subTest(success=success), patch.object(task, "send_task_once", return_value=success) as send:
-                self.assertEqual(main(["--competition-stage", "hc-send"]), 0 if success else 1)
+            with self.subTest(success=success), patch.object(task, "send_task_and_start", return_value=success) as send:
+                self.assertEqual(main(["--competition-stage", "hc-send", "--task-red-count", "2",
+                                       "--task-blue-count", "1", "--task-green-count", "1"]), 0 if success else 1)
                 send.assert_called_once()
-                self.assertEqual(send.call_args.args[0].key, (1, 2, 1))
-                self.assertFalse(send.call_args.kwargs["bridge_envelope"])
+                self.assertEqual(send.call_args.args[0].key, (2, 1, 1))
+                self.assertFalse(send.call_args.kwargs["start_drone"])
                 self.assertEqual(send.call_args.kwargs["baudrate"], 115200)
         self.loader.assert_not_called()
         self.factory.assert_not_called()
+
+    def test_direct_hc_missing_or_invalid_quota_never_sends(self):
+        with patch.object(task, "send_task_and_start") as send, self.assertLogs(level="ERROR"):
+            self.assertEqual(main(["--competition-stage", "hc-send"]), 1)
+            self.assertEqual(main(["--competition-stage", "hc-send", "--task-red-count", "1",
+                                   "--task-blue-count", "1", "--task-green-count", "1"]), 1)
+            send.assert_not_called()
 
     def test_yellow_detection_loads_once_and_releases_camera(self):
         detection = YellowDetection(640, 360, 80, 80, 0.9)

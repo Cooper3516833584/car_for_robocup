@@ -11,7 +11,7 @@ import sys
 import time
 
 from components.basic_motion_controller import MotionActionState
-from components.hc_task_sender import build_task_message, send_task_once
+from components.fleet_task_sender import send_task_and_start
 from components.payload_task import drop_payload as release_payload
 from components.payload_task import (PAYLOAD_ACTIVE_ON as DEFAULT_PAYLOAD_ACTIVE_ON,
                                      PAYLOAD_SLOT_TO_RELAY as DEFAULT_PAYLOAD_SLOT_TO_RELAY,
@@ -67,10 +67,11 @@ TASK_BOARD_FALLBACK = (1, 2, 1)
 
 HC_PORT = "/dev/ttyS4"
 HC_BAUDRATE = 115200
-# Confirmed by the operator on 2026-10-07: raw ASCII, 115200.
-HC_BRIDGE_ENVELOPE = False
-HC_TASK_MESSAGE_TEMPLATE = "TASK,{red},{blue},{green}\n"
+# FleetBus uses the BB33 bridge shared with the drone's FC UART2.
+HC_BRIDGE_ENVELOPE = True
 HC_CONNECT_WAIT_S = 2.0
+HC_RESPONSE_TIMEOUT_S = 6.0
+HC_COMMAND_RETRIES = 3
 
 # Use the same existing, deployed weights as the measured route test.
 # The model is not trained or downloaded by this program.
@@ -246,7 +247,7 @@ def go_to_task_board(runtime):
     return result
 
 
-def read_task_board(camera=None, *, reader=None, runtime=None):
+def read_task_board(camera=None, *, reader=None, runtime=None, allow_fallback=True):
     from components.task_board_reader import TaskBoardReader, TaskCounts
     camera = TASK_BOARD_CAMERA if camera is None else camera
     if runtime is not None:
@@ -270,6 +271,8 @@ def read_task_board(camera=None, *, reader=None, runtime=None):
             LOG.warning("task-board attempt %d: %s", attempt + 1, reason)
         if attempt + 1 < TASK_BOARD_MAX_TRIES:
             time.sleep(TASK_BOARD_RETRY_DELAY_S)
+    if not allow_fallback:
+        raise RuntimeError("actual task-board counts unavailable: " + reason)
     counts = TaskCounts(*TASK_BOARD_FALLBACK)
     LOG.warning("using fallback task %s: %s", counts.as_dict(), reason)
     if runtime is not None:
@@ -277,17 +280,15 @@ def read_task_board(camera=None, *, reader=None, runtime=None):
     return counts
 
 
-def send_task_to_drone_once(counts, *, runtime=None):
-    ok = send_task_once(counts, port=HC_PORT, baudrate=HC_BAUDRATE,
-                        bridge_envelope=HC_BRIDGE_ENVELOPE,
-                        connect_wait_s=HC_CONNECT_WAIT_S, template=HC_TASK_MESSAGE_TEMPLATE)
+def send_task_to_drone_once(counts, *, runtime=None, start_drone=True):
+    """One logical handoff: actual quotas ACK, then matching start ACK."""
+    ok = send_task_and_start(counts, port=HC_PORT, baudrate=HC_BAUDRATE,
+                            connect_wait_s=HC_CONNECT_WAIT_S,
+                            response_timeout_s=HC_RESPONSE_TIMEOUT_S, retries=HC_COMMAND_RETRIES,
+                            start_drone=start_drone)
     if runtime is not None:
-        try:
-            message = build_task_message(counts, HC_TASK_MESSAGE_TEMPLATE).decode("ascii")
-        except Exception:
-            message = None
         runtime.record_event("hc_task_send", **counts.as_dict(), success=ok,
-                             message=message,
+                             protocol="FleetBus", start_confirmed=ok and start_drone,
                              bridge_envelope=HC_BRIDGE_ENVELOPE)
     return ok
 
@@ -870,9 +871,18 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
     try:
         _stage(runtime, "lane", lambda: go_to_lane(runtime))
         _stage(runtime, "task-board-position", lambda: go_to_task_board(runtime))
-        counts = _stage(runtime, "task-board", lambda: read_task_board(task_camera, runtime=runtime))
+        try:
+            counts = _stage(runtime, "task-board", lambda: read_task_board(
+                task_camera, runtime=runtime, allow_fallback=False))
+        except Exception:
+            runtime.drive.stop()
+            runtime.mission.request_safe_stop("actual task-board counts unavailable")
+            raise
         runtime.mission.set_task_counts(counts)
-        _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime))
+        if _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime)) is not True:
+            runtime.drive.stop()
+            runtime.mission.request_safe_stop("drone task/start was not confirmed")
+            raise RuntimeError("drone task/start was not confirmed")
         _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
         _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
         detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
@@ -925,9 +935,10 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
                                 yellow_camera=yellow_camera, detector=detector, slot=slot,
                                 color=color)
     if stage == "hc-send":
-        from components.task_board_reader import TaskCounts
+        if runtime.mission.task_counts is None:
+            raise RuntimeError("hc-send requires actual task counts")
         return _stage(runtime, stage, lambda: send_task_to_drone_once(
-            runtime.mission.task_counts or TaskCounts(*TASK_BOARD_FALLBACK), runtime=runtime))
+            runtime.mission.task_counts, runtime=runtime, start_drone=False))
     if stage == "task-board":
         # Read-only stage: no navigation to the observation point.
         return _stage(runtime, stage, lambda: read_task_board(task_camera, runtime=runtime))
