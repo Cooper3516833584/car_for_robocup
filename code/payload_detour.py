@@ -17,7 +17,7 @@ PERIOD_S = 0.05
 @dataclass(frozen=True)
 class DetourSettings:
     payload_slot: int = 1  # 1=右前CH2，2=中间CH3，3=左前CH4；CH1无电磁铁。
-    approach_m: float = 0.47
+    approach_m: float = 0.43
     release_hold_s: float = 0.5
     position_tolerance_m: float = 0.005
     verify_relay: bool = True
@@ -148,7 +148,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if fine_align is None:
             B2 = (A2[0] + settings.approach_m * math.cos(side_yaw),
                   A2[1] + settings.approach_m * math.sin(side_yaw))
-            motion("forward_47cm", "track_global_line", A2, B2)
+            motion("forward_to_drop", "track_global_line", A2, B2)
         else:
             # The callback only drives through this fused motion closure; it
             # returns the fused pose the payload is aligned at.
@@ -175,7 +175,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         reach = (B2[0]-A2[0])*ux + (B2[1]-A2[1])*uy
         inside = (B2[0]-reach*ux, B2[1]-reach*uy)
         if reach > settings.position_tolerance_m:
-            motion("reverse_47cm" if fine_align is None else "return_from_drop",
+            motion("reverse_from_drop" if fine_align is None else "return_from_drop",
                    "track_global_line", B2, inside, reverse=True)
         else:
             runtime.record_event("payload_detour_stage_skipped", stage="return_from_drop",

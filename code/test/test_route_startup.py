@@ -4,12 +4,14 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+import tempfile
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from components.relay_lcus import FakeLCUSRelay
 from tools.run_center_target_route import startup_countdown
+from tools import run_center_target_route as entry
 
 
 class RouteStartupTests(unittest.TestCase):
@@ -17,9 +19,10 @@ class RouteStartupTests(unittest.TestCase):
         self.now = 0.
         self.relay = FakeLCUSRelay(4)
         self.alarm = SimpleNamespace(is_initialized=False, is_active=False)
+        self.expected = {1: False, 2: False, 3: True, 4: False}
 
         def initialize(*, active=False):
-            self.assertEqual(self.relay.query_status(), {1: False, 2: False, 3: True, 4: False})
+            self.assertEqual(self.relay.query_status(), self.expected)
             self.alarm.is_initialized = True
             self.alarm.is_active = active
 
@@ -29,7 +32,7 @@ class RouteStartupTests(unittest.TestCase):
 
     def sleep(self, dt):
         self.assertTrue(self.alarm.is_active)
-        self.assertEqual(self.relay.query_status(), {1: False, 2: False, 3: True, 4: False})
+        self.assertEqual(self.relay.query_status(), self.expected)
         self.now += dt
 
     def run_countdown(self, **kwargs):
@@ -52,6 +55,14 @@ class RouteStartupTests(unittest.TestCase):
         self.assertFalse(self.alarm.is_active)
         self.assertFalse(any(self.relay.query_status().values()))
 
+    def test_holds_ch2_to_ch4_for_fifteen_seconds_and_never_energizes_ch1(self):
+        self.expected = {1: False, 2: True, 3: True, 4: True}
+        startup_countdown(self.relay, self.alarm, (1,2,3), 15,
+                          clock=lambda:self.now, sleep=self.sleep)
+        self.assertAlmostEqual(self.now, 15)
+        self.assertEqual(self.relay.query_status(), self.expected)
+        self.assertFalse(self.alarm.is_active)
+
     def test_unconfirmed_holding_prevents_alarm_and_releases_all(self):
         self.relay.turn_on = Mock(return_value=False)
         with self.assertRaisesRegex(RuntimeError, "relay"):
@@ -71,6 +82,31 @@ class RouteStartupTests(unittest.TestCase):
             with self.subTest(duration=duration), self.assertRaises(ValueError):
                 startup_countdown(self.relay, self.alarm, 2, duration)
             self.assertFalse(self.relay.connected)
+
+    def test_entry_parks_camera_before_three_channel_countdown_then_starts_route(self):
+        with tempfile.TemporaryDirectory() as directory:
+            weights=Path(directory)/'weights.pt'; weights.touch()
+            log=Path(directory)/'mission'
+            runtime=Mock(); runtime.relay.connected=True; runtime.relay.all_off.return_value=True
+            order=[]
+            with patch.object(entry,'build_runtime',return_value=runtime), \
+                 patch.object(entry,'build_servo',return_value=Mock(is_running=True,pulse_us=2500)), \
+                 patch.object(entry,'SoundLightAlarm',return_value=Mock()), \
+                 patch.object(entry,'YoloVision',return_value=Mock()), \
+                 patch.object(entry,'JsonlEventLogger',return_value=Mock()), \
+                 patch.object(entry,'park_servo',side_effect=lambda _,angle:order.append(('camera',angle))), \
+                 patch.object(entry,'startup_countdown',side_effect=lambda _r,_a,slots,secs,**kw:order.append(('hold_alarm',slots,secs))), \
+                 patch.object(entry,'run_route',side_effect=lambda *a,**kw:order.append(('route',kw))) as run, \
+                 patch.object(entry.signal,'signal'):
+                result=entry.main(['--confirm-motor-test','--release-mode','relay',
+                    '--relay-port','/dev/confirmed-relay','--startup-alarm-seconds','15',
+                    '--weights',str(weights),'--log-dir',str(log)])
+            self.assertEqual(result,0)
+            self.assertEqual(order[:2],[('camera',90),('hold_alarm',(1,2,3),15)])
+            self.assertEqual(order[2][0],'route')
+            self.assertEqual(run.call_args.kwargs['payload_slots'],(1,2,3))
+            self.assertTrue(run.call_args.kwargs['trigger_anywhere'])
+            self.assertAlmostEqual(run.call_args.kwargs['detour'].approach_m,.43)
 
 
 if __name__ == "__main__":

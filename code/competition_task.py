@@ -96,7 +96,7 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 TARGET_COLOR = "yellow"
 CH3_PAYLOAD_SLOT = 2  # CH3 = middle electromagnet = relay channel 3.
 SEARCH_REFERENCE_CX = 320.0  # Horizontal camera centre at +90 deg.
-DROP_SAFE_M = 0.47       # Operator-provided safe pivot-to-drop travel, 2026-10-11.
+DROP_SAFE_M = 0.43       # Operator revised the blind drop reach, 2026-10-11.
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
 DROP_TERMINAL_RANGE_M = 0.06
@@ -865,8 +865,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("payload holding state was not confirmed")
             raise RuntimeError("payload holding state was not confirmed; mission will not move")
         runtime.record_event("payload_hold_ready", slot=slot, channel=channel)
-    # One axis serves the +90 search, the 0 deg refinement and the +90 restore;
-    # the search borrows it and must not close it.
+    # Search borrows the +90 camera axis; the blind drop leaves it at +90.
     servo = build_servo(runtime.config)
     try:
         _stage(runtime, "lane", lambda: go_to_lane(runtime))

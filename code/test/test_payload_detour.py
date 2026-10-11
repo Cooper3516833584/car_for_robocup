@@ -62,6 +62,9 @@ class PayloadDetourTests(unittest.TestCase):
         self.addCleanup(local_patch.stop)
         local_property.side_effect = lambda: Pose2D(*self.pose, self.now)
         self.runtime.record_event = self.record
+        task_sleep = patch("competition_task.time.sleep", side_effect=self.advance)
+        task_sleep.start()
+        self.addCleanup(task_sleep.stop)
         if started:
             self.runtime.start()
             self.runtime.motion.stop()
@@ -114,22 +117,22 @@ class PayloadDetourTests(unittest.TestCase):
                 self.fixture((5., 7., math.pi / 2))
                 returned = self.run_detour(DetourSettings(payload_slot=slot))
                 road = self.stage_poses["left_90deg"]
-                side = self.stage_poses["forward_47cm"]
-                reverse = self.stage_poses["reverse_47cm"]
+                side = self.stage_poses["forward_to_drop"]
+                reverse = self.stage_poses["reverse_from_drop"]
                 self.assertAlmostEqual(road.x_m, 5., delta=.006)
                 self.assertAlmostEqual(road.y_m, 7., delta=.006)
                 stages = [v for e,v in self.events if e == "payload_detour_stage_start"]
                 self.assertEqual(stages[0]["stage"], "left_90deg")
                 self.assertFalse(any(v["stage"] == "advance_7cm" for v in stages))
-                self.assertAlmostEqual(math.dist((road.x_m, road.y_m), (side.x_m, side.y_m)), .47, delta=.006)
-                self.assertLess(side.x_m, road.x_m - .45)
+                self.assertAlmostEqual(math.dist((road.x_m, road.y_m), (side.x_m, side.y_m)), .43, delta=.006)
+                self.assertLess(side.x_m, road.x_m - .41)
                 self.assertLess(math.dist((road.x_m, road.y_m), (reverse.x_m, reverse.y_m)), .03)
                 self.assertAlmostEqual(returned.yaw_rad, math.pi / 2, delta=.055)
                 self.assertEqual([r[0] for r in self.releases], [slot + 1])
                 self.assert_safe_exit()
 
     def test_abort_at_each_moving_stage_stops_and_switches_all_relays_off(self):
-        for stage in ("left_90deg", "forward_47cm", "reverse_47cm", "right_90deg"):
+        for stage in ("left_90deg", "forward_to_drop", "reverse_from_drop", "right_90deg"):
             with self.subTest(stage=stage):
                 self.fixture()
 
@@ -151,7 +154,7 @@ class PayloadDetourTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "operator STOP during release"):
             self.run_detour(guard=guard)
-        self.assertNotIn("reverse_47cm", self.stage_poses)
+        self.assertNotIn("reverse_from_drop", self.stage_poses)
         self.assert_safe_exit()
 
     def test_position_drift_after_arrival_is_logged_without_stop_wait(self):
@@ -168,7 +171,7 @@ class PayloadDetourTests(unittest.TestCase):
         record=self.runtime.record_event
         def observe(event, **values):
             if event=="payload_release_start":
-                self.assertEqual(self.now,self.stage_poses["forward_47cm"].timestamp_s)
+                self.assertEqual(self.now,self.stage_poses["forward_to_drop"].timestamp_s)
             record(event,**values)
         self.runtime.record_event=observe
         self.run_detour()
@@ -183,9 +186,9 @@ class PayloadDetourTests(unittest.TestCase):
         samples = 0
         def check():
             nonlocal samples
-            if self.stage == "forward_47cm" and self.runtime.motion.state is MotionActionState.CANCELLED:
+            if self.stage == "forward_to_drop" and self.runtime.motion.state is MotionActionState.CANCELLED:
                 starts = {d["stage"]:d for e,d in self.events if e == "payload_detour_stage_start"}
-                A,B = starts["forward_47cm"]["args"]
+                A,B = starts["forward_to_drop"]["args"]
                 target_yaw = starts["left_90deg"]["args"][0]
                 ux,uy = math.cos(target_yaw), math.sin(target_yaw)
                 self.pose[0] = B[0]+along_error*ux-cross_error*uy
@@ -213,7 +216,7 @@ class PayloadDetourTests(unittest.TestCase):
                 self.fixture()
                 self.run_detour(check_vision=self.drop_pose_check([offset]))
                 self.assertEqual(len(self.releases),1)
-                self.assertIn("reverse_47cm",self.stage_poses)
+                self.assertIn("reverse_from_drop",self.stage_poses)
                 checks=[d for e,d in self.events if e=="payload_drop_pose"]
                 self.assertAlmostEqual(checks[-1]["yaw_error_rad"],math.radians(offset))
                 self.assertNotIn("stable_frames",checks[-1])
@@ -262,10 +265,10 @@ class PayloadDetourTests(unittest.TestCase):
         self.run_detour()
         starts = {d["stage"]:d for e,d in self.events if e == "payload_detour_stage_start"}
         self.assertAlmostEqual(starts["left_90deg"]["args"][0], math.pi/2)
-        A,B=starts["forward_47cm"]["args"]
+        A,B=starts["forward_to_drop"]["args"]
         self.assertAlmostEqual(B[0],A[0])
-        self.assertAlmostEqual(B[1]-A[1],.47)
-        back_start,back_end=starts["reverse_47cm"]["args"]
+        self.assertAlmostEqual(B[1]-A[1],.43)
+        back_start,back_end=starts["reverse_from_drop"]["args"]
         self.assertAlmostEqual(back_start[0],back_end[0])
         self.assertAlmostEqual(back_end[1],A[1])
         self.assertLess(math.dist(back_start,B),.01)
@@ -282,9 +285,9 @@ class PayloadDetourTests(unittest.TestCase):
         self.runtime.motion.track_local_line = Mock(side_effect=AssertionError("local distance reference"))
         returned = self.run_detour()
         road = self.stage_poses["left_90deg"]
-        side = self.stage_poses["forward_47cm"]
+        side = self.stage_poses["forward_to_drop"]
         self.assertAlmostEqual(road.y_m, 7., delta=.006)
-        self.assertAlmostEqual(side.x_m, road.x_m - .47, delta=.006)
+        self.assertAlmostEqual(side.x_m, road.x_m - .43, delta=.006)
         self.assertLess(math.dist((returned.x_m, returned.y_m), (road.x_m, road.y_m)), .03)
         calls = self.runtime.motion.track_global_line.call_args_list
         self.assertEqual(len(calls), 2)
@@ -305,7 +308,7 @@ class PayloadDetourTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "turn settling"):
             self.run_detour(guard=guard)
-        self.assertFalse(any(event == "payload_detour_stage_start" and data["stage"] == "forward_47cm"
+        self.assertFalse(any(event == "payload_detour_stage_start" and data["stage"] == "forward_to_drop"
                              for event, data in self.events))
         self.assertFalse(self.releases)
         self.assert_safe_exit()
@@ -314,7 +317,7 @@ class PayloadDetourTests(unittest.TestCase):
         self.fixture()
 
         def check_vision():
-            if self.stage == "forward_47cm":
+            if self.stage == "forward_to_drop":
                 raise RuntimeError("YOLO inference stale")
 
         with self.assertRaisesRegex(RuntimeError, "stale"):
@@ -327,14 +330,16 @@ class PayloadDetourTests(unittest.TestCase):
         self.relay.turn_off = Mock(return_value=False)
         with self.assertRaisesRegex(RuntimeError, "release"):
             self.run_detour()
-        self.assertNotIn("reverse_47cm", self.stage_poses)
+        self.assertNotIn("reverse_from_drop", self.stage_poses)
         self.assert_safe_exit()
 
     def vision(self, target):
         vision = Mock(ready=True)
         vision.observe.side_effect = lambda _: (math.floor(self.now / .08), target())
+        vision.frame_size = (640, 480)
         vision.observe_drop.side_effect = lambda _: (
-            math.floor(self.now / .08), target(), CENTER_BOX if target() is not None else None)
+            math.floor(self.now / .08), CENTER_BOX if target() is not None else None,
+            CENTER_BOX if target() is not None else None)
         return vision
 
     def test_patrol_resumes_original_endpoints_and_persistent_target_drops_once(self):
@@ -360,6 +365,54 @@ class PayloadDetourTests(unittest.TestCase):
                                 clock=lambda: self.now, sleep=self.advance)
         self.assertEqual(count, 2)
         self.assertEqual(len(self.releases), 2)
+
+    def test_three_loaded_channels_release_in_order_on_new_targets_and_stop_after_third(self):
+        self.fixture(started=False)
+        states=[]
+        def record(event, **values):
+            if event == 'payload_release_start':
+                states.append(self.relay.query_status().copy())
+            self.record(event, **values)
+        self.runtime.record_event=record
+        ranges=((.5,.8),(1.1,1.4),(1.7,2.0),(2.3,2.6))
+        vision=self.vision(lambda: BOX if any(lo<self.pose[0]<hi for lo,hi in ranges)
+                           and self.pose[1]<.1 else None)
+        count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
+                             payload_slots=(1,2,3),trigger_anywhere=True,
+                             clock=lambda:self.now,sleep=self.advance)
+        self.assertEqual(count,3)
+        self.assertEqual([c for c,_ in self.releases],[2,3,4])
+        self.assertEqual(states,[{1:False,2:True,3:True,4:True},
+                                 {1:False,2:False,3:True,4:True},
+                                 {1:False,2:False,3:False,4:True}])
+        self.assertEqual(len([v for e,v in self.events if e=='drop_align_done']),3)
+        self.assertTrue(all(abs(v['side_projection']-.43)<=.003 for e,v in self.events
+                            if e=='drop_align_done'))
+        self.assert_safe_exit()
+
+    def test_persistent_target_uses_only_first_channel_of_sequence(self):
+        self.fixture(started=False)
+        vision=self.vision(lambda:BOX if self.pose[0]>.5 or self.releases else None)
+        count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
+                             payload_slots=(1,2,3),trigger_anywhere=True,
+                             clock=lambda:self.now,sleep=self.advance)
+        self.assertEqual(count,1)
+        self.assertEqual([c for c,_ in self.releases],[2])
+
+    def test_full_frame_visibility_starts_alignment_before_center_band(self):
+        self.fixture(started=False)
+        vision=self.vision(lambda:BOX if .5<self.pose[0]<1. else None)
+        vision.observe_drop.side_effect=lambda _: (math.floor(self.now/.08),
+            (BOX if .5<self.pose[0]<.7 else CENTER_BOX if .7<=self.pose[0]<1. else None)
+            if self.pose[1]<.1 else None,
+            CENTER_BOX if .7<=self.pose[0]<1. and self.pose[1]<.1 else None)
+        count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
+                             payload_slots=(1,2,3),trigger_anywhere=True,
+                             clock=lambda:self.now,sleep=self.advance)
+        self.assertEqual(count,1)
+        self.assertTrue(any(e=='test_route_payload_target' and v['box']==BOX
+                            for e,v in self.events))
+        self.assertTrue(any(e=='search_road_align_done' and v['success'] for e,v in self.events))
 
     def test_targets_seen_only_during_patrol_turns_do_not_drop(self):
         self.fixture(started=False)
@@ -431,10 +484,10 @@ class PayloadDetourTests(unittest.TestCase):
         def with_residual(dt):
             nonlocal injected
             advance(dt)
-            if self.stage == "forward_47cm" and self.pose[1] > .4 and not injected:
+            if self.stage == "forward_to_drop" and self.pose[1] > .4 and not injected:
                 self.pose[0] += .02
                 injected = True
-            if self.stage in ("forward_47cm", "reverse_47cm"):
+            if self.stage in ("forward_to_drop", "reverse_from_drop"):
                 samples.append((self.stage, self.pose[2], self.runtime.drive.last_limited_twist))
 
         self.run_detour(sleep=with_residual)
@@ -442,10 +495,10 @@ class PayloadDetourTests(unittest.TestCase):
         side_yaw = self.stage_poses["left_90deg"].yaw_rad
         for stage, yaw, twist in samples:
             self.assertLess(abs(yaw - side_yaw), math.radians(30))
-            if stage == "reverse_47cm":
+            if stage == "reverse_from_drop":
                 self.assertLessEqual(twist.linear_x_m_s, 0)
         starts = [data for event, data in self.events if event == "payload_detour_stage_start"
-                  and data["stage"] in ("forward_47cm", "reverse_47cm")]
+                  and data["stage"] in ("forward_to_drop", "reverse_from_drop")]
         back_start,back_end=starts[1]["args"]
         self.assertAlmostEqual(back_start[0],back_end[0])
         self.assertAlmostEqual(back_end[1],starts[0]["args"][0][1])
@@ -466,9 +519,10 @@ class PayloadDetourTests(unittest.TestCase):
         def observation(_):
             visible = BOX if .3 < self.pose[0] < 1.4 and self.pose[1] < .1 else None
             centered = CENTER_BOX if visible is not None and self.pose[0] > .7 else None
-            return math.floor(self.now / .08), visible, centered
+            return math.floor(self.now / .08), centered or visible, centered
 
         vision.observe_drop.side_effect = observation
+        vision.frame_size = (640, 480)
         vision.observe.side_effect = lambda _: observation(None)[:2]
         before_center_speeds = []
         advance = self.advance
@@ -498,16 +552,19 @@ class PayloadDetourTests(unittest.TestCase):
         vision = self.vision(lambda: BOX if self.pose[0] > .5 or self.releases else None)
 
         def check_speed_scope(dt):
-            if (self.stage in ("left_90deg", "forward_47cm", "reverse_47cm", "right_90deg")
+            if (self.stage in ("left_90deg", "safe_side_approach", "return_from_drop", "right_90deg")
                     and self.runtime.motion.navigation is not self.original_navigation):
                 stages_seen.add(self.stage)
-                self.assertIs(self.runtime.motion.drive, original)
+                if self.stage == "safe_side_approach" and self.runtime.motion.state is MotionActionState.RUNNING:
+                    self.assertLessEqual(self.runtime.motion.drive.max_linear_speed_m_s, .05)
+                elif self.stage != "safe_side_approach":
+                    self.assertIs(self.runtime.motion.drive, original)
             advance(dt)
 
         route.run_route(self.runtime, vision, None, detour=DetourSettings(),
                         clock=lambda: self.now, sleep=check_speed_scope)
-        self.assertEqual(stages_seen, {"left_90deg", "forward_47cm",
-                                      "reverse_47cm", "right_90deg"})
+        self.assertEqual(stages_seen, {"left_90deg", "safe_side_approach",
+                                      "return_from_drop", "right_90deg"})
         self.assertIs(self.runtime.motion.drive, original)
         self.assert_safe_exit()
 

@@ -46,8 +46,8 @@
 投放后从最新融合位置沿 side_yaw 平行直倒，回到 pivot 内侧截面后才右转 90°。
 靠边段没有横移、原地旋转、误差方向自动翻转或历史最佳 XY 回跑。
 
-`DROP_SAFE_M=0.47 m` 来自用户 2026-10-11 提供的安全行程；这不是软件自行认定
-47 cm 永远合法。+90° 中心使用 `SEARCH_REFERENCE_CX=320 px`，按用户要求已删除
+`DROP_SAFE_M=0.43 m` 来自用户 2026-10-11 将 47 cm 修改为 43 cm 的要求。
+主程序仍只接受中央区域触发并投放固定一路。+90° 中心使用 `SEARCH_REFERENCE_CX=320 px`，按用户要求已删除
 居中后的 7 cm 机械补偿。侧向接近限速 0.05 m/s，返回使用原巡航上限。
 最后 6 cm 限速 0.012 m/s；停车更新融合 0.6 s，距离容差 ±0.003 m，最多 4 次轴向微调。
 始终不能收敛则停止动作，不释放。该容差只描述融合结果，不代表物理定位精度。
@@ -91,7 +91,7 @@
 | `PAYLOAD_SLOT_TO_RELAY / PAYLOAD_ACTIVE_ON / PAYLOAD_RELEASE_HOLD_S` | 选项1/2/3对应右前CH2/中间CH3/左前CH4、False（通电吸住/断电释放）、0.5 s；与组件及路线测试共用已确认接线 |
 | `CH3_PAYLOAD_SLOT / TARGET_COLOR` | 2 / `yellow`；正式比赛默认中间 CH3，`--payload-slot` 缺省值同为 2 |
 | `SEARCH_REFERENCE_CX` | +90° 画面水平中心 320 px；居中后直接左转，没有前进补偿 |
-| `DROP_SAFE_M` | 0.47 m；用户 2026-10-11 提供，需重复验证停车超程、漂移和全部车轮范围 |
+| `DROP_SAFE_M` | 0.43 m；用户 2026-10-11 更新，需重复验证停车超程、漂移和全部车轮范围 |
 | `DROP_Y_TOL_PX / DROP_FRAME_TRIES` | 10 px / 3 帧，保留独立预览接口；不参与盲投距离控制 |
 | `DROP_FINE_SPEED_M_S` | 0.05 m/s，整条侧向接近限速，不分段重启 PP |
 | `DROP_REFERENCE` | 0° 照片历史接口，仅预览；盲投不加载参考照片 |
@@ -122,7 +122,7 @@
 `drop_payload(relay, slot=1/2/3)` 返回 bool，整场与独立投放均使用 `--payload-slot`，默认2
 （中间 CH3，继电器通道 3）。盲投的定距接近与停车复测由 `align_drop_position` 完成，可由
 `payload_detour.run_payload_detour(..., fine_align=...)` 直接调用，只使用调用方传入的
-融合运动闭包，不新建运动控制器；不传 `fine_align` 时同样直接左转，再固定 47 cm 往返。
+融合运动闭包，不新建运动控制器；不传 `fine_align` 时同样直接左转，再固定 43 cm 往返。
 完整流程在首段移动前给所选电磁铁通电吸住；投放组件断电释放后保持 OFF，
 异常和键盘中断也尝试关闭所选路；完整 runtime 负责继电器统一
 退出。CLI 的独立 drop 阶段自己负责 `all_off()` 和关闭串口，包含失败/中断退出，
@@ -189,7 +189,7 @@ python3 code/main_robocup.py --mode hardware-mission --competition --yellow-mode
 python3 code/main_robocup.py --mode hardware-mission --competition --speed-scale 2 --release-mode simulate
 
 # 单项测试程序：舵机 +90° → 通电吸住所选仓位 → 沿当前融合朝向边走边找目标
-# → 目标横向居中后停车 → 直接左转 90° / 融合盲投 47 cm → 释放 → 融合返回 → 结束。
+# → 目标横向居中后停车 → 直接左转 90° / 融合盲投 43 cm → 释放 → 融合返回 → 结束。
 # 不走任务板、HC、车道和终点；搜索线由当前位姿生成，不读比赛路线常量。
 python3 tools/run_ch3_drop_test.py --confirm-motor-test --search-distance-m 3 \
   --payload-slot 2 --release-mode relay --relay-port /dev/serial/by-path/platform-fc8c0000.usb-usb-0:1:1.0-port0 \
@@ -229,7 +229,7 @@ python3 tools/run_ch3_drop_test.py --confirm-motor-test --search-distance-m 3 \
 `target_yolo/vision.py` 是数据标注用 HSV 代码，比赛主程序不调用它。
 
 `components/drop_target_vision.py` 的 HSV 全弧拟合仅供 0° 停车预览，不控制投放运动。
-正式投放只在左转前用 YOLO 对齐水平画面中心，左转后按融合定位固定前进 47 cm。
+正式投放只在左转前用 YOLO 对齐水平画面中心，左转后按融合定位固定前进 43 cm。
 
 板端需要原有 OCR 环境（`requirements-task-board.txt`）和可运行既有模型的
 Ultralytics/PyTorch 环境。Ultralytics、模型和相机仅在视觉 stage 中按需加载；

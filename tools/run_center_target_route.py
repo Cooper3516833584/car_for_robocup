@@ -32,13 +32,17 @@ from payload_detour import DetourSettings
 
 def startup_countdown(relay, alarm, slot, seconds, *, verify=True, abort=lambda: False,
                       clock=time.monotonic, sleep=time.sleep):
-    """Hold only the selected magnet, sound a bounded alarm, leave motion unopened."""
+    """Hold selected slot(s), sound a bounded alarm, leave motion unopened."""
     if not math.isfinite(seconds) or not 0 < seconds <= 60:
         raise ValueError("startup alarm must be between 0 and 60 seconds")
     try:
         relay.open()
-        if relay.all_off(verify=verify) is False or not prepare_payload(relay, slot, verify=verify):
+        slots = (slot,) if isinstance(slot, int) else tuple(slot)
+        if not slots or relay.all_off(verify=verify) is False:
             raise RuntimeError("startup relay state was not confirmed")
+        for selected in slots:
+            if not prepare_payload(relay, selected, verify=verify):
+                raise RuntimeError("startup relay state was not confirmed")
         alarm.initialize(active=False)
         try:
             if abort():
@@ -75,6 +79,8 @@ def main(argv=None):
                         help="default: entire frame for drop, middle 50%% for beep")
     parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3),
                         help="1=right-front CH2, 2=middle CH3, 3=left-front CH4; powered hold, OFF release")
+    parser.add_argument("--payload-sequence", type=int, nargs="+", choices=(1, 2, 3),
+                        help="drop slots in order, default 1 2 3; mutually exclusive with --payload-slot")
     parser.add_argument("--release-hold-s", type=float, default=0.5)
     parser.add_argument("--release-mode", choices=("simulate", "relay"),
                         help="default: simulate; explicit filming mode defaults to real relay release")
@@ -95,10 +101,15 @@ def main(argv=None):
                         help="check camera/model freshness without opening motion, GPIO or servo")
     parser.add_argument("--max-seconds", type=float, default=300)
     parser.add_argument("--startup-alarm-seconds", type=float, default=0,
-                        help="drop mode: hold selected magnet, alarm for this duration, then start (0=disabled)")
+                        help="drop mode: hold selected magnets, alarm for this duration, then start (0=disabled)")
     parser.add_argument("--confirm-motor-test", action="store_true")
     args = parser.parse_args(argv)
-    args.payload_slot = args.payload_slot or 1
+    if args.payload_slot is not None and args.payload_sequence is not None:
+        parser.error("use either --payload-slot or --payload-sequence")
+    slots = tuple(args.payload_sequence or ((args.payload_slot,) if args.payload_slot else (1, 2, 3)))
+    if len(set(slots)) != len(slots):
+        parser.error("--payload-sequence must contain distinct slots")
+    args.payload_slot = slots[0]
     args.release_mode = args.release_mode or "simulate"
     if not math.isfinite(args.startup_alarm_seconds) or not 0 <= args.startup_alarm_seconds <= 60:
         parser.error("--startup-alarm-seconds must be between 0 and 60")
@@ -148,6 +159,8 @@ def main(argv=None):
     if servo is None:
         parser.error("camera servo must be enabled in the measured config")
     servo.pulse_us_for(args.servo_angle_deg)  # Validate before touching hardware.
+    if detour is not None and args.servo_angle_deg != 90:
+        parser.error("horizontal alignment requires --servo-angle-deg 90")
     if not args.weights.is_file():
         parser.error(f"YOLO weights missing: {args.weights}")
     args.log_dir.mkdir(parents=True, exist_ok=False)
@@ -182,25 +195,28 @@ def main(argv=None):
         if detour is not None and args.release_mode == "simulate":
             runtime.relay = FakeLCUSRelay(4)
         if detour is not None:
-            runtime.record_event("test_route_release_mode", mode=args.release_mode, slot=args.payload_slot)
-            print(f"[route] RELEASE MODE {args.release_mode}; slot={args.payload_slot}", flush=True)
+            runtime.record_event("test_route_release_mode", mode=args.release_mode, slots=slots)
+            print(f"[route] RELEASE MODE {args.release_mode}; slots={slots}", flush=True)
+        # Camera must be parked before the magnets/countdown, and stays at +90.
+        park_servo(servo, args.servo_angle_deg)
+        runtime.record_event("test_route_camera_hold", angle_deg=args.servo_angle_deg, pulse_us=servo.pulse_us)
+        print(f"[route] SERVO HOLD {args.servo_angle_deg:g}deg, {servo.pulse_us}us", flush=True)
         if args.startup_alarm_seconds:
-            runtime.record_event("startup_countdown_start", slot=args.payload_slot, seconds=args.startup_alarm_seconds)
-            print(f"[route] STARTUP: hold slot={args.payload_slot}, alarm {args.startup_alarm_seconds:g}s", flush=True)
-            startup_countdown(runtime.relay, alarm, args.payload_slot, args.startup_alarm_seconds,
+            runtime.record_event("startup_countdown_start", slots=slots, seconds=args.startup_alarm_seconds)
+            print(f"[route] STARTUP: hold slots={slots}, alarm {args.startup_alarm_seconds:g}s", flush=True)
+            startup_countdown(runtime.relay, alarm, slots, args.startup_alarm_seconds,
                               verify=config.relay.verify_writes,
                               abort=lambda: aborted.is_set() or stop_file.exists())
-            runtime.record_event("startup_countdown_done", slot=args.payload_slot)
+            runtime.record_event("startup_countdown_done", slots=slots)
             print("[route] STARTUP DONE; alarm OFF", flush=True)
-        # Park at the requested calibrated angle and leave PWM enabled throughout.
-        park_servo(servo, args.servo_angle_deg)
-        print(f"[route] SERVO HOLD {args.servo_angle_deg:g}deg, {servo.pulse_us}us", flush=True)
         if alarm is not None:
             alarm.initialize(active=False)
         vision.start()
         run_route(runtime, vision, alarm,
                   abort=lambda: aborted.is_set() or stop_file.exists(),
-                  max_seconds=args.max_seconds, detour=detour)
+                  max_seconds=args.max_seconds, detour=detour,
+                  payload_slots=slots if detour is not None else None,
+                  trigger_anywhere=detour is not None)
         (args.log_dir / "result.txt").write_text("FINISHED\n")
         return 0
     except BaseException as exc:

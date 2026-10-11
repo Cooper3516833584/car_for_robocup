@@ -82,7 +82,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.assertEqual(self.search.call_args.kwargs["abort"] is not None, True)
         # The drop uses the middle CH3 slot and the shared fused motion.
         self.detour.assert_called_once_with(self.runtime, 2, servo=self.servo, camera=0,
-                                            color="yellow", safe_distance_m=.47)
+                                           color="yellow", safe_distance_m=.43)
         done = [values for event, values in self.events if event == "ch3_drop_test_drop_done"]
         self.assertEqual(done, [{"slot": 2, "pose": self.detour.return_value,
                                  "pose_reference": "fused"}])

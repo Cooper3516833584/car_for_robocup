@@ -17,7 +17,7 @@ from components.basic_motion_controller import MotionActionState
 from components.payload_task import payload_channel, prepare_payload
 from components.yolo_cpu import (CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ,
                                  pin_vision_worker, select_fastest_cpus)
-from mission_control import step_runtime as _step, usable_pose as _usable_pose
+from mission_control import step_runtime as _step, usable_pose as _usable_pose, task_scope
 from payload_detour import run_payload_detour
 from robocup_runtime import RobocupMissionState
 
@@ -369,9 +369,11 @@ def route_from_pose(pose):
 
 
 def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
-              clock=time.monotonic, sleep=time.sleep, detour=None):
-    """Slow on visibility; detour on horizontal centre, then resume fixed endpoints.
+              clock=time.monotonic, sleep=time.sleep, detour=None, payload_slots=None,
+              trigger_anywhere=False):
+    """Acquire new targets, share exact X centring/blind drop, resume endpoints.
 
+    Sequence mode preserves unreleased magnets and consumes each slot once.
     Optional legacy mode retains the one-second stop/alarm behavior.
     """
     deadline = clock() + max_seconds
@@ -380,6 +382,12 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
         original_drive.max_linear_speed_m_s, detour.patrol_slow_speed_m_s))
         if detour is not None else original_drive)
     slowing = False
+    slots = tuple(payload_slots) if payload_slots is not None else None
+    if slots is not None:
+        if detour is None or not slots or len(set(slots)) != len(slots):
+            raise ValueError("payload sequence needs unique slots and a drop detour")
+        for slot in slots:
+            payload_channel(slot)
 
     def guard():
         if abort():
@@ -389,7 +397,8 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
 
     try:
         if detour is not None and (runtime.relay is None
-                                  or runtime.relay.channel_count < payload_channel(detour.payload_slot)):
+                                  or runtime.relay.channel_count < max(payload_channel(slot)
+                                      for slot in (slots or (detour.payload_slot,)))):
             raise RuntimeError("payload relay must be configured before patrol starts")
         runtime.start()
         runtime.motion.stop()  # No implicit synthetic/default navigation goal.
@@ -417,10 +426,10 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
             sleep(PERIOD_S)
         actions = route_from_pose(result.estimate.pose)
         if detour is not None:
-            if not prepare_payload(runtime.relay, detour.payload_slot, verify=detour.verify_relay):
-                raise RuntimeError("payload holding state was not confirmed; patrol will not move")
-            runtime.record_event("payload_hold_ready", slot=detour.payload_slot,
-                                 channel=payload_channel(detour.payload_slot))
+            for slot in slots or (detour.payload_slot,):
+                if not prepare_payload(runtime.relay, slot, verify=detour.verify_relay):
+                    raise RuntimeError("payload holding state was not confirmed; patrol will not move")
+                runtime.record_event("payload_hold_ready", slot=slot, channel=payload_channel(slot))
             guard()
             vision.observe(clock())  # Recheck freshness after relay verification.
         alarm_count = 0
@@ -443,22 +452,44 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                     # Only patrol straight segments trigger; turns do not re-arm.
                     if action.method == "track_global_line" and frame_at != last_drop_frame:
                         last_drop_frame = frame_at
-                        if drop_latch.update(visible, trigger=centered is not None) is not None:
-                            entry = centered
+                        if drop_latch.update(visible, trigger=(visible is not None if trigger_anywhere
+                                                              else centered is not None) and
+                                             (slots is None or drop_count < len(slots))) is not None:
+                            entry = visible if trigger_anywhere else centered
                 else:
                     entry = initial_entry if initial_entry is not None else vision.poll(clock())
                 initial_entry = None
                 if detour is not None and entry is not None:
                     runtime.record_event("test_route_payload_target", label=action.label, box=entry)
-                    print(f"[route] PAYLOAD DETOUR slot={detour.payload_slot}", flush=True)
-                    run_payload_detour(runtime, detour, guard=guard,
-                                       check_vision=lambda: vision.observe(clock()),
-                                       clock=clock, sleep=sleep, travel_drive=original_drive)
-                    drop_count += 1
+                    from competition_task import fine_center_on_road, align_drop_position
+                    selected = detour.payload_slot if slots is None else slots[drop_count]
+                    settings = replace(detour, payload_slot=selected)
+                    def blind_align(pivot, road_yaw, side_yaw, motion):
+                        return align_drop_position(runtime, None, pivot, road_yaw, side_yaw,
+                                                   motion, safe_distance_m=settings.approach_m)
+                    with task_scope(guard):
+                        candidate = entry
+                        if trigger_anywhere:
+                            # Any visible target starts alignment along the remaining
+                            # patrol line. Drop still requires the shared exact X centre.
+                            candidate = find_centered_target(runtime, vision, *action.args,
+                                slow_speed_m_s=settings.patrol_slow_speed_m_s, abort=abort,
+                                max_seconds=max(.01, deadline-clock()), clock=clock, sleep=sleep)
+                        aligned = (fine_center_on_road(runtime, vision, candidate)
+                                   if candidate is not None else None)
+                        if aligned is not None:
+                            print(f"[route] PAYLOAD DETOUR slot={selected}; CH{payload_channel(selected)}", flush=True)
+                            run_payload_detour(runtime, settings, guard=guard, clock=clock,
+                                               sleep=sleep, travel_drive=original_drive,
+                                               fine_align=blind_align)
+                            drop_count += 1
+                        else:
+                            runtime.record_event("test_route_payload_skipped", reason="horizontal alignment failed",
+                                                 slot=selected)
                     # Frames seen while turning/dropping cannot re-arm a target.
                     drop_latch.require_clear()
                     last_drop_frame = vision.observe(clock())[0]
-                    action.start(runtime)  # Preserve original endpoints; 7cm counts toward patrol.
+                    action.start(runtime)  # Preserve the original patrol endpoints.
                     runtime.record_event("test_route_resume", label=action.label,
                                          reason="payload_detour", drop_count=drop_count)
                     continue

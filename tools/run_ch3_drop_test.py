@@ -11,7 +11,7 @@ No task board, no HC radio and no competition lane: the search line is derived
 from the pose the operator placed the car at, not from the mission route.
 
     py -3 tools/run_ch3_drop_test.py --confirm-motor-test --release-mode simulate
-        --drop-safe-m 0.47 --search-distance-m 3
+        --drop-safe-m 0.43 --search-distance-m 3
         --log-dir logs/ch3-drop-test
 
 Complete runs are real motor tests. Default release-mode simulate uses an
