@@ -41,6 +41,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.resolve = Mock(side_effect=lambda runtime: estimate(self.pose))
         self.prepare = Mock(return_value=relay_ok)
         self.search = Mock(return_value=box, side_effect=search_error)
+        self.fine = Mock(return_value=box)
         self.detour = Mock(return_value=SimpleNamespace(x_m=1.0, y_m=2.0, yaw_rad=0.0))
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -52,7 +53,8 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         for name, value in (("wait_for_fused_localization", self.resolve),
                             ("prepare_payload", self.prepare),
                             ("find_centered_target", self.search),
-                            ("perform_payload_detour", self.detour)):
+                            ("perform_payload_detour", self.detour),
+                            ("fine_center_on_road", self.fine)):
             self.stack.enter_context(patch.object(entry, name, new=value))
         self.stack.enter_context(patch.object(entry.signal, "signal"))
 
@@ -80,11 +82,12 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.assertEqual(self.search.call_args.kwargs["abort"] is not None, True)
         # The drop uses the middle CH3 slot, the borrowed servo and the 0 deg camera.
         self.detour.assert_called_once_with(self.runtime, 2, servo=self.servo, camera=0,
-                                            color="yellow")
+                                            color="yellow", safe_distance_m=.47)
         done = [values for event, values in self.events if event == "ch3_drop_test_drop_done"]
         self.assertEqual(done, [{"slot": 2, "pose": self.detour.return_value,
                                  "pose_reference": "fused"}])
         self.assertTrue(self.vision.close.called)
+        self.fine.assert_called_once_with(self.runtime,self.vision,BOX)
         self.runtime.close.assert_called_once()
         self.runtime.relay.all_off.assert_called_once_with(verify=True)
         self.servo.close.assert_called_once_with(hold=True)
@@ -123,6 +126,25 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.assertEqual(start_xy, (0.5, -0.25))
         self.assertAlmostEqual(end_xy[0], 0.5, delta=1e-9)
         self.assertAlmostEqual(end_xy[1], -1.75, delta=1e-9)
+
+    def test_preview_saves_three_frames_without_runtime_relay_or_motor_confirmation(self):
+        from components import drop_target_vision as vision
+        self.fixture()
+        camera=Mock()
+        camera.read.return_value=(True,object())
+        with patch.object(entry,'_open_yellow_camera',return_value=(camera,True)), \
+             patch.object(vision,'save_observation',return_value=(300.,300.,400.)) as save, \
+             patch.object(entry,'build_runtime') as build:
+            result=entry.main(['--vision-preview','--log-dir',str(self.log)])
+        self.assertEqual(result,0)
+        self.assertEqual(save.call_count,3)
+        build.assert_not_called()
+        self.prepare.assert_not_called()
+        self.search.assert_not_called()
+        self.detour.assert_not_called()
+        self.servo.set_angle.assert_called_once_with(0,settle=True)
+        camera.release.assert_called_once()
+        self.assertTrue((self.log/'preview.json').is_file())
 
 
 if __name__ == "__main__":

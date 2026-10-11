@@ -262,7 +262,10 @@ class PayloadDetourTests(unittest.TestCase):
         A,B=starts["forward_47cm"]["args"]
         self.assertAlmostEqual(B[0],A[0])
         self.assertAlmostEqual(B[1]-A[1],.47)
-        self.assertEqual(starts["reverse_47cm"]["args"],(B,A))
+        back_start,back_end=starts["reverse_47cm"]["args"]
+        self.assertAlmostEqual(back_start[0],back_end[0])
+        self.assertAlmostEqual(back_end[1],A[1])
+        self.assertLess(math.dist(back_start,B),.01)
         self.assertEqual(starts["right_90deg"]["args"],(0.,))
         self.assert_safe_exit()
 
@@ -282,7 +285,9 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertLess(math.dist((returned.x_m, returned.y_m), (road.x_m, road.y_m)), .03)
         calls = self.runtime.motion.track_global_line.call_args_list
         self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[2].args, tuple(reversed(calls[1].args)))
+        back_start,back_end=calls[2].args
+        self.assertAlmostEqual(back_start[1],back_end[1])
+        self.assertAlmostEqual(back_end[0],calls[1].args[0][0])
         self.assertTrue(calls[2].kwargs["reverse"])
         self.assertTrue(all(d["pose_reference"] == "fused" for e,d in self.events
                             if e in {"payload_detour_stage_start", "payload_drop_pose"}))
@@ -438,7 +443,10 @@ class PayloadDetourTests(unittest.TestCase):
                 self.assertLessEqual(twist.linear_x_m_s, 0)
         starts = [data for event, data in self.events if event == "payload_detour_stage_start"
                   and data["stage"] in ("forward_47cm", "reverse_47cm")]
-        self.assertEqual(starts[0]["args"], tuple(reversed(starts[1]["args"])))
+        back_start,back_end=starts[1]["args"]
+        self.assertAlmostEqual(back_start[0],back_end[0])
+        self.assertAlmostEqual(back_end[1],starts[0]["args"][0][1])
+        self.assertGreater(back_start[0]-starts[0]["args"][0][0],.01)
         self.assertTrue(starts[1]["kwargs"]["reverse"])
         self.assert_safe_exit()
 

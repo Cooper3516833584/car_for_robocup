@@ -4,18 +4,19 @@
 Flow: hold the selected magnet -> camera servo to the search angle (+90) ->
 drive forward along the current fused heading while YOLO looks for the target ->
 the horizontally centred target stops the car and starts the shared fused
-payload detour (7 cm advance, left 90, 0 deg ring-arc refinement, release, fused
-return to the turn pose, road heading restored) -> stop, release the relay, exit.
+payload detour (7 cm advance, left 90, one measured side line, release, straight
+reverse into the lane, road heading restored) -> stop, release the relay, exit.
 
 No task board, no HC radio and no competition lane: the search line is derived
 from the pose the operator placed the car at, not from the mission route.
 
-    py -3 tools/run_ch3_drop_test.py --confirm-motor-test --release-mode relay
-        --relay-port /dev/serial/by-path/<confirmed> --search-distance-m 3
+    py -3 tools/run_ch3_drop_test.py --confirm-motor-test --release-mode simulate
+        --drop-safe-m 0.47 --search-distance-m 3
         --log-dir logs/ch3-drop-test
 
-This is a real motor test. The car moves, the selected electromagnet is
-energized before the first motion and released only after the target is aligned.
+Complete runs are real motor tests. Default release-mode simulate uses an
+in-memory relay; relay mode holds before motion and releases at the drop pose.
+--vision-preview opens just servo/camera to save stationary evidence.
 """
 
 from __future__ import annotations
@@ -33,7 +34,8 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 
-from competition_task import perform_payload_detour, wait_for_fused_localization
+from competition_task import (perform_payload_detour, wait_for_fused_localization,
+                              fine_center_on_road, DROP_SAFE_M, _open_yellow_camera)
 from components.diagnostics_log import JsonlEventLogger
 from components.payload_task import prepare_payload
 from components.relay_lcus import FakeLCUSRelay
@@ -92,16 +94,62 @@ def build_parser():
     parser.add_argument("--max-seconds", type=float, default=180,
                         help="whole-test time limit, including the nested drop and return")
     parser.add_argument("--confirm-motor-test", action="store_true")
+    parser.add_argument("--vision-preview", action="store_true",
+                        help="stationary servo-0 snapshots only; no runtime, drive or relay")
+    parser.add_argument("--drop-safe-m", type=float, default=DROP_SAFE_M,
+                        help="measured safe fused travel from post-left-turn pivot")
     return parser
+
+
+def vision_preview(args, parser):
+    """Open just the borrowed servo/camera; do not construct a robot runtime."""
+    from components import drop_target_vision as vision
+    import json
+    config = load_v2_config(args.config)
+    servo = build_servo(config)
+    if servo is None:
+        parser.error("camera servo must be enabled for the stationary preview")
+    log_dir = args.log_dir or Path("logs") / f"ch3-preview-{time.strftime('%Y%m%d-%H%M%S')}"
+    log_dir.mkdir(parents=True, exist_ok=False)
+    capture, owned = None, False
+    try:
+        park_servo(servo, 0)
+        capture, owned = _open_yellow_camera(args.camera)
+        observations = []
+        for index in range(3):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise RuntimeError("preview camera frame unavailable")
+            observations.append(vision.save_observation(
+                frame, log_dir / f"preview_{index}", args.target_class_name))
+        feature = vision.stable_feature(observations)
+        (log_dir / "preview.json").write_text(json.dumps(
+            {"feature": feature, "observations": observations, "chosen_action": "observe_only",
+             "yaw": None, "fused_x": None, "fused_y": None,
+             "road_projection": None, "side_projection": None}, indent=2), encoding="utf-8")
+        print(f"[ch3] stationary preview: {feature}; evidence={log_dir}", flush=True)
+        return 0
+    finally:
+        try:
+            if owned and capture is not None:
+                capture.release()
+        finally:
+            servo.close(hold=True)
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.vision_preview:
+        return vision_preview(args, parser)
     if not args.confirm_motor_test:
         parser.error("pass --confirm-motor-test for this explicitly requested hardware test")
     if not args.weights.is_file():
         parser.error(f"YOLO weights missing: {args.weights}")
+    if args.drop_safe_m is None or not math.isfinite(args.drop_safe_m) or args.drop_safe_m <= 0:
+        parser.error("provide the measured safe pivot-to-drop distance with --drop-safe-m")
+    if args.servo_angle_deg != 90:
+        parser.error("complete CH3 test requires the calibrated +90 search angle")
     if not math.isfinite(args.search_distance_m) or not 0.1 <= args.search_distance_m <= 20:
         parser.error("--search-distance-m must be between 0.1 and 20")
     if not math.isfinite(args.search_speed_cm_s) or args.search_speed_cm_s <= 0:
@@ -192,6 +240,8 @@ def main(argv=None):
                                        slow_speed_m_s=slow_speed_m_s, abort=stop_requested,
                                        max_seconds=args.max_seconds, clock=runtime.clock,
                                        sleep=time.sleep)
+            if box is not None:
+                box = fine_center_on_road(runtime, vision, box)
             # The 0 deg refinement below opens the same camera: release it first.
             vision.close()
             if box is None:
@@ -205,7 +255,8 @@ def main(argv=None):
             print("[ch3] DROP: 7cm, left90, 0deg refine, release, fused return", flush=True)
             returned = perform_payload_detour(runtime, args.payload_slot, servo=servo,
                                               camera=args.camera,
-                                              color=args.target_class_name or "yellow")
+                                              color=args.target_class_name or "yellow",
+                                              safe_distance_m=args.drop_safe_m)
             runtime.record_event("ch3_drop_test_drop_done", slot=args.payload_slot, pose=returned,
                                  pose_reference="fused")
             print(f"[ch3] DROP DONE AND RETURNED to {returned.x_m:.3f},{returned.y_m:.3f} "

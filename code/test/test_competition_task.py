@@ -243,16 +243,16 @@ class CompetitionTaskTests(unittest.TestCase):
             ((0.45, 0.0), (0.55, 0.0))])
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
 
-    def test_full_route_alignment_failure_skips_drop_and_finishes(self):
+    def test_full_route_keeps_search_stop_fallback_without_reopening_camera(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=False))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
-            return_value=YellowDetection(640, 360, 80, 80, 0.9)))
-        self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=None))
-        drop = self.stack.enter_context(patch.object(task, "perform_payload_detour"))
-        task.run_full_mission(self.runtime, detector=Mock())
-        drop.assert_not_called()
-        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+            return_value=YellowDetection(349.5, 360, 80, 80, .9)))
+        with patch.object(task,"align_yellow_drop_zone",side_effect=AssertionError("duplicate alignment")), \
+             patch.object(task,"perform_payload_detour") as drop:
+            task.run_full_mission(self.runtime,detector=Mock())
+        drop.assert_called_once()
+        self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_move_to_xy_does_not_set_final_yaw(self):
         with patch.object(self.runtime.motion, "navigate_to", wraps=self.runtime.motion.navigate_to) as navigate:
@@ -277,21 +277,21 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_standalone_drop_align_sets_zero_degrees_without_releasing(self):
         servo = Mock(is_running=True, pulse_us=1500)
         self.stack.enter_context(patch("config.v2_factory.build_servo", return_value=servo))
-        aligned = Mock()
-        before = len(self.runtime.relay.commands)
-        navigation = self.runtime.motion.navigation
-        with patch.object(task, "align_drop_position", return_value=aligned) as align:
-            result = task.run_competition_stage(self.runtime, "drop-align",
-                                                yellow_camera="/dev/video9")
-        self.assertIs(result, aligned)
-        servo.set_angle.assert_called_once_with(0, settle=True)
+        from components import drop_target_vision as vision
+        before=len(self.runtime.relay.commands)
+        camera=Mock()
+        camera.read.return_value=(True,object())
+        with patch.object(task,"_open_yellow_camera",return_value=(camera,False)), \
+             patch.object(vision,"extract_target_arc",return_value=(300.,300.,400.)), \
+             patch.object(self.runtime.motion,"rotate_to") as rotate, \
+             patch.object(self.runtime.motion,"track_global_line") as move:
+            result=task.run_competition_stage(self.runtime,"drop-align",yellow_camera="/dev/video9")
+        self.assertEqual(result,(300.,300.,400.))
+        rotate.assert_not_called()
+        move.assert_not_called()
+        servo.set_angle.assert_called_once_with(0,settle=True)
         servo.close.assert_called_once_with(hold=True)
-        self.assertEqual(align.call_args.args[1], "/dev/video9")
-        self.assertAlmostEqual(align.call_args.args[3], align.call_args.args[4] - math.pi / 2)
-        # Alignment only: no magnet is energized or released.
-        self.assertEqual(len(self.runtime.relay.commands), before)
-        self.assertFalse(any(self.runtime.relay.query_status().values()))
-        self.assertIs(self.runtime.motion.navigation, navigation)
+        self.assertEqual(len(self.runtime.relay.commands),before)
 
     def test_main_stage_drop_align_uses_the_alignment_result(self):
         for result, expected in ((None, 1), (Mock(), 0)):
@@ -395,8 +395,8 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_cli_yellow_missing_still_returns_success(self):
         self._run_full_cli(found=False).assert_not_called()
 
-    def test_full_cli_align_failure_still_returns_success(self):
-        self._run_full_cli(align_ok=False).assert_not_called()
+    def test_full_cli_does_not_repeat_legacy_alignment_after_search(self):
+        self._run_full_cli(align_ok=False).assert_called_once()
 
     def test_full_cli_drop_failure_stops_and_returns_failure(self):
         drop = self._run_full_cli(drop_ok=False, expected_code=1)

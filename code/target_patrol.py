@@ -128,6 +128,7 @@ class YoloVision:
         self._horizontal = None
         self._error = None
         self._frame_size = (CAMERA_WIDTH, CAMERA_HEIGHT)
+        self._frame = None
 
     def start(self):
         if self.detector is None and not self.weights.is_file():
@@ -187,6 +188,7 @@ class YoloVision:
                                                center_width_ratio=self.drop_center_width_ratio)
                 entry = latch.update(target)
                 with self._lock:
+                    self._frame = frame
                     self._frame_size = (frame.shape[1], frame.shape[0])
                     self._frame_at = frame_at
                     self._target = target
@@ -228,6 +230,27 @@ class YoloVision:
         with self._lock:
             self._check_fresh(now)
             return self._frame_at, self._visible, self._horizontal
+
+    def save_latest_frame(self, prefix):
+        """Stationary search evidence from the existing worker-owned camera."""
+        import cv2
+        import json
+        with self._lock:
+            frame = None if self._frame is None else self._frame.copy()
+            stamp, box = self._frame_at, self._visible
+        if frame is None:
+            return
+        prefix = Path(prefix)
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        overlay = frame.copy()
+        if box is not None:
+            cv2.rectangle(overlay, (round(box[0]),round(box[1])),
+                          (round(box[2]),round(box[3])), (0,255,0), 2)
+        for suffix, pixels in (("raw.jpg",frame),("bbox.jpg",overlay)):
+            if not cv2.imwrite(str(prefix)+"_"+suffix,pixels):
+                raise OSError(f"cannot save {prefix}_{suffix}")
+        Path(str(prefix)+"_bbox.json").write_text(json.dumps(
+            {"timestamp":stamp,"box":box}),encoding="utf-8")
 
     def poll(self, now):
         with self._lock:
