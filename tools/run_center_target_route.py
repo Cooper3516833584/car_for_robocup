@@ -99,7 +99,7 @@ def main(argv=None):
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument("--check-vision", action="store_true",
                         help="check camera/model freshness without opening motion, GPIO or servo")
-    parser.add_argument("--max-seconds", type=float, default=300)
+    parser.add_argument("--max-seconds", type=float, default=600)
     parser.add_argument("--startup-alarm-seconds", type=float, default=0,
                         help="drop mode: hold selected magnets, alarm for this duration, then start (0=disabled)")
     parser.add_argument("--confirm-motor-test", action="store_true")
