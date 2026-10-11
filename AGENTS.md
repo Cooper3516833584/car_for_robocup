@@ -28,6 +28,16 @@ Pulling code does not authorize a motor test or autonomous mission. Keep SSH
 passwords out of scripts, command arguments, environment variables, logs, and
 the repository.
 
+## Development principles: first principles and the minimal solution
+
+Before starting development, review the requirement from first principles: identify the problem that actually needs solving, the objective constraints, and the assumptions that are not yet verified.
+
+Prefer the smallest, simplest solution that satisfies the requirement. For every abstraction, state, component, or logic branch you intend to add, question whether it is necessary: would the requirement still be met if it were removed?
+
+Validate the real value of any added complexity with counterfactual reasoning, comparison against alternatives, and, where necessary, ablation experiments. Introduce extra complexity only when a simpler solution cannot satisfy a clear requirement, or when there is a demonstrable engineering benefit.
+
+Do not design ahead for requirements that may arise in the future, and do not add abstractions for the sake of architectural completeness. Any inference that has not actually been verified must be explicitly labelled as an assumption and must never be presented as an experimental conclusion.
+
 ## Architecture boundaries
 
 - `code/config/` owns TOML parsing, readiness checks, and factories. Components receive validated config objects and do not read TOML themselves.
