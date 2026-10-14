@@ -848,7 +848,7 @@ def _stage(runtime, name, action):
 
 
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
-                     slot=CH3_PAYLOAD_SLOT, color=TARGET_COLOR):
+                     slot=CH3_PAYLOAD_SLOT, color=TARGET_COLOR, send_drone_task=None):
     from config.v2_factory import build_servo
 
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
@@ -879,7 +879,16 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
             raise
         runtime.mission.set_task_counts(counts)
-        if _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime)) is not True:
+        def handoff():
+            if send_drone_task is None:
+                return send_task_to_drone_once(counts, runtime=runtime)
+            ok = send_drone_task(counts)
+            runtime.record_event("hc_task_send", **counts.as_dict(), success=ok,
+                                 protocol="FleetBus", start_confirmed=ok is True,
+                                 bridge_envelope=HC_BRIDGE_ENVELOPE)
+            return ok
+
+        if _stage(runtime, "hc-send", handoff) is not True:
             runtime.drive.stop()
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
@@ -913,7 +922,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
                           yellow_camera=None, weights=None, slot=CH3_PAYLOAD_SLOT,
-                          color=TARGET_COLOR):
+                          color=TARGET_COLOR, send_drone_task=None):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
         raise ValueError(f"unknown competition stage: {stage}")
@@ -933,7 +942,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
                                 yellow_camera=yellow_camera, detector=detector, slot=slot,
-                                color=color)
+                                color=color, send_drone_task=send_drone_task)
     if stage == "hc-send":
         if runtime.mission.task_counts is None:
             raise RuntimeError("hc-send requires actual task counts")

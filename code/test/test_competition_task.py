@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import math
 import sys
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch, PropertyMock
@@ -243,6 +244,18 @@ class CompetitionTaskTests(unittest.TestCase):
             ((0.45, 0.0), (0.55, 0.0))])
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
 
+    def test_full_route_can_use_shared_task_sender(self):
+        counts = TaskCounts(1, 2, 1)
+        self.stack.enter_context(patch.object(task, "read_task_board", return_value=counts))
+        old_sender = self.stack.enter_context(patch.object(
+            task, "send_task_to_drone_once", side_effect=AssertionError("reopened HC-15")))
+        send = Mock(return_value=True)
+        task.run_full_mission(self.runtime, detector=None, send_drone_task=send)
+        send.assert_called_once_with(counts)
+        old_sender.assert_not_called()
+        self.runtime.record_event.assert_any_call("hc_task_send", **counts.as_dict(),
+            success=True, protocol="FleetBus", start_confirmed=True, bridge_envelope=True)
+
     def test_full_route_uses_verified_horizontal_centre_without_reopening_camera(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
@@ -309,6 +322,20 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["slot"], 2)
         self.assertEqual(task.CH3_PAYLOAD_SLOT, 2)
         self.assertEqual(payload_channel(task.CH3_PAYLOAD_SLOT), 3)
+
+    def test_main_can_run_in_listener_worker_without_signal_registration(self):
+        published = []
+        results = []
+        with patch("main_robocup.build_runtime", return_value=self.runtime), \
+             patch.object(task, "run_competition_stage", return_value=True):
+            worker = threading.Thread(target=lambda: results.append(main(
+                ["--mode", "hardware-mission", "--competition-stage", "lane"],
+                stop_event=threading.Event(), on_runtime_ready=published.append)))
+            worker.start()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [0])
+        self.assertEqual(published, [self.runtime, None])
 
     def test_standalone_drop_does_not_start_full_route(self):
         drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=True))

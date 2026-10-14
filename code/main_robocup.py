@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import sys
 import signal
+import threading
 
 from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal
@@ -145,7 +146,8 @@ def run_direct_competition_stage(args) -> int:
     raise ValueError(f"unsupported direct competition stage: {stage}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, stop_event=None,
+         send_drone_task=None, on_runtime_ready=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
@@ -242,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
 
     previous_sigterm = None
     try:
+        if on_runtime_ready is not None:
+            on_runtime_ready(runtime)
         if competition_enabled:
             from competition_task import run_competition_stage
             from mission_control import task_scope
@@ -256,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
             stop_file = Path(args.log_dir or "logs/competition") / "STOP"
 
             def guard():
+                if stop_event is not None and stop_event.is_set():
+                    raise RuntimeError("competition interrupted by ground STOP")
                 if stop_file.exists():
                     raise RuntimeError("competition interrupted by STOP file")
                 if runtime.clock() >= deadline:
@@ -264,15 +270,16 @@ def main(argv: list[str] | None = None) -> int:
             def terminate(*_):
                 raise KeyboardInterrupt
 
-            previous_sigterm = signal.signal(signal.SIGTERM, terminate)
+            if threading.current_thread() is threading.main_thread():
+                previous_sigterm = signal.signal(signal.SIGTERM, terminate)
             with task_scope(guard):
                 guard()
-                result = run_competition_stage(
-                    runtime, stage,
-                    task_board_camera=camera_value(args.task_board_camera),
-                    yellow_camera=camera_value(args.yellow_camera),
-                    weights=args.yellow_model, slot=args.payload_slot,
-                )
+                stage_kwargs = dict(task_board_camera=camera_value(args.task_board_camera),
+                                    yellow_camera=camera_value(args.yellow_camera),
+                                    weights=args.yellow_model, slot=args.payload_slot)
+                if send_drone_task is not None:
+                    stage_kwargs["send_drone_task"] = send_drone_task
+                result = run_competition_stage(runtime, stage, **stage_kwargs)
             logging.info("competition stage completed: %s; result=%s",
                          stage,
                          result if isinstance(result, (bool, type(None))) else type(result).__name__)
@@ -330,8 +337,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             runtime.close()
         finally:
-            if previous_sigterm is not None:
-                signal.signal(signal.SIGTERM, previous_sigterm)
+            try:
+                if on_runtime_ready is not None:
+                    on_runtime_ready(None)
+            finally:
+                if previous_sigterm is not None:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
