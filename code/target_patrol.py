@@ -129,6 +129,7 @@ class YoloVision:
         self._error = None
         self._frame_size = (CAMERA_WIDTH, CAMERA_HEIGHT)
         self._frame = None
+        self._colours = ()
 
     def start(self):
         if self.detector is None and not self.weights.is_file():
@@ -179,6 +180,11 @@ class YoloVision:
                 if frames == 1 or frame_age > VISION_MAX_AGE_S:
                     continue
                 boxes = [] if result.boxes is None else result.boxes.data.cpu().tolist()
+                names = result.names if isinstance(result.names, dict) else dict(enumerate(result.names))
+                colours = tuple((str(names[int(box[5])]).lower(), tuple(box)) for box in boxes
+                                if len(box) >= 6 and math.isfinite(float(box[5]))
+                                and float(box[5]).is_integer() and int(box[5]) in names
+                                and visible_target([box], frame.shape[1], frame.shape[0], self.confidence))
                 boxes = filter_target_boxes(boxes, result.names, self.target_class_name)
                 # Standard detect models expose xyxy, confidence, class in six columns.
                 target = visible_target(boxes, frame.shape[1], frame.shape[0], self.confidence,
@@ -194,6 +200,7 @@ class YoloVision:
                     self._target = target
                     self._visible = visible
                     self._horizontal = horizontal
+                    self._colours = colours
                     if entry is not None and self._pending is None:
                         self._pending = entry
                 self._ready.set()
@@ -231,6 +238,12 @@ class YoloVision:
             self._check_fresh(now)
             return self._frame_at, self._visible, self._horizontal
 
+    def observe_colours(self, now):
+        """Immutable same-frame (model colour name, bbox) snapshot under one lock."""
+        with self._lock:
+            self._check_fresh(now)
+            return self._frame_at, self._colours
+
     def save_latest_frame(self, prefix):
         """Stationary search evidence from the existing worker-owned camera."""
         import cv2
@@ -266,7 +279,7 @@ class YoloVision:
 
 def find_centered_target(runtime, vision, start_xy, end_xy, *, slow_speed_m_s=.08,
                          abort=lambda: False, max_seconds=300,
-                         clock=time.monotonic, sleep=time.sleep):
+                         clock=time.monotonic, sleep=time.sleep, observe_drop=None):
     """Search a caller-owned fused line; stop on horizontal centre or line end.
 
     This owns no field route and never releases payload. The caller owns the
@@ -276,6 +289,7 @@ def find_centered_target(runtime, vision, start_xy, end_xy, *, slow_speed_m_s=.0
     slow_drive = replace(original_drive, max_linear_speed_m_s=min(
         original_drive.max_linear_speed_m_s, slow_speed_m_s))
     deadline = clock() + max_seconds
+    observe_drop = vision.observe_drop if observe_drop is None else observe_drop
 
     def guard():
         if abort():
@@ -293,16 +307,16 @@ def find_centered_target(runtime, vision, start_xy, end_xy, *, slow_speed_m_s=.0
             _step(runtime)
             sleep(PERIOD_S)
         guard()
-        vision.observe(clock())  # Raise on worker failure before any motion.
+        observe_drop(clock())  # Raise on worker failure before any motion.
         if math.dist(start_xy, end_xy) < 1e-9:
-            return vision.observe_drop(clock())[2]
+            return observe_drop(clock())[2]
         runtime.motion.track_global_line(start_xy, end_xy)
         runtime.record_event("target_search_start", start_xy=start_xy, end_xy=end_xy,
                              pose_reference="fused")
         slowing = None
         while True:
             guard()
-            _, visible, centered = vision.observe_drop(clock())
+            _, visible, centered = observe_drop(clock())
             now_slowing = visible is not None
             runtime.motion.drive = slow_drive if now_slowing else original_drive
             if now_slowing != slowing:

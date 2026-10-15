@@ -84,6 +84,24 @@ canonical `(1.0 m, 0.0 m, 0 rad CCW)`. A legacy `-90 deg CW` heading becomes
 `+pi/2 rad CCW`; a base-link offset of `+0.20 m` in legacy forward at that
 heading moves the map position by `+0.20 m` in map `+Y`.
 
+## Competition-local D500 origin
+
+The three-leg mission in `competition_task.py` defines local `(0, 0)` at the
+D500 centre at launch. Local `+X` is initial forward, `+Y` initial left. This
+mission convention does not change the canonical fused `base_link` pose.
+After OCR and localization readiness, the mission captures one immutable fused
+base pose `(p0, theta0)`. With the existing measured D500 XY mount `d`, a local
+radar target `q` at relative heading `h` becomes a fused base target:
+
+`p0 + R(theta0)*d + R(theta0)*q - R(theta0+h)*d`.
+
+This converts targets only; it does not apply the mount again to fused sensor
+measurements or reset T265/SLAM. In-place turns pivot about `base_link`; a
+nonzero D500 offset therefore sweeps an arc. The task logs actual base/radar
+positions before/after turns and adds no lateral compensation maneuver.
+Standalone competition stages retain caller-owned fused coordinates and never
+infer a new competition origin from an intermediate vehicle pose.
+
 ## Time contract
 
 Freshness and timeout checks use `time.monotonic()` seconds. Wall-clock time is

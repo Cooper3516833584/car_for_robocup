@@ -39,7 +39,8 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.center_available = True
         self.stop_during_detour = False
         self.config = load_runtime_config()
-        self.config = replace(self.config, servo=replace(self.config.servo, enabled=True))
+        self.config = replace(self.config, servo=replace(self.config.servo, enabled=True),
+                              d500_mount=replace(self.config.d500_mount, x_m=0., y_m=0.))
         self.logger = Mock()
         self.servo = Mock(is_running=True, pulse_us=2500)
         # The 0 deg refinement camera is faked: no test may open a real device.
@@ -50,6 +51,8 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.vision = Mock(ready=True, frame_size=(640,480))
         self.vision.observe.side_effect = lambda now: (now, self.boxes()[0])
         self.vision.observe_drop.side_effect = lambda now: (now, *self.boxes())
+        self.vision.observe_colours.side_effect = lambda now: (
+            now, tuple((color, self.boxes()[0]) for color in ('yellow', 'blue')))
         self.vision_factory = self.stack.enter_context(patch.object(target_patrol, "YoloVision", return_value=self.vision))
         self.stack.enter_context(patch("config.v2_factory.build_servo", return_value=self.servo))
         self.stack.enter_context(patch("main_robocup.load_runtime_config", return_value=self.config))
@@ -60,12 +63,18 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=self.counts))
         self.send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
         self.stack.enter_context(patch.object(task, "load_detector", return_value=Mock()))
+        original_full = task.run_full_mission
+        def with_fake_detector(runtime, **kwargs):
+            kwargs['detector'] = Mock()
+            return original_full(runtime, **kwargs)
+        self.stack.enter_context(patch.object(task,'run_full_mission',side_effect=with_fake_detector))
         # A different field path, not the test fixture's 280/420/250 cm rectangle.
-        for name,value in {"LANE_ENTRY_X":.15,"TASK_BOARD_X":.25,"CORNER_1_X":1.05,
+        for name,value in {"ROUTE_POINTS":((0.,0.),(1.05,0.),(1.05,.85),(0.,.85)),
+                           "LANE_ENTRY_X":0.,"TASK_BOARD_X":0.,"CORNER_1_X":1.05,
                            "CROSS_LANE_YAW_DEG":90,"YELLOW_SEARCH_START_X":1.05,
                            "YELLOW_SEARCH_START_Y":.10,"YELLOW_SEARCH_END_X":1.05,
                            "YELLOW_SEARCH_END_Y":.65,"CORNER_2_X":1.05,
-                           "CORNER_2_Y":.85,"FINISH_X":1.40,"FINISH_Y":.85}.items():
+                           "CORNER_2_Y":.85,"FINISH_X":0.,"FINISH_Y":.85}.items():
             self.stack.enter_context(patch.object(task,name,value))
         self.stack.enter_context(patch.object(target_patrol, "route_from_pose",
                                   side_effect=AssertionError("test route must not enter production")))
@@ -128,23 +137,23 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.used_config.drive.max_linear_accel_m_s2,self.config.drive.max_linear_accel_m_s2)
         kwargs=self.vision_factory.call_args.kwargs
         self.assertEqual(kwargs["confidence"],.8)
-        self.assertEqual(kwargs["target_class_name"],"blue")
+        self.assertNotIn("target_class_name",kwargs)  # One worker supplies both named colours.
         self.assertAlmostEqual(kwargs["drop_center_width_ratio"],.1)
         # +90 search; blind drop never moves the camera servo.
         self.assertEqual(self.servo.set_angle.call_args_list,
-                         [call(90, settle=True),call(90, settle=True)])
+                         [call(90, settle=True)])
         self.servo.close.assert_called_once_with(hold=True)
-        self.assertEqual(self.vision.close.call_count,2)
+        self.assertEqual(self.vision.close.call_count,1)
         calls=self.runtime.motion.track_global_line.call_args_list
-        self.assertTrue(any(c.args==((.25,0),(1.05,0)) for c in calls))
-        self.assertTrue(any(c.args==((1.05,.10),(1.05,.65)) for c in calls))
-        self.assertTrue(any(c.args==((1.05,.10),(1.05,.85)) for c in calls))
+        self.assertTrue(any(c.args==((0.,0.),(1.05,0.)) for c in calls))
+        self.assertTrue(any(c.args==((1.05,0.),(1.05,.85)) for c in calls))
+        self.assertTrue(any(c.args==((1.05,.85),(0.,.85)) for c in calls))
         starts={v["stage"]:v for e,v in self.events if e=="payload_detour_stage_start"}
         self.assertLess(math.dist(starts["safe_side_approach"]["args"][0],
                          starts["return_from_drop"]["args"][1]), .01)
         self.assertTrue(starts["return_from_drop"]["kwargs"]["reverse"])
         self.assertTrue(any(c.kwargs.get("reverse") for c in calls))
-        self.assertLess(math.dist(self.pose[:2],(1.40,.85)),.035)
+        self.assertLess(math.dist(self.pose[:2],(0.,.85)),.035)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
         self.assertIsNone(self.runtime.relay)
         self.final_open.assert_called()
@@ -207,7 +216,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_worker_failure_stops_and_closes_vision_and_servo(self):
-        self.vision.observe.side_effect=RuntimeError("stale inference")
+        self.vision.observe_colours.side_effect=RuntimeError("stale inference")
         self.assertEqual(self.run_main(),1)
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
         self.vision.close.assert_called_once()
@@ -217,7 +226,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
     def test_release_failure_stops_before_second_corner(self):
         with patch("payload_detour.open_payload",side_effect=RuntimeError("release failed")):
             self.assertEqual(self.run_main(),1)
-        self.assertFalse(any(e=="competition_stage_start" and v["stage"]=="corner2" for e,v in self.events))
+        self.assertFalse(any(e=="competition_route_leg_start" and v["leg"]==3 for e,v in self.events))
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
         self.assertIsNone(self.runtime.relay)
 
@@ -234,7 +243,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
 
     def test_task_deadline_interrupts_original_lane_motion(self):
         self.assertEqual(self.run_main("--max-seconds","1"),1)
-        self.send.assert_not_called()
+        self.send.assert_called_once()  # Handoff precedes the three-leg patrol.
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
 
@@ -256,6 +265,17 @@ class MainPatrolIntegrationTests(unittest.TestCase):
 
 
 class SharedVisionWorkerTests(unittest.TestCase):
+    def test_colour_snapshot_preserves_freshness_and_worker_error_gates(self):
+        vision = target_patrol.YoloVision()
+        vision._frame_at = 10.
+        vision._colours = (('blue',(300,0,340,40,.9,99)),)
+        self.assertEqual(vision.observe_colours(11.)[1],vision._colours)
+        with self.assertRaisesRegex(RuntimeError,'stale'):
+            vision.observe_colours(13.)
+        vision._error = 'camera failed'
+        with self.assertRaisesRegex(RuntimeError,'camera failed'):
+            vision.observe_colours(10.)
+
     def test_preloaded_detector_accepts_borrowed_read_only_camera_and_native_size(self):
         frame = SimpleNamespace(shape=(720,1280,3))
         camera = SimpleNamespace(read=Mock(return_value=(True,frame)))
@@ -280,6 +300,9 @@ class SharedVisionWorkerTests(unittest.TestCase):
         self.assertTrue(vision.ready)
         self.assertEqual(vision.frame_size,(1280,720))
         self.assertEqual(vision.observe_drop(time.monotonic())[1:],(yellow,yellow))
+        stamp, colours = vision.observe_colours(time.monotonic())
+        self.assertEqual(colours, (('red',(590,0,690,40,.99,0)),('yellow',yellow)))
+        self.assertIsInstance(colours, tuple)
         self.assertEqual(camera.read.call_count,2)
         load.assert_not_called()
         detector.predict.assert_called_with(frame,imgsz=320,conf=.8,device="cpu",verbose=False)

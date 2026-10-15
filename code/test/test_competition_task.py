@@ -1,6 +1,7 @@
 """Hardware-free route acceptance using the production motion/runtime loop."""
 
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 import math
 import sys
@@ -22,24 +23,223 @@ from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_con
 
 
 class CompetitionTaskTests(unittest.TestCase):
+    def route_events(self, name):
+        return [c.kwargs for c in self.runtime.record_event.call_args_list if c.args == (name,)]
+
+    def visual_schedule(self, schedule):
+        def observe(now):
+            legs = self.route_events('competition_route_leg_start')
+            if not legs:
+                return now, ()
+            leg = legs[-1]
+            a, b = leg['start_fused_base_xy'], leg['end_fused_base_xy']
+            length = math.dist(a, b)
+            progress = sum((self.xy_yaw[i]-a[i])*(b[i]-a[i])/length for i in (0, 1))
+            return now, tuple((color, (300., 100., 340., 140., .95, 83))
+                for index, color, at in schedule if index == leg['leg'] and at <= progress <= at+.075)
+        return observe
+
+    def run_visual_route(self, schedule, *, car_only_test=True):
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
+        self.send = self.stack.enter_context(patch.object(task, 'send_task_to_drone_once', return_value=True))
+        self.fake_vision(self.visual_schedule(schedule))
+        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=car_only_test)
+
+    def test_three_legs_two_absolute_turns_and_final_endpoint_with_real_pp(self):
+        self.xy_yaw[:] = [1.2, -.4, math.radians(30)]
+        self.run_visual_route([])
+        self.assertEqual(len(self.route_events('competition_route_origin')), 1)
+        legs = self.route_events('competition_route_leg_done')
+        self.assertEqual([e['leg'] for e in legs], [1, 2, 3])
+        self.assertEqual([e['desired_heading_local_deg'] for e in legs], [0., 90., 180.])
+        turns = self.route_events('competition_route_turn_done')
+        self.assertEqual([e['desired_heading_local_deg'] for e in turns], [90., 180.])
+        for event, expected in zip(turns, (120., 210.)):
+            error = math.atan2(math.sin(event['actual_fused_yaw']-math.radians(expected)),
+                               math.cos(event['actual_fused_yaw']-math.radians(expected)))
+            self.assertLess(abs(error), self.runtime.motion.navigation.yaw_tolerance_rad)
+        target = (1.2-.25*math.sin(math.radians(30)), -.4+.25*math.cos(math.radians(30)))
+        self.assertLess(math.dist(self.xy_yaw[:2], target), .035)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
+
+    def test_production_length_three_leg_route_finishes_at_0_7_36(self):
+        with patch.object(task, 'ROUTE_POINTS', ((0.,0.),(7.60,0.),(7.60,7.36),(0.,7.36))):
+            self.run_visual_route([])
+        self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
+        self.assertLess(math.dist(self.xy_yaw[:2], (0.,7.36)), .035)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+
+    def test_assigned_colour_before_yellow_on_different_legs(self):
+        self.run_visual_route([(1,'blue',.07),(2,'yellow',.07)])
+        drops = [d for d in self.route_events('payload_drop') if d['detour_completed']]
+        self.assertEqual([d['color'] for d in drops], ['blue','yellow'])
+        self.assertEqual([d['slot'] for d in drops], [1,0])
+        self.assertTrue(all(d['simulated'] and not d['success'] for d in drops))
+        self.send.assert_not_called()
+        self.open.assert_not_called()
+
+    def test_yellow_before_assigned_colour_on_same_leg(self):
+        self.run_visual_route([(1,'yellow',.055),(1,'blue',.18)])
+        drops = [d for d in self.route_events('payload_drop') if d['detour_completed']]
+        self.assertEqual([d['color'] for d in drops], ['yellow','blue'])
+        starts = self.route_events('target_search_start')
+        self.assertTrue(all((e['start_xy'],e['end_xy']) == self.points[:2] for e in starts))
+        self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
+
+    def test_third_leg_target_is_processed_before_finish(self):
+        self.run_visual_route([(1,'yellow',.06),(3,'blue',.08)])
+        self.assertEqual([d['color'] for d in self.route_events('payload_drop')], ['yellow','blue'])
+        self.assertTrue(all(d['detour_completed'] for d in self.route_events('payload_drop')))
+        self.assertLess(math.dist(self.xy_yaw[:2], self.points[-1]), .035)
+
+    def test_both_missing_targets_still_complete_all_three_legs(self):
+        self.run_visual_route([])
+        self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
+        self.assertEqual(len(self.route_events('payload_drop')), 2)
+        self.assertTrue(all(d['skipped'] and not d['detour_completed'] for d in self.route_events('payload_drop')))
+
+    def test_failed_alignment_does_not_retrigger_same_visible_target(self):
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
+        self.fake_vision(lambda now: (now, (('yellow',(300,100,340,140,.95,7)),)))
+        with patch.object(task, 'fine_center_on_road', return_value=None) as align:
+            task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
+        align.assert_called_once()
+        self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
+        self.open.assert_not_called()
+
+    def test_two_simultaneous_colours_choose_nearest_center_then_name(self):
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
+        self.fake_vision(lambda now: (now, (('yellow',(308,0,340,40,.95,4)),
+                                          ('blue',(300,0,340,40,.95,99)))))
+        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
+        self.assertEqual([d['color'] for d in self.route_events('payload_drop')], ['blue','yellow'])
+
+    def test_simultaneous_equal_centres_have_deterministic_name_priority(self):
+        self.stack.enter_context(patch.object(task,'read_task_board',return_value=TaskCounts(2,1,1)))
+        self.fake_vision()
+        task.run_full_mission(self.runtime,detector=Mock(),car_only_test=True)
+        self.assertEqual([d['color'] for d in self.route_events('payload_drop')],['blue','yellow'])
+
+    def test_failed_target_can_reenter_after_new_clear_frames(self):
+        original = task.fine_center_on_road
+        calls = []
+        def align(runtime,vision,box,**kwargs):
+            calls.append(kwargs['color'])
+            return None if len(calls)==1 else original(runtime,vision,box,**kwargs)
+        with patch.object(task,'fine_center_on_road',side_effect=align):
+            self.run_visual_route([(1,'yellow',.04),(1,'yellow',.18),(3,'blue',.08)])
+        self.assertEqual(calls,['yellow','yellow','blue'])
+        self.assertEqual(len([d for d in self.route_events('payload_drop') if d['detour_completed']]),2)
+
+    def test_car_only_ocr_fallback_still_runs_two_real_detours_without_outputs(self):
+        self.fake_vision()
+        reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+        reader.recognize_camera.side_effect = OSError('OCR camera unavailable')
+        with patch('components.task_board_reader.TaskBoardReader',return_value=reader), \
+             patch('main_robocup.build_runtime',return_value=self.runtime), \
+             patch('main_robocup.open_payload') as cleanup_open, \
+             patch.object(task,'send_task_to_drone_once') as send:
+            self.assertEqual(main(['--competition','--mode','hardware-mission'],car_only_test=True),0)
+        self.assertEqual(self.runtime.mission.task_counts.key,(1,2,1))
+        drops = self.route_events('payload_drop')
+        self.assertEqual({d['color'] for d in drops},{'red','yellow'})
+        self.assertTrue(all(d['detour_completed'] and d['simulated'] and not d['success'] for d in drops))
+        self.assertEqual(len(self.route_events('payload_detour_done')),2)
+        self.open.assert_not_called()
+        cleanup_open.assert_not_called()
+        send.assert_not_called()
+
+    def test_fine_center_feedback_cannot_switch_to_other_colour(self):
+        def observe(now):
+            cx = 328.-400*self.xy_yaw[0]
+            return now, (('blue',(cx-20,0,cx+20,40,.95,99)),
+                         ('yellow',(300,0,340,40,.99,7)))
+        vision = self.fake_vision(observe)
+        result = task.fine_center_on_road(self.runtime,vision,(308,0,348,40,.95,99),color='blue')
+        self.assertIsNotNone(result)
+        self.assertEqual(result[5],99)
+        self.assertGreater(self.xy_yaw[0],.015)
+        self.assertTrue(self.route_events('search_road_gain'))
+
+    def test_origin_and_mount_remain_fixed_after_detours_and_turns(self):
+        self.xy_yaw[:] = [1.2,-.4,math.radians(30)]
+        self.runtime.config = replace(self.runtime.config,
+            d500_mount=replace(self.runtime.config.d500_mount,x_m=.12,y_m=-.04))
+        # Leave physical space after the nonzero-mount corner arc for each target.
+        with patch.object(task,'ROUTE_POINTS',((0.,0.),(.8,0.),(.8,.7),(0.,.7))):
+            self.run_visual_route([(1,'blue',.3),(3,'yellow',.4)])
+        origins = self.route_events('competition_route_origin')
+        self.assertEqual(len(origins),1)
+        self.assertEqual((origins[0]['fused_base_x'],origins[0]['fused_base_y']), (1.2,-.4))
+        origin = Pose2D(1.2,-.4,math.radians(30),10.)
+        for leg in self.route_events('competition_route_leg_start'):
+            expected = task.field_point_to_fused_base(origin,leg['end_local_xy'],
+                leg['desired_heading_local_deg'],self.runtime.config.d500_mount)
+            self.assertEqual(leg['end_fused_base_xy'],expected)
+        # Existing line completion is along-track progress, not exact Euclidean
+        # endpoint arrival; do not change PP tolerances for the short fixture.
+        heading = origin.yaw_rad+math.pi
+        remaining = ((expected[0]-self.xy_yaw[0])*math.cos(heading)
+                     +(expected[1]-self.xy_yaw[1])*math.sin(heading))
+        self.assertLess(abs(remaining),self.runtime.motion.navigation.position_tolerance_m)
+        self.assertEqual(len([d for d in self.route_events('payload_drop') if d['detour_completed']]),2)
+
+    def test_coincident_lane_and_board_stages_do_not_start_zero_motion(self):
+        with patch.object(self.runtime.motion,'navigate_to_pose') as navigate, \
+             patch.object(self.runtime.motion,'track_global_line') as line, \
+             patch.object(task,'read_task_board',return_value=TaskCounts(1,2,1)) as read:
+            task.go_to_lane(self.runtime)
+            task.go_to_task_board(self.runtime)
+        navigate.assert_not_called()
+        line.assert_not_called()
+        read.assert_called_once_with(runtime=self.runtime)
+
+    def test_stop_during_second_leg_prevents_third_leg(self):
+        stop = threading.Event()
+        self.fake_vision(lambda now: (now, ()))
+        self.stack.enter_context(patch.object(task,'read_task_board',return_value=TaskCounts(2,1,1)))
+        advance = self.advance
+        def cancel(dt):
+            advance(dt)
+            if len(self.route_events('competition_route_leg_start')) == 2:
+                stop.set()
+        self.stack.enter_context(patch.object(task.time,'sleep',cancel))
+        with patch('main_robocup.build_runtime',return_value=self.runtime):
+            self.assertEqual(main(['--competition','--mode','hardware-mission'],
+                                  stop_event=stop,car_only_test=True),1)
+        self.assertEqual(len(self.route_events('competition_route_leg_start')),2)
+        self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s,0)
+
+    def test_localization_loss_during_second_leg_stops_before_third(self):
+        advance = self.advance
+        def lose(dt):
+            advance(dt)
+            self.lost = len(self.route_events('competition_route_leg_start')) >= 2
+        self.stack.enter_context(patch.object(task.time,'sleep',lose))
+        with self.assertRaises(task.LocalizationLostError):
+            self.run_visual_route([])
+        self.assertEqual(len(self.route_events('competition_route_leg_start')),2)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s,0)
+
     def test_car_only_full_cli_runs_both_fused_detours_without_pwm_or_drone(self):
         self.stack.enter_context(patch.object(task, 'payload_configured', return_value=False))
         self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2, 1, 1)))
-        search = self.stack.enter_context(patch.object(task, 'search_centered_yellow_on_line',
-            return_value=YellowDetection(320, 240, 80, 80, .9)))
+        self.fake_vision()
+        self.stack.enter_context(patch.object(task, 'load_detector', return_value=Mock()))
         send = self.stack.enter_context(patch.object(task, 'send_task_to_drone_once'))
         injected_send = Mock(side_effect=AssertionError('drone task leaked'))
         with patch('main_robocup.build_runtime', return_value=self.runtime), \
              patch('main_robocup.open_payload') as final_open:
             self.assertEqual(main(['--competition', '--mode', 'hardware-mission'],
                                   car_only_test=True, send_drone_task=injected_send), 0)
-        self.assertEqual([c.kwargs['color'] for c in search.call_args_list], ['yellow', 'blue'])
         events = self.runtime.record_event.call_args_list
         stages = [c.kwargs['stage'] for c in events if c.args == ('payload_detour_stage_done',)]
         self.assertEqual(stages, ['left_90deg', 'safe_side_approach', 'return_from_drop',
                                   'right_90deg'] * 2)
         skips = [c for c in events if c.args == ('payload_release_skipped',)]
-        self.assertEqual([c.kwargs['slot'] for c in skips], [0, 1])
+        self.assertEqual(sorted(c.kwargs['slot'] for c in skips), [0, 1])
         drops = [c.kwargs for c in events if c.args == ('payload_drop',)]
         self.assertTrue(all(d['simulated'] and d['detour_completed'] and not d['success'] for d in drops))
         send.assert_not_called()
@@ -75,9 +275,8 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task,'payload_configured',return_value=False))
         self.stack.enter_context(patch.object(task,'read_task_board',return_value=TaskCounts(2,1,1)))
         send=self.stack.enter_context(patch.object(task,'send_task_to_drone_once',return_value=True))
-        search=self.stack.enter_context(patch.object(task,'search_centered_yellow_on_line',return_value=Mock()))
+        self.fake_vision()
         task.run_full_mission(self.runtime,detector=Mock())
-        self.assertEqual([c.kwargs['color'] for c in search.call_args_list],['yellow','blue'])
         send.assert_called_once_with(task.DroneAllocation(2,0,1),runtime=self.runtime)
         self.open.assert_not_called()
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
@@ -87,7 +286,9 @@ class CompetitionTaskTests(unittest.TestCase):
         self.xy_yaw = [0.0, 0.0, 0.0]
         self.lost = False
         self.sleep_count = 0
-        self.runtime = build_runtime(load_runtime_config(), RuntimeMode.DRY_RUN,
+        config = load_runtime_config()
+        config = replace(config, d500_mount=replace(config.d500_mount, x_m=0., y_m=0.))
+        self.runtime = build_runtime(config, RuntimeMode.DRY_RUN,
                                      clock=lambda: self.now)
         self.runtime.start()
         self.addCleanup(self.runtime.close)
@@ -116,13 +317,30 @@ class CompetitionTaskTests(unittest.TestCase):
         local = self.stack.enter_context(patch.object(PoseFusion, "continuous_t265_pose", new_callable=PropertyMock))
         local.side_effect = lambda: None if self.lost else Pose2D(*self.xy_yaw, self.now)
         self.stack.enter_context(patch.object(task.time, "sleep", self.advance))
-        # Keep the shortened search endpoint inside the shortened corner segment.
-        # Otherwise the fixture physically overshoots corner 2 before rejoining.
-        for name, value in {"LANE_ENTRY_X": 0.10, "TASK_BOARD_X": 0.20,
-                            "CORNER_1_X": 0.30, "YELLOW_SEARCH_START_X": 0.35,
-                            "YELLOW_SEARCH_END_X": 0.40,
-                            "CORNER_2_X": 0.45, "FINISH_X": 0.55}.items():
+        # Same topology and controllers as production; shorten only this test scope.
+        self.points = ((0., 0.), (.30, 0.), (.30, .25), (0., .25))
+        for name, value in {"ROUTE_POINTS": self.points,
+                            "CORNER_1_X": .30, "CORNER_1_Y": 0.,
+                            "YELLOW_SEARCH_START_X": .30, "YELLOW_SEARCH_START_Y": 0.,
+                            "YELLOW_SEARCH_END_X": .30, "YELLOW_SEARCH_END_Y": .25,
+                            "CORNER_2_X": .30, "CORNER_2_Y": .25,
+                            "FINISH_X": 0., "FINISH_Y": .25}.items():
             self.stack.enter_context(patch.object(task, name, value))
+
+    def fake_vision(self, observations=None):
+        vision = Mock(ready=True, frame_size=(640, 480))
+        box = (300., 100., 340., 140., .95, 17)
+        vision.observe_colours.side_effect = observations or (
+            lambda now: (now, tuple((name, box) for name in ('yellow', 'red', 'blue', 'green'))))
+        vision.observe_drop.side_effect = lambda now: (now, box, box)
+        self.stack.enter_context(patch('target_patrol.YoloVision', return_value=vision))
+        original = task.run_full_mission
+        def with_fake_detector(runtime, **kwargs):
+            if kwargs.get('detector') is None:
+                kwargs['detector'] = Mock()
+            return original(runtime, **kwargs)
+        self.stack.enter_context(patch.object(task, 'run_full_mission', side_effect=with_fake_detector))
+        return vision
 
     def estimate(self, now):
         pose = None if self.lost else Pose2D(*self.xy_yaw, now)
@@ -239,6 +457,9 @@ class CompetitionTaskTests(unittest.TestCase):
                     green=source[2], fallback=False, votes=3, confidence=0.95)
 
     def test_search_clips_last_step_and_needs_consecutive_frames(self):
+        for name, value in {'YELLOW_SEARCH_START_X': .35, 'YELLOW_SEARCH_START_Y': 0.,
+                            'YELLOW_SEARCH_END_Y': 0., 'CROSS_LANE_YAW_DEG': 0.}.items():
+            self.stack.enter_context(patch.object(task, name, value))
         self.stack.enter_context(patch.object(task, "YELLOW_SEARCH_END_X", 0.54))
         detection = YellowDetection(640, 360, 80, 80, 0.9)
         reads = [detection, None, None, None, None]
@@ -301,10 +522,9 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_stops_on_payload_failure_after_confirmed_handoff(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
-        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
-            return_value=YellowDetection(320, 240, 80, 80, 0.9)))
+        self.fake_vision(lambda now: (now, (('yellow', (300,100,340,140,.95,99)),)))
         drop = self.stack.enter_context(patch("payload_detour.open_payload", side_effect=RuntimeError("release failed")))
-        with patch.object(task, "go_to_second_corner") as corner:
+        with patch.object(task, "turn_to_deg", wraps=task.turn_to_deg) as corner:
             with self.assertRaisesRegex(RuntimeError, "release"):
                 task.run_full_mission(self.runtime, yellow_camera=Mock(), detector=Mock())
             corner.assert_not_called()
@@ -331,12 +551,13 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_uses_measured_lane_segments(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
-        with patch.object(task, "track_lane_line", wraps=task.track_lane_line) as follow:
+        with patch.object(task, "track_lane_line", wraps=task.track_lane_line) as follow, \
+             patch.object(task, 'turn_to_deg', wraps=task.turn_to_deg) as turn:
             task.run_full_mission(self.runtime, detector=None)
-        self.assertEqual([(c.args[1], c.args[2]) for c in follow.call_args_list], [
-            ((0.10, 0.0), (0.30, 0.0)),
-            ((0.30, 0.0), (0.35, 0.0)), ((0.35, 0.0), (0.45, 0.0)),
-            ((0.45, 0.0), (0.55, 0.0))])
+        self.assertEqual([(c.args[1], c.args[2]) for c in follow.call_args_list],
+                         list(zip(self.points, self.points[1:])))
+        self.assertEqual([c.args[1] for c in turn.call_args_list], [90., 180.])
+        self.assertLess(math.dist(self.xy_yaw[:2], self.points[-1]), .035)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
 
     def test_full_route_can_use_shared_task_sender(self):
@@ -354,12 +575,13 @@ class CompetitionTaskTests(unittest.TestCase):
     def test_full_route_uses_verified_horizontal_centre_without_reopening_camera(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
         self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
-        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
-            return_value=YellowDetection(320, 360, 80, 80, .9)))
+        vision = self.fake_vision()
         with patch.object(task,"align_yellow_drop_zone",side_effect=AssertionError("duplicate alignment")), \
              patch.object(task,"perform_payload_detour") as drop:
             task.run_full_mission(self.runtime,detector=Mock())
         self.assertEqual(drop.call_count,2)
+        vision.start.assert_called_once()
+        vision.close.assert_called_once()
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_move_to_xy_does_not_set_final_yaw(self):
@@ -372,7 +594,7 @@ class CompetitionTaskTests(unittest.TestCase):
         # Rejoin geometry must remain the measured lane, not current-pose -> goal.
         with patch.object(task, "track_lane_line", return_value=Mock()) as follow:
             task.go_to_second_corner(self.runtime)
-        follow.assert_called_once_with(self.runtime, (0.35, 0.0), (0.45, 0.0))
+        follow.assert_called_once_with(self.runtime, self.points[1], self.points[2])
 
     def test_full_route_without_yellow_skips_drop_and_finishes(self):
         self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
@@ -481,8 +703,7 @@ class CompetitionTaskTests(unittest.TestCase):
                       expected_code=0):
         self.stack.enter_context(patch.object(task, "load_detector", return_value=Mock()))
         self.stack.enter_context(patch.object(task, "_open_yellow_camera", return_value=(Mock(), False)))
-        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=(
-            YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
+        self.fake_vision(None if found else lambda now: (now, ()))
         self.handoff = self.stack.enter_context(
             patch.object(task, "send_task_and_start", return_value=hc_ok))
         def detour(runtime, **_kwargs):
@@ -525,11 +746,11 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime.relay = Mock()
         self.stack.enter_context(patch.object(task,"read_task_board",return_value=TaskCounts(1,2,1)))
         self.stack.enter_context(patch.object(task,"send_task_to_drone_once",return_value=True))
-        self.stack.enter_context(patch.object(task,"search_centered_yellow_on_line",return_value=Mock()))
-        task.run_competition_stage(self.runtime,"full")
+        self.fake_vision()
+        task.run_full_mission(self.runtime, detector=Mock())
         self.runtime.relay.assert_not_called()
         self.assertEqual(self.runtime.relay.method_calls,[])
-        self.assertEqual([c.args for c in self.open.call_args_list],[(0,),(1,)])
+        self.assertEqual(sorted(c.args for c in self.open.call_args_list),[(0,),(1,)])
 
     def test_shared_sender_failure_prevents_post_ocr_motion(self):
         self.stack.enter_context(patch.object(task,"read_task_board",return_value=TaskCounts(1,2,1)))
@@ -559,6 +780,35 @@ class CompetitionTaskTests(unittest.TestCase):
         with patch("main_robocup.build_runtime", return_value=self.runtime), \
              patch.object(task, "run_competition_stage", return_value=None):
             self.assertEqual(main(["--mode", "hardware-mission", "--competition"]), 1)
+
+
+class FieldRouteGeometryTests(unittest.TestCase):
+    def test_field_route_constants(self):
+        self.assertEqual(task.ROUTE_POINTS, ((0.,0.),(7.60,0.),(7.60,7.36),(0.,7.36)))
+        self.assertEqual(task.ROUTE_HEADINGS_DEG, (0.,90.,180.))
+
+    def test_translated_rotated_origin_with_zero_mount(self):
+        origin = Pose2D(1.2,-.4,math.radians(30),10.)
+        for point in task.ROUTE_POINTS:
+            for heading in task.ROUTE_HEADINGS_DEG:
+                x,y = task.field_point_to_fused_base(origin,point,heading,SimpleNamespace(x_m=0.,y_m=0.))
+                self.assertAlmostEqual(x,1.2+point[0]*math.cos(origin.yaw_rad)-point[1]*math.sin(origin.yaw_rad))
+                self.assertAlmostEqual(y,-.4+point[0]*math.sin(origin.yaw_rad)+point[1]*math.cos(origin.yaw_rad))
+                self.assertAlmostEqual(task.field_heading_to_fused_deg(origin,heading),30+heading)
+
+    def test_mount_compensation_is_applied_to_target_once(self):
+        origin = Pose2D(1.2,-.4,math.radians(30),10.)
+        mount = SimpleNamespace(x_m=.17,y_m=-.06)
+        c,s = math.cos(origin.yaw_rad),math.sin(origin.yaw_rad)
+        start_radar = (1.2+c*.17-s*(-.06),-.4+s*.17+c*(-.06))
+        for point in task.ROUTE_POINTS:
+            for heading in task.ROUTE_HEADINGS_DEG:
+                base = task.field_point_to_fused_base(origin,point,heading,mount)
+                theta = origin.yaw_rad+math.radians(heading)
+                radar = (base[0]+math.cos(theta)*.17-math.sin(theta)*(-.06),
+                         base[1]+math.sin(theta)*.17+math.cos(theta)*(-.06))
+                self.assertAlmostEqual(radar[0],start_radar[0]+c*point[0]-s*point[1])
+                self.assertAlmostEqual(radar[1],start_radar[1]+s*point[0]+c*point[1])
 
 
 if __name__ == "__main__":

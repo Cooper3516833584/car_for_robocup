@@ -21,9 +21,9 @@ from robocup_runtime import RobocupMissionState
 
 # ============================================================
 # FIELD / COMPETITION QUICK TUNING
-# TODO(field): all route coordinates below are UNMEASURED placeholders.
 # Distances: m. Angles here: deg, converted at the motion boundary.
-# Coordinates are the existing runtime fused pose frame; no new transform.
+# Field-local origin: D500 centre at launch. +X forward, +Y left at launch.
+# Capture the fused base_link origin once; transform targets at the boundary.
 # ============================================================
 CONTROL_DT_S = 0.05
 LOCALIZATION_WAIT_S = 30.0
@@ -32,32 +32,21 @@ YELLOW_CAMERA = 0
 # Continuous target search holds the calibrated servo at +90 deg, facing left.
 # Full mission reads the task board at the start with the camera already at +90°.
 
-# START_* are field notes only.
-# All route coordinates below use the current fused pose frame directly.
-# No START-relative transform is applied.
-START_X = 0.0
-START_Y = 0.0
-START_YAW_DEG = 0.0
-LANE_ENTRY_X = 0.0
-LANE_ENTRY_Y = 0.0
-LANE_ENTRY_YAW_DEG = 0.0
-TASK_BOARD_X = 0.0
-TASK_BOARD_Y = 0.0
-TASK_BOARD_YAW_DEG = 0.0
-CORNER_1_X = 0.0
-CORNER_1_Y = 0.0
-CORNER_1_YAW_DEG = 0.0
-CROSS_LANE_YAW_DEG = 0.0
-YELLOW_SEARCH_START_X = 0.0
-YELLOW_SEARCH_START_Y = 0.0
-YELLOW_SEARCH_END_X = 0.0
-YELLOW_SEARCH_END_Y = 0.0
-CORNER_2_X = 0.0
-CORNER_2_Y = 0.0
-CORNER_2_YAW_DEG = 0.0
-FINISH_X = 0.0
-FINISH_Y = 0.0
-FINISH_YAW_DEG = 0.0  # Reserved; current finish does not use yaw.
+START = (0.00, 0.00)
+CORNER_1 = (7.60, 0.00)
+CORNER_2 = (7.60, 7.36)
+FINISH = (0.00, 7.36)
+ROUTE_POINTS = (START, CORNER_1, CORNER_2, FINISH)
+ROUTE_HEADINGS_DEG = (0.0, 90.0, 180.0)
+# Standalone stages retain their caller-owned fused-frame interpretation.
+# These aliases do not capture an origin at an arbitrary mid-route position.
+START_X, START_Y = LANE_ENTRY_X, LANE_ENTRY_Y = TASK_BOARD_X, TASK_BOARD_Y = START
+START_YAW_DEG = LANE_ENTRY_YAW_DEG = TASK_BOARD_YAW_DEG = ROUTE_HEADINGS_DEG[0]
+CORNER_1_X, CORNER_1_Y = YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y = CORNER_1
+CORNER_1_YAW_DEG = CROSS_LANE_YAW_DEG = ROUTE_HEADINGS_DEG[1]
+CORNER_2_X, CORNER_2_Y = YELLOW_SEARCH_END_X, YELLOW_SEARCH_END_Y = CORNER_2
+FINISH_X, FINISH_Y = FINISH
+CORNER_2_YAW_DEG = FINISH_YAW_DEG = ROUTE_HEADINGS_DEG[2]
 
 TASK_BOARD_MAX_TRIES = 3
 TASK_BOARD_RETRY_DELAY_S = 0.15
@@ -251,11 +240,15 @@ def move_local_distance(runtime, distance_m):
 
 
 def go_to_lane(runtime):
+    if (LANE_ENTRY_X, LANE_ENTRY_Y) == (START_X, START_Y):
+        return wait_for_fused_localization(runtime)
     return move_to_pose(runtime, LANE_ENTRY_X, LANE_ENTRY_Y, LANE_ENTRY_YAW_DEG)
 
 
 def go_to_task_board(runtime):
-    # TASK_BOARD_X/Y is the on-lane observation pose, not the board centre.
+    if (LANE_ENTRY_X, LANE_ENTRY_Y) == (TASK_BOARD_X, TASK_BOARD_Y):
+        runtime.drive.stop()
+        return read_task_board(runtime=runtime)
     result = track_lane_line(runtime, (LANE_ENTRY_X, LANE_ENTRY_Y),
                                  (TASK_BOARD_X, TASK_BOARD_Y))
     turn_to_deg(runtime, TASK_BOARD_YAW_DEG)
@@ -318,6 +311,8 @@ def go_to_first_corner(runtime):
 
 def enter_cross_lane(runtime):
     turn_to_deg(runtime, CROSS_LANE_YAW_DEG)
+    if (CORNER_1_X, CORNER_1_Y) == (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y):
+        return wait_for_fused_localization(runtime)
     return track_lane_line(runtime, (CORNER_1_X, CORNER_1_Y),
                                (YELLOW_SEARCH_START_X, YELLOW_SEARCH_START_Y))
 
@@ -497,7 +492,20 @@ def search_centered_yellow_on_line(runtime, camera, detector, *, servo=None,
             raise cleanup_error
 
 
-def fine_center_on_road(runtime, vision, initial_box):
+def _observe_road_target(vision, now, color=None):
+    if color is None:
+        return vision.observe_drop(now)
+    from target_patrol import visible_target, horizontal_target
+    stamp, colored = vision.observe_colours(now)
+    width, height = vision.frame_size
+    boxes = sorted((box for name, box in colored if name == color),
+                   key=lambda b: abs((b[0]+b[2])/2-width/2))
+    return (stamp, visible_target(boxes, width, height, YELLOW_MIN_CONF),
+            horizontal_target(boxes, width, YELLOW_MIN_CONF,
+                              center_width_ratio=2*YELLOW_CX_TOL_PX/CAMERA_WIDTH))
+
+
+def fine_center_on_road(runtime, vision, initial_box, *, color=None):
     """Three fresh +90 YOLO centres, one gain probe, then straight fused moves.
 
     Pixel direction is measured once in this search and never flipped from a
@@ -508,7 +516,7 @@ def fine_center_on_road(runtime, vision, initial_box):
     runtime.drive.stop()
     origin = wait_for_fused_localization(runtime).estimate.pose
     try:
-        last_frame = vision.observe_drop(runtime.clock())[0]
+        last_frame = _observe_road_target(vision, runtime.clock(), color)[0]
     except RuntimeError as exc:
         runtime.record_event("search_road_align_done", success=False, reason=str(exc))
         return None
@@ -526,7 +534,7 @@ def fine_center_on_road(runtime, vision, initial_box):
         while runtime.clock() < deadline and len(centres) < 3:
             _step(runtime)  # Includes task STOP/deadline and localization safety.
             try:
-                stamp, box, _ = vision.observe_drop(runtime.clock())
+                stamp, box, _ = _observe_road_target(vision, runtime.clock(), color)
             except RuntimeError as exc:
                 runtime.record_event("search_road_observation_failed", reason=str(exc))
                 return None
@@ -864,6 +872,96 @@ def _stage(runtime, name, action):
     return result
 
 
+def _rot(theta, xy):
+    c, s = math.cos(theta), math.sin(theta)
+    return (c*xy[0]-s*xy[1], s*xy[0]+c*xy[1])
+
+
+def field_point_to_fused_base(origin_base, local_xy, relative_yaw_deg, d500_mount):
+    """Base target whose radar centre reaches local_xy at the requested heading."""
+    start_offset = _rot(origin_base.yaw_rad, (d500_mount.x_m, d500_mount.y_m))
+    local = _rot(origin_base.yaw_rad, local_xy)
+    goal_offset = _rot(origin_base.yaw_rad + math.radians(relative_yaw_deg),
+                       (d500_mount.x_m, d500_mount.y_m))
+    return (origin_base.x_m+start_offset[0]+local[0]-goal_offset[0],
+            origin_base.y_m+start_offset[1]+local[1]-goal_offset[1])
+
+
+def field_heading_to_fused_deg(origin_base, relative_yaw_deg):
+    return math.degrees(origin_base.yaw_rad) + relative_yaw_deg
+
+
+def _actual_route_pose(runtime):
+    pose = wait_for_fused_localization(runtime).estimate.pose
+    mount = runtime.config.d500_mount
+    offset = _rot(pose.yaw_rad, (mount.x_m, mount.y_m))
+    return dict(actual_fused_x=pose.x_m, actual_fused_y=pose.y_m,
+                actual_fused_yaw=pose.yaw_rad,
+                actual_radar_fused_xy=(pose.x_m+offset[0], pose.y_m+offset[1]))
+
+
+def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
+                                    vision, servo, latches, *, car_only_test=False):
+    """Resume the same fixed fused line after every colour-specific detour."""
+    from target_patrol import find_centered_target
+    if vision is None:
+        return track_lane_line(runtime, start_xy, end_xy)
+    last_frame, visible, centered, selected_color = None, None, None, None
+
+    def observe(now):
+        nonlocal last_frame, visible, centered, selected_color
+        stamp, colored = vision.observe_colours(now)
+        if stamp != last_frame:
+            last_frame = stamp
+            width, height = vision.frame_size
+            from target_patrol import visible_target, horizontal_target
+            candidates, visible_boxes = [], []
+            for color in pending_payloads:
+                boxes = sorted((b for name, b in colored if name == color),
+                               key=lambda b: abs((b[0]+b[2])/2-width/2))
+                box = visible_target(boxes, width, height, YELLOW_MIN_CONF)
+                middle = horizontal_target(boxes, width, YELLOW_MIN_CONF,
+                    center_width_ratio=2*YELLOW_CX_TOL_PX/CAMERA_WIDTH)
+                latches[color].update(box, trigger=False)
+                if box is not None:
+                    visible_boxes.append(box)
+                if middle is not None and latches[color].armed:
+                    candidates.append((abs((middle[0]+middle[2])/2-width/2), color, middle))
+            visible = visible_boxes[0] if visible_boxes else None
+            centered, selected_color = None, None
+            if candidates:
+                _, selected_color, centered = min(candidates, key=lambda item: item[:2])
+                latches[selected_color].require_clear()
+        return stamp, visible, centered
+
+    while pending_payloads:
+        box = find_centered_target(runtime, vision, start_xy, end_xy,
+            slow_speed_m_s=.08*runtime.motion.navigation.translation_speed_scale,
+            clock=runtime.clock, sleep=time.sleep, observe_drop=observe)
+        if box is None:
+            return wait_for_fused_localization(runtime)
+        color = selected_color
+        centered = None  # Never retrigger the consumed frame after failed alignment.
+        aligned = fine_center_on_road(runtime, vision, box, color=color)
+        if aligned is None:
+            runtime.record_event("competition_target_skipped", color=color,
+                                 reason="road alignment failed; await new clear frames")
+            continue
+        runtime.record_event("yellow_align", source="continuous_search", color=color,
+                             cx_px=(aligned[0]+aligned[2])/2, cy_px=(aligned[1]+aligned[3])/2)
+        slot = pending_payloads[color]
+        dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
+            runtime, servo=servo, color=color, payload_slot=slot,
+            simulate_release=car_only_test))
+        runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
+                             slot=slot, color=color, success=dropped is not None and not car_only_test,
+                             skipped=dropped is None or car_only_test, simulated=car_only_test,
+                             detour_completed=dropped is not None, pose_reference="fused")
+        if dropped is not None:
+            del pending_payloads[color]
+    return track_lane_line(runtime, start_xy, end_xy)
+
+
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
                      color=TARGET_COLOR, send_drone_task=None, car_only_test=False):
     from config.v2_factory import build_servo
@@ -877,6 +975,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
     servo = build_servo(runtime.config, fake=runtime.mode is not RuntimeMode.HARDWARE_MISSION)
     if servo is None:
         raise RuntimeError("full competition requires the configured camera servo")
+    vision = None
     try:
         park_servo(servo, 90)
         try:
@@ -891,7 +990,15 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                 detector = load_detector(YELLOW_MODEL_PATH)
             except Exception:
                 LOG.exception("yellow model unavailable; skip visual drop")
-        wait_for_fused_localization(runtime)
+        origin_base = wait_for_fused_localization(runtime).estimate.pose
+        mount = runtime.config.d500_mount
+        radar_offset = _rot(origin_base.yaw_rad, (mount.x_m, mount.y_m))
+        runtime.record_event("competition_route_origin", fused_base_x=origin_base.x_m,
+                             fused_base_y=origin_base.y_m, fused_base_yaw=origin_base.yaw_rad,
+                             d500_mount_x=mount.x_m, d500_mount_y=mount.y_m,
+                             derived_start_radar_xy=(origin_base.x_m+radar_offset[0],
+                                                     origin_base.y_m+radar_offset[1]),
+                             route_points_local=ROUTE_POINTS)
         runtime.mission.set_task_counts(counts)
         car_color, drone_counts = split_task_allocation(counts)
         runtime.record_event('payload_target_assignment', car_color=car_color, car_mandatory_yellow=1,
@@ -914,39 +1021,58 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.drive.stop()
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
-        _stage(runtime, "lane", lambda: go_to_lane(runtime))
-        _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
-        _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
-        # Each cargo opens its own servo; never release both at the first target.
-        for payload_slot, target_color in ((0, 'yellow'), (1, car_color)):
-            detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
-                runtime, yellow_camera, detector, servo=servo, color=target_color))
-            if detection is not None:
-                runtime.record_event("yellow_align", source="continuous_search", color=target_color,
-                                     cx_px=detection.cx_px, cy_px=detection.cy_px)
-                dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
-                    runtime, servo=servo, camera=yellow_camera, color=target_color,
-                    payload_slot=payload_slot, simulate_release=car_only_test))
-                runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
-                                     slot=payload_slot, color=target_color,
-                                     success=dropped is not None and not car_only_test,
-                                     skipped=dropped is None or car_only_test,
-                                     simulated=car_only_test, detour_completed=dropped is not None,
-                                     pose_reference="fused")
-            else:
-                runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
-                                     slot=payload_slot, color=target_color, success=False,
-                                     skipped=True, reason="target search or alignment failed")
-        _stage(runtime, "corner2", lambda: go_to_second_corner(runtime))
-        return _stage(runtime, "finish", lambda: go_to_finish(runtime))
+        from target_patrol import YoloVision, EntryLatch
+        pending_payloads = {"yellow": 0, car_color: 1}
+        latches = {name: EntryLatch() for name in pending_payloads}
+        if detector is not None:
+            vision = YoloVision(YELLOW_MODEL_PATH, yellow_camera, confidence=YELLOW_MIN_CONF,
+                                target_region="frame", detector=detector,
+                                drop_center_width_ratio=2*YELLOW_CX_TOL_PX/CAMERA_WIDTH)
+            vision.start()
+        for index, heading in enumerate(ROUTE_HEADINGS_DEG):
+            if index:
+                runtime.record_event("competition_route_turn_start", corner=index,
+                                     desired_heading_local_deg=heading, **_actual_route_pose(runtime))
+                turn_to_deg(runtime, field_heading_to_fused_deg(origin_base, heading))
+                runtime.record_event("competition_route_turn_done", corner=index,
+                                     desired_heading_local_deg=heading, **_actual_route_pose(runtime))
+            a_local, b_local = ROUTE_POINTS[index:index+2]
+            a = field_point_to_fused_base(origin_base, a_local, heading, mount)
+            b = field_point_to_fused_base(origin_base, b_local, heading, mount)
+            fields = dict(leg=index+1, start_local_xy=a_local, end_local_xy=b_local,
+                          start_fused_base_xy=a, end_fused_base_xy=b,
+                          desired_heading_local_deg=heading)
+            runtime.record_event("competition_route_leg_start", **fields, **_actual_route_pose(runtime))
+            result = patrol_leg_with_pending_targets(runtime, a, b, pending_payloads,
+                vision, servo, latches, car_only_test=car_only_test)
+            runtime.record_event("competition_route_leg_done", **fields, **_actual_route_pose(runtime))
+        for target_color, slot in pending_payloads.items():
+            runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
+                                 slot=slot, color=target_color, success=False, skipped=True,
+                                 simulated=car_only_test, detour_completed=False,
+                                 reason="three-leg route exhausted without completed detour")
+        runtime.drive.stop()
+        runtime.mission.finish()
+        pose = result.estimate.pose
+        runtime.record_event("competition_finished", x_m=pose.x_m, y_m=pose.y_m,
+                             yaw_rad=pose.yaw_rad, finish_local_xy=ROUTE_POINTS[-1])
+        return result
     finally:
-        if servo is not None and servo.is_running:
+        primary_error = sys.exc_info()[0] is not None
+        cleanup_error = None
+        cleanups = [("drive_stop", runtime.drive.stop)]
+        if vision is not None:
+            cleanups.append(("vision_close", vision.close))
+        if servo.is_running:
+            cleanups.append(("servo_close", lambda: servo.close(hold=True)))
+        for name, cleanup in cleanups:
             try:
-                servo.close(hold=True)
+                cleanup()
             except Exception as exc:
-                LOG.exception("camera servo close failed")
-                runtime.record_event("competition_cleanup_failed", resource="servo_close",
-                                     reason=str(exc))
+                cleanup_error = cleanup_error or exc
+                runtime.record_event("competition_cleanup_failed", resource=name, reason=str(exc))
+        if cleanup_error is not None and not primary_error:
+            raise cleanup_error
 
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
@@ -957,6 +1083,9 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
         raise ValueError(f"unknown competition stage: {stage}")
     if car_only_test and stage != "full":
         raise ValueError("car full-flow test requires the full mission")
+    if stage != "full":
+        runtime.record_event("competition_stage_frame", stage=stage,
+                             coordinate_frame="caller_owned_fused_base", captures_field_origin=False)
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     detector = None
