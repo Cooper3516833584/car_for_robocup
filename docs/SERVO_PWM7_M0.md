@@ -232,29 +232,12 @@ axis.return_to_start(rate_deg_s=30.0)                   # 回到 start() 记录�
 **不要依赖组权限**，那些位看起来够用但实际不行。首次联调时它曾短暂成功过，
 所以不要把它当成稳定行为。
 
-推荐做法（按优先级）：
+推荐使用仓库的 `deploy/servo-pwm7-home.service`：它在系统启动时以 root 调用
+`tools/servo_pwm7_home.py`，把摄像头舵机定位到 0 度，等待到位后退出并保持 PWM 输出。
+运行 `sudo deploy/install_car_services.sh` 会安装并启用该服务。服务排在
+`competition-boot.service` 之前，因此收到比赛启动命令前舵机已完成回中。
 
-1. **开机服务以 root 运行保持器**。仓库里已有用 systemd 跑 root 级硬件服务的
-   先例（声光报警、电池监控），与现有部署方式一致，也避免把密码放进脚本：
-
-   ```ini
-   [Unit]
-   Description=Park PWM servo at 0 degrees and hold
-   After=multi-user.target
-
-   [Service]
-   Type=simple
-   Environment=PYTHONPATH=/home/radxa/car/code
-   ExecStart=/usr/bin/python3 /home/radxa/car/tools/servo_pwm7_hold.py --foreground
-   Restart=on-failure
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-   注意 `--foreground`：systemd 自己就是 supervisor，不需要再 fork。
-
-2. **联调时直接 `sudo`**（最简单）。
+联调时可直接用 `sudo python3 tools/servo_pwm7_hold.py --park 0` 手动保持在 0 度。
 
 > 不要按旧文档把 `pwmchip*` 改到 `gpio` 组：实测那既不是正确的组，实际也不生效。
 > 旧的 `rock5a-pwm0-permissions.service` 也不要再引入（见 `docs/LEGACY_CLEANUP.md`）。

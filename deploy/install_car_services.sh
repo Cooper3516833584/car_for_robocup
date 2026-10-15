@@ -2,7 +2,7 @@
 # Install the car's project systemd units with paths pointing at this checkout.
 #
 # The shared alarm and battery units live in code/test/*.service and are the
-# single source of truth. Retired steering/screen units are not installed.
+# single source of truth. The camera servo home unit lives in deploy/.
 # Older installs hard-coded a different checkout (car_for_ECDC); a stale path
 # silently breaks every service, so this script rewrites the paths instead of
 # keeping a second copy of each unit in sync.
@@ -10,9 +10,9 @@
 # Run as root, from anywhere:
 #     sudo deploy/install_car_services.sh [repo_root]
 #
-# Nothing is enabled: the timer-disabled units stay opt-in.  Only the T265
-# self-heal unit is installed/enabled separately by
-# deploy/install_t265_boot_init_service.sh.
+# The camera servo home service is enabled because the boot-time camera position
+# must be deterministic. The alarm/battery units remain opt-in. Only the T265
+# self-heal unit is installed/enabled separately by deploy/install_t265_boot_init_service.sh.
 set -eu
 
 REPO_ROOT=${1:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}
@@ -39,7 +39,8 @@ install_one() {
     fi
     # Rewrite the legacy checkout path (if any) to this repository.
     sed -e "s#/home/radxa/car_for_ECDC/code#${CAR_CODE}#g" \
-        -e "s#/home/radxa/car/code#${CAR_CODE}#g" \
+        -e "s#/home/radxa/car_for_ECDC#${REPO_ROOT}#g" \
+        -e "s#/home/radxa/car#${REPO_ROOT}#g" \
         "$template" > "$UNIT_DIR/$unit"
     chmod 0644 "$UNIT_DIR/$unit"
     echo "installed $UNIT_DIR/$unit -> $CAR_CODE"
@@ -47,15 +48,21 @@ install_one() {
 
 install_one "$CAR_CODE/test/sound-light-alarm.service"        sound-light-alarm.service
 install_one "$CAR_CODE/test/battery-voltage-monitor.service"  battery-voltage-monitor.service
+install_one "$REPO_ROOT/deploy/servo-pwm7-home.service"        servo-pwm7-home.service
 
 systemctl daemon-reload
+systemctl enable --now servo-pwm7-home.service
 echo
-echo "installed units (none enabled by this script):"
+echo "installed units:"
 for unit in sound-light-alarm battery-voltage-monitor; do
     printf '  %-32s enabled=%s active=%s\n' \
         "$unit" \
         "$(systemctl is-enabled "$unit.service" 2>&1 || true)" \
         "$(systemctl is-active "$unit.service" 2>&1 || true)"
 done
+printf '  %-32s enabled=%s active=%s\n' \
+    servo-pwm7-home \
+    "$(systemctl is-enabled servo-pwm7-home.service 2>&1 || true)" \
+    "$(systemctl is-active servo-pwm7-home.service 2>&1 || true)"
 echo
 echo "enable one with: systemctl enable --now <unit>.service"

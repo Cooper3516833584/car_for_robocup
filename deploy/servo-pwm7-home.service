@@ -1,0 +1,15 @@
+[Unit]
+Description=Home RoboCup camera servo to 0 degrees
+RequiresMountsFor=/home/radxa/car
+After=local-fs.target
+Before=competition-boot.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/radxa/car
+Environment=PYTHONPATH=/home/radxa/car/code
+ExecStart=/home/radxa/robocup_ros/env/bin/python /home/radxa/car/tools/servo_pwm7_home.py --config /home/radxa/car/configs/robocup_diffdrive.toml
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
