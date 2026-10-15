@@ -9,7 +9,6 @@ from pathlib import Path
 import sys
 import signal
 import threading
-from dataclasses import replace
 from components.payload_servos import open_payload
 
 from components.diagnostics_log import JsonlEventLogger
@@ -110,13 +109,12 @@ def run_direct_competition_stage(args) -> int:
                      detection.cy_px, detection.width_px, detection.height_px, detection.confidence)
         return 0
     if stage == "drop":
-        open_payload()
-        return 0
+        return 1 if open_payload() is False else 0
     raise ValueError(f"unsupported direct competition stage: {stage}")
 
 
 def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None,
-         on_runtime_ready=None, car_only_test=False) -> int:
+         on_runtime_ready=None, car_only_test=False, simulate_payload=False) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
@@ -155,6 +153,9 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
 
     if direct_stage:
         try:
+            if simulate_payload and args.competition_stage == 'drop':
+                logging.info('SIMULATION direct payload OPEN skipped')
+                return 0
             return run_direct_competition_stage(args)
         except KeyboardInterrupt:
             logging.warning("direct competition stage interrupted")
@@ -165,8 +166,6 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
 
     try:
         config = load_runtime_config(args.config)
-        if competition_enabled:
-            config = replace(config, relay=replace(config.relay, enabled=False))
         mode = RuntimeMode(args.mode)
         if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
             config = accepted_relative_slam_profile(config)
@@ -239,6 +238,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                     yellow_camera=camera_value(args.yellow_camera),
                     weights=args.yellow_model, send_drone_task=send_drone_task,
                     car_only_test=car_only_test,
+                    simulate_release=simulate_payload,
                 )
             logging.info("competition stage completed: %s; result=%s",
                          stage,
@@ -247,7 +247,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                 return 1
             if stage in {"yellow-search", "yellow-align", "drop-align"}:
                 return 0 if result is not None else 1
-            if stage == "drop-route" and result is False:
+            if stage in {"drop-route", "drop"} and result is False:
                 return 1
             if stage == "full":
                 return 0 if runtime.mission.state.value == "finished" else 1
@@ -297,9 +297,10 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
         try:
             runtime.close()
         finally:
-            if competition_enabled and not car_only_test:
+            if competition_enabled and not simulate_payload:
                 try:
-                    open_payload()
+                    if open_payload() is False:
+                        logging.error('finally payload OPEN failed: returned False')
                 except Exception:
                     logging.exception("finally payload OPEN failed")
             try:

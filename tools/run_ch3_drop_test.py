@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
-"""Standalone CH3 test: +90 search drive, visual drop, fused return, exit.
+"""Single-target SG90 test: +90 camera search, fused approach/drop/return.
 
-Flow: hold the selected magnet -> camera servo to the search angle (+90) ->
-drive forward along the current fused heading while YOLO looks for the target ->
-the horizontally centred target stops the car and starts the shared fused
-payload detour (left 90 at the centred stop, one measured side line, release, straight
-reverse into the lane, road heading restored) -> stop, release the relay, exit.
-
-No task board, no HC radio and no competition lane: the search line is derived
-from the pose the operator placed the car at, not from the mission route.
-
-    py -3 tools/run_ch3_drop_test.py --confirm-motor-test --release-mode simulate
-        --drop-safe-m 0.43 --search-distance-m 3
-        --log-dir logs/ch3-drop-test
-
-Complete runs are real motor tests. Default release-mode simulate uses an
-in-memory relay; relay mode holds before motion and releases at the drop pose.
---vision-preview opens just servo/camera to save stationary evidence.
+Use --confirm-motor-test for motion, --simulate-release to explicitly suppress
+payload PWM, or --vision-preview for stationary camera evidence only.
+The historical filename is retained; slots are now 0 (yellow) and 1 (assigned).
 """
 
 from __future__ import annotations
@@ -37,10 +24,9 @@ sys.path.insert(0, str(ROOT / "code"))
 from competition_task import (perform_payload_detour, wait_for_fused_localization,
                               fine_center_on_road, DROP_SAFE_M, _open_yellow_camera)
 from components.diagnostics_log import JsonlEventLogger
-from components.payload_task import prepare_payload
-from components.relay_lcus import FakeLCUSRelay
+from components.payload_servos import close_payload, open_payload
 from components.servo_positioning import park_servo
-from config.mission_profile import payload_config, route_speed_config
+from config.mission_profile import route_speed_config
 from config.relative_slam_profile import accepted_relative_slam_profile
 from config.v2_factory import build_servo
 from config.v2_loader import load_v2_config
@@ -72,13 +58,9 @@ def build_parser():
     parser.add_argument("--target-class-name", default="yellow")
     parser.add_argument("--drop-center-width-ratio", type=float, default=0.1,
                         help="horizontal trigger band, default middle 10%%; vertical position is unrestricted")
-    parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=2,
-                        help="1=right-front CH2, 2=middle CH3 (default), 3=left-front CH4")
-    parser.add_argument("--release-mode", choices=("simulate", "relay"), default="simulate",
-                        help="simulate uses the in-memory relay; relay needs --relay-port or an enabled config")
-    parser.add_argument("--relay-port", help="explicit, confirmed LCUS device path; never auto-detected")
-    parser.add_argument("--relay-channels", type=int, choices=(4, 8),
-                        help="actual fitted LCUS board channel count; default from config")
+    parser.add_argument("--payload-slot", type=int, choices=(0, 1), default=0,
+                        help="0=yellow, 1=assigned task-board colour")
+    parser.add_argument("--simulate-release", action="store_true", help="explicitly skip payload PWM")
     parser.add_argument("--search-distance-m", type=float, default=3.0,
                         help="forward distance along the current fused heading while searching")
     parser.add_argument("--search-speed-cm-s", type=float, default=8,
@@ -88,14 +70,14 @@ def build_parser():
     parser.add_argument("--speed-scale", type=float, default=1,
                         help="scale motion targets for this test; default 1")
     parser.add_argument("--startup-hold-s", type=float, default=0,
-                        help="hold the magnet for this long before moving, to attach the payload")
+                        help="hold the closed SG90 for this long before moving, to attach the payload")
     parser.add_argument("--log-dir", type=Path,
                         help="evidence directory; default logs/ch3-drop-test-<timestamp>")
     parser.add_argument("--max-seconds", type=float, default=180,
                         help="whole-test time limit, including the nested drop and return")
     parser.add_argument("--confirm-motor-test", action="store_true")
     parser.add_argument("--vision-preview", action="store_true",
-                        help="stationary servo-0 snapshots only; no runtime, drive or relay")
+                        help="stationary servo-0 snapshots only; no runtime, drive or payload PWM")
     parser.add_argument("--drop-safe-m", type=float, default=DROP_SAFE_M,
                         help="measured safe fused travel from post-left-turn pivot")
     return parser
@@ -140,8 +122,6 @@ def vision_preview(args, parser):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.vision_preview:
-        parser.error("legacy LCUS payload test is retired; use competition_boot.py or main_robocup.py --competition-stage drop with dual servos")
     if args.vision_preview:
         return vision_preview(args, parser)
     if not args.confirm_motor_test:
@@ -165,8 +145,6 @@ def main(argv=None):
     try:
         config = accepted_relative_slam_profile(load_v2_config(args.config))
         config = route_speed_config(config, args.speed_scale)
-        config = payload_config(config, action="drop", release_mode=args.release_mode,
-                                relay_port=args.relay_port, relay_channels=args.relay_channels)
     except (ValueError, FileNotFoundError, NotImplementedError) as exc:
         parser.error(str(exc))
     servo = build_servo(config)
@@ -191,20 +169,15 @@ def main(argv=None):
     outcome_error = None
     try:
         runtime = build_runtime(config, RuntimeMode.HARDWARE_MISSION, event_logger=logger)
-        if args.release_mode == "simulate":
-            runtime.relay = FakeLCUSRelay(4)
         runtime.record_event("ch3_drop_test_start", payload_slot=args.payload_slot,
-                             camera=str(args.camera), release_mode=args.release_mode,
+                             camera=str(args.camera), simulate_release=args.simulate_release,
                              target_class_name=args.target_class_name,
                              search_distance_m=args.search_distance_m,
                              search_speed_m_s=slow_speed_m_s, speed_scale=args.speed_scale,
                              servo_angle_deg=args.servo_angle_deg)
-        print(f"[ch3] RELEASE MODE {args.release_mode}; slot={args.payload_slot}", flush=True)
-        wait_for_fused_localization(runtime)  # Starts sensors, fusion and the relay port.
-        if runtime.relay is None:
-            raise RuntimeError("payload relay unavailable for this release mode")
-        if not prepare_payload(runtime.relay, args.payload_slot, verify=config.relay.verify_writes):
-            raise RuntimeError("payload holding state was not confirmed")
+        if not args.simulate_release and close_payload() is False:
+            raise RuntimeError("payload CLOSE PWM command failed")
+        wait_for_fused_localization(runtime)
         runtime.record_event("payload_hold_ready", slot=args.payload_slot)
         print(f"[ch3] HOLD slot={args.payload_slot} ready", flush=True)
         park_servo(servo, args.servo_angle_deg)
@@ -255,10 +228,11 @@ def main(argv=None):
             print(f"[ch3] TARGET CENTRED {box}", flush=True)
             runtime.record_event("ch3_drop_test_drop_start", slot=args.payload_slot)
             print(f"[ch3] DROP: left90 at centred stop, blind fused {args.drop_safe_m:g}m, release, fused return", flush=True)
-            returned = perform_payload_detour(runtime, args.payload_slot, servo=servo,
+            returned = perform_payload_detour(runtime, payload_slot=args.payload_slot, servo=servo,
                                               camera=args.camera,
                                               color=args.target_class_name or "yellow",
-                                              safe_distance_m=args.drop_safe_m)
+                                              safe_distance_m=args.drop_safe_m,
+                                              simulate_release=args.simulate_release)
             runtime.record_event("ch3_drop_test_drop_done", slot=args.payload_slot, pose=returned,
                                  pose_reference="fused")
             print(f"[ch3] DROP DONE AND RETURNED to {returned.x_m:.3f},{returned.y_m:.3f} "
@@ -279,9 +253,7 @@ def main(argv=None):
         cleanup_error = None
         for label, cleanup in (
                 ("drive_stop", runtime.drive.stop if runtime is not None else lambda: None),
-                ("relay_all_off", lambda: runtime.relay.all_off(verify=True)
-                 if runtime is not None and runtime.relay is not None and runtime.relay.connected
-                 else None),
+                ("payload_open", open_payload if not args.simulate_release else lambda: None),
                 ("runtime_close", runtime.close if runtime is not None else lambda: None),
                 ("vision_close", vision.close if vision is not None else lambda: None),
                 ("servo_close", lambda: servo.close(hold=True) if servo.is_running else None)):

@@ -28,6 +28,42 @@ class ClockEvent:
 
 
 class BootTests(unittest.TestCase):
+    def test_explicit_simulation_skips_all_payload_outputs_and_is_forwarded(self):
+        self.listener._simulate_payload = True
+        self.listener._car_only_test = True
+        self.listener.start()
+        self.run_worker()
+        self.listener.close()
+        self.open.assert_not_called()
+        self.close.assert_not_called()
+        self.assertTrue(self.mission.call_args.kwargs['simulate_payload'])
+        self.assertFalse(self.sender.mock_calls)
+
+    def test_startup_false_open_is_logged_without_claiming_success(self):
+        self.open.side_effect = None
+        self.open.return_value = False
+        with self.assertLogs(boot.LOG, level='INFO') as logs:
+            self.listener.start()
+        self.assertTrue(any('startup payload OPEN failed' in line for line in logs.output))
+        self.assertFalse(any('startup payload OPEN command completed' in line for line in logs.output))
+
+    def test_completed_worker_leaves_radio_listener_ready_for_next_run(self):
+        self.listener._car_only_test = True
+        self.listener.start()
+        raw = lambda seq: pack_frame(Frame(1, NodeId.GROUND, NodeId.CAR, MessageKind.COMMAND,
+            0, 10, seq, encode_command(CommandPayload(CommandId.CAR_START_MISSION))))
+        with patch.object(boot, 'RUN_DELAY_S', 0), patch.object(boot, 'BUZZ_LAST_S', 0):
+            for seq in (1, 2):
+                self.listener._on_bytes(raw(seq))
+                self.listener._worker.join(1)
+                self.assertFalse(self.listener._worker.is_alive())
+                ack = decode_ack(unpack_frame(self.driver.write.call_args.args[0]).payload)
+                self.assertEqual(ack.status, AckStatus.ACCEPTED)
+        self.assertEqual(self.mission.call_count, 2)
+        self.assertEqual(self.close.call_count, 2)
+        self.assertEqual(self.open.call_count, 3)
+        self.driver.close.assert_not_called()
+
     def test_car_only_entry_always_selects_test_mode(self):
         import car_full_flow_test
         with patch.object(car_full_flow_test, 'boot_main') as entry:
@@ -104,13 +140,18 @@ class BootTests(unittest.TestCase):
         self.run_worker()
         self.mission.assert_not_called(); self.remap.assert_not_called()
 
-    def test_unconfigured_payload_skips_close_but_runs_the_mission(self):
+    def test_false_payload_close_prevents_mission(self):
         self.close.side_effect=None
         self.close.return_value=False
         self.run_worker()
-        self.remap.assert_called_once()
-        self.mission.assert_called_once()
+        self.remap.assert_not_called()
+        self.mission.assert_not_called()
         self.assertEqual(self.events[-1][0],'open')
+
+    def test_attempt_false_fails_but_none_is_success(self):
+        with self.assertLogs(boot.LOG, level='ERROR'):
+            self.assertFalse(self.listener._attempt('PWM', lambda: False))
+        self.assertTrue(self.listener._attempt('alarm', lambda: None))
 
     def test_idle_stop_still_opens_and_forwards(self):
         self.listener._cancel_current(); self.listener._forward_stop()
@@ -202,7 +243,7 @@ class BootTests(unittest.TestCase):
         self.sender.send_task_and_start.assert_not_called()
 
 
-    def test_car_only_full_flow_keeps_timing_slam_and_disables_all_remote_outputs(self):
+    def test_car_only_full_flow_keeps_timing_slam_and_disables_drone_with_real_payload(self):
         self.listener._car_only_test = True
         self.listener.start()
         self.run_worker()
@@ -213,8 +254,8 @@ class BootTests(unittest.TestCase):
         self.assertTrue(self.mission.call_args.kwargs['car_only_test'])
         self.assertIsNone(self.mission.call_args.kwargs['send_drone_task'])
         self.listener.close()
-        self.open.assert_not_called()
-        self.close.assert_not_called()
+        self.open.assert_called()
+        self.close.assert_called()
         self.assertFalse(self.sender.mock_calls)
         self.driver.write.assert_not_called()
 
@@ -235,10 +276,10 @@ class BootTests(unittest.TestCase):
         for call in self.driver.write.call_args_list:
             frame = unpack_frame(call.args[0])
             self.assertEqual((frame.dst, frame.kind), (NodeId.GROUND, MessageKind.ACK))
-        self.open.assert_not_called()
+        self.open.assert_called()
         self.close.assert_not_called()
 
-    def test_car_only_stop_disconnect_and_failure_never_command_payload_or_drone(self):
+    def test_car_only_stop_disconnect_and_failure_opens_payload_without_drone(self):
         self.listener._car_only_test = True
         self.run_worker(cancel_at=18.)
         self.mission.assert_not_called()
@@ -248,8 +289,8 @@ class BootTests(unittest.TestCase):
         self.run_worker()
         self.listener._on_disconnected()
         self.listener._on_callback_error(RuntimeError('radio failed'))
-        self.open.assert_not_called()
-        self.close.assert_not_called()
+        self.open.assert_called()
+        self.close.assert_called()
         self.assertFalse(self.sender.mock_calls)
         self.driver.write.assert_not_called()
 

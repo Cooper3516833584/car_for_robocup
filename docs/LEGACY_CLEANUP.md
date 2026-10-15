@@ -32,7 +32,7 @@ FleetBus 的协议、节点、队列、轨迹及只读状态适配器保留，�
 - `ackermann_firmware_compat`：已安装 C10B 固件的真实能力适配，不是旧任务策略。
   不能只删除名字就改用未经验证的差速协议。
 - differential_*、basic_motion_controller、pose_fusion、D500、T265、硬件锁、
-  电池、GPIO/PWM HAL、声光报警和继电器：现行/共享资产。
+  电池、GPIO/PWM HAL、声光报警：现行/共享资产。小车物资已统一为双 SG90，旧 LCUS 投放路径删除。
 - 新任务板组件、开局集成及 39 项测试：全部保留。
 - ROS2 D500、坐标转换、场地几何和地图生成：通用工具仍可复用。
   hardware.launch.py 只启动 D500，use_hardware 默认 false，不再打开底盘。

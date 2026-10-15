@@ -22,7 +22,30 @@ def estimate(point):
 
 
 class Ch3DropTestEntryTests(unittest.TestCase):
-    def fixture(self, *, box=BOX, search_error=None, relay_ok=True):
+    def test_real_single_target_uses_sg90_slot_and_opens_on_completion(self):
+        self.fixture()
+        self.assertEqual(self.run_entry('--payload-slot', '1'), 0)
+        self.prepare.assert_called_once_with()
+        self.assertEqual(self.detour.call_args.args, (self.runtime,))
+        self.assertEqual(self.detour.call_args.kwargs['payload_slot'], 1)
+        self.assertFalse(self.detour.call_args.kwargs['simulate_release'])
+        entry.open_payload.assert_called_once_with()
+
+    def test_explicit_simulation_never_opens_or_closes_payload(self):
+        self.fixture()
+        self.assertEqual(self.run_entry('--simulate-release'), 0)
+        self.prepare.assert_not_called()
+        entry.open_payload.assert_not_called()
+        self.assertTrue(self.detour.call_args.kwargs['simulate_release'])
+
+    def test_close_false_prevents_motion_and_cleanup_opens_both(self):
+        self.fixture(servo_ok=False)
+        self.assertEqual(self.run_entry(), 1)
+        self.search.assert_not_called()
+        self.detour.assert_not_called()
+        entry.open_payload.assert_called_once_with()
+
+    def fixture(self, *, box=BOX, search_error=None, servo_ok=True):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -34,12 +57,10 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.events = []
         self.runtime.record_event = lambda event, **values: self.events.append((event, values))
         self.runtime.clock.return_value = 100.0
-        self.runtime.relay.connected = True
-        self.runtime.relay.all_off.return_value = True
         self.servo = Mock(is_running=True, pulse_us=2500)
         self.vision = Mock()
         self.resolve = Mock(side_effect=lambda runtime: estimate(self.pose))
-        self.prepare = Mock(return_value=relay_ok)
+        self.prepare = Mock(return_value=servo_ok)
         self.search = Mock(return_value=box, side_effect=search_error)
         self.fine = Mock(return_value=box)
         self.detour = Mock(return_value=SimpleNamespace(x_m=1.0, y_m=2.0, yaw_rad=0.0))
@@ -51,7 +72,8 @@ class Ch3DropTestEntryTests(unittest.TestCase):
                             ("YoloVision", self.vision), ("JsonlEventLogger", Mock())):
             self.stack.enter_context(patch.object(entry, name, return_value=value))
         for name, value in (("wait_for_fused_localization", self.resolve),
-                            ("prepare_payload", self.prepare),
+                            ("close_payload", self.prepare),
+                            ("open_payload", Mock(return_value=True)),
                             ("find_centered_target", self.search),
                             ("perform_payload_detour", self.detour),
                             ("fine_center_on_road", self.fine)):
@@ -59,8 +81,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.stack.enter_context(patch.object(entry.signal, "signal"))
 
     def run_entry(self, *extra):
-        return entry.main(["--confirm-motor-test", "--release-mode", "relay",
-                           "--relay-port", "/dev/test-relay", "--weights", str(self.weights),
+        return entry.main(["--confirm-motor-test", "--weights", str(self.weights),
                            "--log-dir", str(self.log), *extra])
 
 

@@ -24,7 +24,6 @@ from .v2_models import (
     LocalizationConfig,
     SlamLocalizationConfig,
     NavigationConfig,
-    RelayConfig,
     ServoConfig,
     SafetyConfig,
     SensorMount3DConfig,
@@ -84,7 +83,7 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
     if set(vehicle) != {"geometry", "drive"}:
         raise ConfigV2Error("vehicle must contain [vehicle.geometry] and [vehicle.drive]")
     missing_devices = {"c10b", "d500", "t265"} - set(devices)
-    unknown_devices = set(devices) - {"c10b", "d500", "t265", "relay", "servo"}
+    unknown_devices = set(devices) - {"c10b", "d500", "t265", "servo"}
     if missing_devices or unknown_devices:
         raise ConfigV2Error(
             "devices must contain [devices.c10b], [devices.d500], [devices.t265]"
@@ -124,14 +123,6 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         slam=_build(SlamLocalizationConfig, slam_table, "localization.slam"),
     )
 
-    # [devices.relay] is optional: an absent table means "no LCUS relay fitted",
-    # which keeps every profile written before the relay port loading unchanged.
-    relay = (
-        RelayConfig()
-        if devices.get("relay") is None
-        else _build(RelayConfig, _table(devices, "relay", "devices.relay"), "devices.relay")
-    )
-
     # [devices.servo] is optional for the same reason: an absent table means "no
     # PWM servo axis fitted", so profiles written before it keep loading.
     servo = (
@@ -160,6 +151,5 @@ def load_v2_config(path: str | Path | None = None) -> DifferentialRobotConfig:
         localization=localization,
         navigation=_build(NavigationConfig, navigation_settings, "navigation"),
         safety=_build(SafetyConfig, safety_settings, "safety"),
-        relay=relay,
         servo=servo,
     )

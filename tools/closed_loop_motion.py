@@ -350,8 +350,6 @@ def main(argv=None) -> int:
     if output == ROOT or ROOT in output.parents or output.exists():
         parser.error("--output must name a new directory outside the repository")
     config = load_v2_config(config_path)
-    if config.relay.enabled:
-        parser.error("disable the payload relay for this motion test")
     config = accepted_relative_slam_profile(config)
     limits = runtime_constraints(config, RuntimeMode.HARDWARE_PROBE)
     config = replace(config, drive=replace(config.drive,

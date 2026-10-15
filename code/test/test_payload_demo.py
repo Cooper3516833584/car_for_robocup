@@ -12,10 +12,10 @@ from components.rear_motor import DriverStateError
 class ClosedLoopFilmingTests(unittest.TestCase):
     def test_filming_defaults_and_explicit_slot_override(self):
         with patch.object(filming,'route_main',return_value=0) as run:
-            self.assertEqual(filming.main(['--payload-slot','3']),0)
+            self.assertEqual(filming.main(['--payload-slot','1']),0)
             args=run.call_args.args[0]
-            self.assertEqual(args[args.index('--payload-slot')+1],'2')
-            self.assertEqual(args[-2:],['--payload-slot','3'])
+            self.assertEqual(args[args.index('--payload-slot')+1],'0')
+            self.assertEqual(args[-2:],['--payload-slot','1'])
             self.assertIn('yellow',args)
             self.assertNotIn('--demo-no-position-checks',args)
     def test_old_open_loop_switch_rejected(self):

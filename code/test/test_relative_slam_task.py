@@ -60,7 +60,6 @@ class RelativeSlamTaskTests(unittest.TestCase):
         try:
             self.assertIsInstance(runtime.d500_source, ScanOnlyD500Source)
             self.assertIsInstance(runtime.drive.backend, FakeDriveBackend)
-            self.assertIsNone(runtime.relay)
             self.assertFalse(runtime.drive.is_running)
         finally:
             runtime.close()

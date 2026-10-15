@@ -49,7 +49,7 @@ Disconnect motor power or otherwise make wheel actuation impossible. Run `hardwa
 
 Acceptance: forward raises canonical x, left raises y, counter-clockwise rotation raises yaw, stationary `base_link` does not trace a sensor-offset circle, and static readings do not show unexplained jumps. Do not proceed if any adapter or freshness result is unclear.
 
-If an LCUS payload relay is fitted, check it in the same session with the payload disconnected: run `python code/test/relay_selftest.py --config configs/<profile>.toml` read-only first, then single-channel `--on`/`--off`, and always finish with `--all-off`. Relay contacts stay latched after the process exits, so a confirmed `all_off` is part of acceptance, not optional cleanup. See [RELAY_LCUS.md](RELAY_LCUS.md).
+The car uses two SG90 payload servos only. Verify OPEN=1000 us, CLOSE=1500 us, independent slots 0/1, and OPEN-both cleanup on STOP/failure/completion using the stationary tools in [PAYLOAD_SG90.md](PAYLOAD_SG90.md). PWM command success is not mechanical release feedback.
 
 ## Stage 4 — wheels raised, low-speed sign check
 
@@ -77,7 +77,7 @@ Acceptance: the base stops on lost localization or an operator stop; no map or o
 
 ## Stage 8 — mission integration
 
-Only after Stages 0–7 pass and the remaining localization and firmware readiness gates accept the profile, connect recognition, payload actions, and return goals. Confirm payload work holds zero base command and pose loss prevents both movement and payload release. If a relay payload action is added, its channel mapping and its failure behavior (a failed verified switch must not silently continue the mission) must be recorded here; dry-run and replay use the in-memory relay and never open the port.
+Only after Stages 0–7 pass and the remaining localization and firmware readiness gates accept the profile, connect recognition, payload actions, and return goals. Confirm payload work holds zero base command and pose loss prevents both movement and payload release. Payload PWM failures must stop the mission and OPEN both on cleanup. Ordinary dry-run and replay never construct payload PWM outputs; unit mission tests use explicit simulation or fake PWM.
 
 ## Current status
 

@@ -132,7 +132,6 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
         self.assertEqual(self.runtime.mission.task_counts,self.counts)
         self.send.assert_called_once_with(task.DroneAllocation(2,0,1),runtime=self.runtime)
-        self.assertFalse(self.used_config.relay.enabled)
         self.assertEqual(self.used_config.navigation.translation_speed_scale,2)
         self.assertEqual(self.used_config.drive.max_linear_accel_m_s2,self.config.drive.max_linear_accel_m_s2)
         kwargs=self.vision_factory.call_args.kwargs
@@ -155,7 +154,6 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertTrue(any(c.kwargs.get("reverse") for c in calls))
         self.assertLess(math.dist(self.pose[:2],(0.,.85)),.035)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
-        self.assertIsNone(self.runtime.relay)
         self.final_open.assert_called()
         self.assertNotIn("advance_7cm", self.detour_caps)
         cruise_cap = self.config.drive.max_linear_speed_m_s * 2
@@ -228,7 +226,6 @@ class MainPatrolIntegrationTests(unittest.TestCase):
             self.assertEqual(self.run_main(),1)
         self.assertFalse(any(e=="competition_route_leg_start" and v["leg"]==3 for e,v in self.events))
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
-        self.assertIsNone(self.runtime.relay)
 
     def test_stop_file_interrupts_nested_payload_motion_and_guard_is_scoped(self):
         self.stop_during_detour=True
@@ -255,6 +252,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
             self.assertEqual(self.run_main(),130)
         self.assertEqual(signal.getsignal(signal.SIGTERM),previous)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
+        self.final_open.assert_called_once_with()
 
     def test_invalid_speed_and_conflicting_simulation_port_fail_before_runtime(self):
         for value in ("0","-1","nan","inf"):

@@ -219,8 +219,6 @@ def main(argv=None) -> int:
     config = accepted_relative_slam_profile(load_v2_config(config_path))
     if args.path_yaw_gain is not None:
         config = replace(config, navigation=replace(config.navigation, path_yaw_gain=args.path_yaw_gain))
-    if config.relay.enabled:
-        parser.error("disable the payload relay for this drive test")
     limits = runtime_constraints(config, RuntimeMode.HARDWARE_MISSION)
     config = replace(config, drive=replace(
         config.drive,

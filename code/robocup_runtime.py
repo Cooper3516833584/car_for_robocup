@@ -30,7 +30,6 @@ from config.v2_factory import (
     build_differential_drive,
     build_differential_navigator,
     build_pose_fusion,
-    build_relay,
 )
 from config.v2_loader import load_v2_config
 from config.v2_models import DifferentialRobotConfig
@@ -251,13 +250,11 @@ class RobocupRuntime:
         constraints: RuntimeConstraints | None = None,
         event_logger: JsonlEventLogger | None = None,
         replay_events: tuple[PoseLogEvent, ...] = (),
-        relay=None,
         slam_bridge=None,
     ) -> None:
         self.config = config
         self.mode = mode
         self.drive = drive
-        self.relay = relay
         self.slam_bridge = slam_bridge
         self._last_slam_anchor_timestamp_s: float | None = None
         self._last_slam_metrics_s: float | None = None
@@ -318,7 +315,6 @@ class RobocupRuntime:
             if self.slam_bridge is not None:
                 self.slam_bridge.start()
                 started_sources.append(self.slam_bridge)
-            self._open_relay()
             if self.mode in {RuntimeMode.DRY_RUN, RuntimeMode.REPLAY}:
                 self.drive.start()
             self._start_time_s = float(self.clock())
@@ -329,7 +325,6 @@ class RobocupRuntime:
             for source in reversed(started_sources):
                 self._stop_source(source)
             self._safe_stop_drive()
-            self._release_relay()
             raise
 
     def step(self, *, now_s: float | None = None) -> RuntimeStep:
@@ -606,7 +601,6 @@ class RobocupRuntime:
                 self._stop_source(source)
         if self.slam_bridge is not None:
             self._stop_source(self.slam_bridge)
-        self._release_relay()
         try:
             self.drive.close()
         except Exception:
@@ -1034,54 +1028,7 @@ class RobocupRuntime:
             except Exception:
                 LOG.exception("failed to stop differential drive")
 
-    def _open_relay(self) -> None:
-        """Open the optional payload relay port; never changes a contact level."""
 
-        if self.relay is None:
-            return
-        self.relay.open()
-        LOG.info(
-            "payload relay ready on %s (%s channels)",
-            self.relay.port,
-            getattr(self.relay, "channel_count", "?"),
-        )
-        self._emit(
-            "relay_ready",
-            port=self.relay.port,
-            channel_count=getattr(self.relay, "channel_count", None),
-        )
-
-    def _release_relay(self) -> None:
-        """Drop payload outputs and release the port; never masks a primary failure.
-
-        Relay contacts stay latched after the port closes, so the safety
-        direction (``all_off``) is requested first and a failed or unconfirmed
-        disconnect is reported instead of being swallowed.
-        """
-
-        relay = self.relay
-        if relay is None:
-            return
-        released = True
-        if self.config.relay.disconnect_on_shutdown and relay.connected:
-            try:
-                if not relay.all_off(verify=self.config.relay.verify_writes):
-                    released = False
-                    LOG.error("payload relay all_off was not confirmed; contacts may still be closed")
-            except Exception:
-                released = False
-                LOG.exception("failed to open payload relay outputs during shutdown")
-        try:
-            relay.close()
-        except Exception:
-            released = False
-            LOG.exception("failed to close payload relay port")
-        self._emit(
-            "relay_shutdown",
-            released=released,
-            port=getattr(relay, "port", None),
-            priority=True,
-        )
 
     def _ensure_drive_started_and_get_time(self, now_s: float) -> float:
         """Start lazily and return a timestamp no earlier than drive startup."""
@@ -1187,8 +1134,6 @@ def build_runtime(
 
     if sensor_only and mode is not RuntimeMode.HARDWARE_PROBE:
         raise ValueError("sensor_only requires hardware-probe mode")
-    if sensor_only and config.relay.enabled:
-        raise ValueError("sensor_only requires the payload relay to be disabled")
     readiness = validate_runtime_readiness(config, mode)
     if readiness:
         raise RuntimeReadinessError("; ".join(readiness))
@@ -1206,7 +1151,6 @@ def build_runtime(
     fusion = build_pose_fusion(config)
     navigator = build_differential_navigator(config)
     motion = build_basic_motion_controller(config, navigator)
-    relay = None if sensor_only else build_relay(config, fake=fake_mode)
     slam_bridge = None
     if config.localization.slam.enabled and not fake_mode:
         from components.slam_bridge import SlamBridge
@@ -1300,7 +1244,6 @@ def build_runtime(
         constraints=constraints,
         event_logger=event_logger,
         replay_events=tuple(replay_events),
-        relay=relay,
         slam_bridge=slam_bridge,
     )
     if relative_slam_scans:

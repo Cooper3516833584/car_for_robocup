@@ -1,4 +1,4 @@
-"""Car-only field mission listener: real motion, no drone or payload commands.
+"""Car-only field mission listener: real motion and dual SG90 payload; no drone commands.
 
 Waits for the existing ground-station RUN command; keeps the normal countdown,
 SLAM restart, OCR, two-target route, alignment, approach, return and finish.

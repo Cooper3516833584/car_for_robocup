@@ -387,7 +387,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
               trigger_anywhere=False):
     """Acquire new targets, share exact X centring/blind drop, resume endpoints.
 
-    Sequence mode preserves unreleased magnets and consumes each slot once.
+    A payload detour releases its selected SG90 slot once.
     Optional legacy mode retains the one-second stop/alarm behavior.
     """
     deadline = clock() + max_seconds
@@ -398,7 +398,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
     slowing = False
     slots = tuple(payload_slots) if payload_slots is not None else None
     if slots is not None:
-        raise ValueError("legacy multi-magnet sequences are retired; dual-servo payload releases once")
+        raise ValueError("slot sequences are retired; use one SG90 slot 0 or 1 per route")
 
     def guard():
         if abort():
@@ -408,7 +408,8 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
 
     try:
         if detour is not None:
-            close_payload()
+            if close_payload() is False:
+                raise RuntimeError('payload CLOSE PWM command failed')
         runtime.start()
         runtime.motion.stop()  # No implicit synthetic/default navigation goal.
         localization_deadline = min(deadline, clock() + 30)
@@ -549,7 +550,8 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
         runtime.motion.drive = original_drive
         if detour is not None:
             try:
-                open_payload()
+                if open_payload() is False:
+                    raise RuntimeError('payload OPEN PWM command failed')
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
                 runtime.mission.request_safe_stop(str(exc))

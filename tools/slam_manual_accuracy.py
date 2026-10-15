@@ -2,7 +2,7 @@
 """Interactive, sensor-only T265/D500/SLAM displacement measurement.
 
 The operator moves the vehicle. This program never starts a drive backend or
-opens a payload relay. Ground truth is entered in the floor frame after each
+opens payload PWM. Ground truth is entered in the floor frame after each
 stop; planned travel distances are never used as measurements.
 """
 
@@ -113,8 +113,6 @@ def test_config_from_board(config):
     """Override only the in-memory probe profile; never edit the board TOML."""
     if not config.t265.enabled:
         raise ValueError("T265 must be enabled for the manual accuracy probe")
-    if config.relay.enabled:
-        raise ValueError("disable the payload relay before a sensor-only probe")
     return replace(
         config,
         fusion=replace(config.fusion, t265_min_tracker_confidence=MIN_TRACKER_CONFIDENCE),
@@ -668,7 +666,7 @@ def main(argv: list[str] | None = None) -> int:
         session = AccuracySession(runtime, logger, output_dir)
         session.start()
         commands = "status, preflight, begin LABEL [move|pivot], end, truth X_CM Y_CM YAW_DEG, truth-angle YAW_DEG UNCERTAINTY_DEG, loop-start LABEL, closure LABEL, quit"
-        print("SENSOR-ONLY; no C10B or relay port opened. Commands: " + commands, flush=True)
+        print("SENSOR-ONLY; no C10B or payload PWM opened. Commands: " + commands, flush=True)
         print("accuracy> ", end="", flush=True)
         while not session.stop_event.is_set():
             try:

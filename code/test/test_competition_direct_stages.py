@@ -24,9 +24,6 @@ class DirectCompetitionStageTests(unittest.TestCase):
         self.profile = self.stack.enter_context(patch("main_robocup.accepted_relative_slam_profile"))
         self.config = load_runtime_config()
         self.loader = self.stack.enter_context(patch("main_robocup.load_runtime_config", return_value=self.config))
-        self.relay = Mock(connected=True)
-        self.relay.all_off.return_value = True
-        self.factory = self.stack.enter_context(patch("config.v2_factory.build_relay", return_value=self.relay))
         self.stack.enter_context(patch.object(task.time, "sleep"))
         self.addCleanup(self.build.assert_not_called)
         self.addCleanup(self.profile.assert_not_called)
@@ -43,7 +40,6 @@ class DirectCompetitionStageTests(unittest.TestCase):
         reader.recognize_camera.assert_called_once_with(2)
         self.assertTrue(any("task-board result: red=2 blue=1 green=1" in s for s in logs.output))
         self.loader.assert_not_called()
-        self.factory.assert_not_called()
 
     def test_task_board_failure_warns_and_returns_zero_with_fallback(self):
         reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
@@ -64,7 +60,6 @@ class DirectCompetitionStageTests(unittest.TestCase):
                 self.assertFalse(send.call_args.kwargs["start_drone"])
                 self.assertEqual(send.call_args.kwargs["baudrate"], 115200)
         self.loader.assert_not_called()
-        self.factory.assert_not_called()
 
     def test_direct_hc_missing_or_invalid_quota_never_sends(self):
         with patch.object(task, "send_task_and_start") as send, self.assertLogs(level="ERROR"):
@@ -128,13 +123,15 @@ class DirectCompetitionStageTests(unittest.TestCase):
             self.assertEqual(main(['--competition-stage','drop']),0)
         output.assert_called_once_with()
         self.build.assert_not_called()
-        self.factory.assert_not_called()
+
+    def test_false_servo_write_returns_failure(self):
+        with patch('main_robocup.open_payload', return_value=False):
+            self.assertEqual(main(['--competition-stage','drop']),1)
 
     def test_failed_servo_write_returns_failure(self):
         with patch('main_robocup.open_payload',side_effect=OSError('PWM failed')):
             self.assertEqual(main(['--competition-stage','drop']),1)
         self.build.assert_not_called()
-        self.factory.assert_not_called()
 
     def test_servo_interrupt_returns_130(self):
         with patch('main_robocup.open_payload',side_effect=KeyboardInterrupt):
@@ -145,7 +142,6 @@ class DirectCompetitionStageTests(unittest.TestCase):
             with self.subTest(flag=flag), self.assertRaises(SystemExit):
                 main(['--competition-stage','drop',flag,value])
         self.build.assert_not_called()
-        self.factory.assert_not_called()
 
 
 if __name__ == '__main__':

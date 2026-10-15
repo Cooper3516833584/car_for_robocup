@@ -38,14 +38,16 @@ The `task-board`, `hc-send`, `yellow-detect`, and `drop` CLI stages operate thei
 devices directly without starting localization or drive runtime. Measured lane
 segments guide the main route, and the finish requires position only.
 
-The main mission now shares the validated target vision and fused payload detour
-with the patrol test. It searches its own measured yellow segment continuously
-at confidence 0.8, uses speed-dependent lookahead, and performs the 7/47 cm
-out-and-back using fused positions. The test's 280/420/250 cm fixture is not used
-by the competition route. `--speed-scale 2` selects the faster profile;
-`--release-mode simulate` disables physical relay output for a full mission.
-Field coordinates still require measurements. This integration has software
-coverage; it has not been run as a complete physical competition mission.
+The main mission and car-only listener share the three-leg route
+`(0,0) -> (7.60,0) -> (7.60,7.36) -> (0,7.36)` and fused payload detour.
+Both use real dual SG90 payload servos; the car-only listener disables drone
+commands. Listener/STOP/failure/completion OPEN both (1000 us), RUN CLOSEs both
+(1500 us), and each normal release OPENs only its colour's slot (0 or 1).
+The independent PWM7 camera axis is unchanged. See
+[docs/PAYLOAD_SG90.md](docs/PAYLOAD_SG90.md) for permissions and tools.
+The patrol test's 280/420/250 cm fixture is separate from the competition route.
+This integration has offline software coverage; field accuracy and servo
+operation still require physical acceptance.
 
 ## Task-board recognition
 

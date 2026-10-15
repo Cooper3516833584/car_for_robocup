@@ -75,7 +75,6 @@ class ManualAccuracyTests(unittest.TestCase):
         runtime = build_runtime(config, RuntimeMode.HARDWARE_PROBE, sensor_only=True)
         try:
             self.assertIsInstance(runtime.drive.backend, FakeDriveBackend)
-            self.assertIsNone(runtime.relay)
             self.assertFalse(runtime.drive.is_running)
         finally:
             runtime.close()

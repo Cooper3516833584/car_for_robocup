@@ -1,59 +1,32 @@
 # 小车单机全流程测试
 
-临时自启动入口为 `code/car_full_flow_test.py`，由现有
-`competition-boot.service` 启动。上电后只监听地面站，收到原有 RUN 指令后
-才运行真实底盘任务；不会上电直接行驶。
+自启动入口保留 `code/car_full_flow_test.py`，由 `competition-boot.service` 运行。
+它使用真实底盘、视觉和两只 SG90，仅屏蔽无人机命令；上电先 OPEN 两只并监听地面站。
+收到有效 RUN 才 CLOSE 两只并开始任务，不会自行行驶。
 
-完整顺序：RUN 确认 → 20 秒倒计时（最后 5 秒蜂鸣）→ 重启并确认小车 SLAM 新实例
-→ 相机 +90° → 起点 OCR（沿用三次失败后 1/2/1 兜底）→ 等待融合定位
-→ 分配小车任务颜色 → 三边固定道路（0°、90°、180°），沿三边巡检
-→ 任意先后识别黄色及分配色 → 各自道路精对齐、左转 90°、融合接近 43 cm、停车复测
-→ 保留释放等待但不驱动物资舵机 → 原轴直倒、右转恢复道路朝向、继续原线段
-→ 第三段末端停车。没有重新回横向起点搜索第二种颜色。
+完整顺序：RUN → 两只 CLOSE（1500 μs）→ 原有 20 秒倒计时（最后 5 秒蜂鸣）
+→ 重启并确认 SLAM 新实例 → 相机 +90° → 起点 OCR（三次失败用 1/2/1）
+→ 等待融合定位 → 分配小车颜色 → 三边固定道路 → 任意先后识别黄色和分配色
+→ 道路精对齐、左转 90°、融合接近 43 cm、停车复测 → 只 OPEN 对应槽位（1000 μs）
+→ 保持 0.5 秒、原轴倒退、右转恢复、继续原道路 → 第三段末端停车 → 两只 OPEN，继续监听。
+STOP、定位丢失、超时、异常、信号退出均停车并 OPEN 两只，不会完赛后自动 CLOSE。
 
-复用比赛程序及同一组路线参数，没有复制另一套任务逻辑。即使两个抛投 PWM
-均未配置，测试模式仍执行完整接近、融合距离验证和返回。日志中的
-`payload_release_skipped` 明确标记模拟释放；`payload_drop` 的 `simulated=true`、
-`success=false`、`detour_completed` 区分未实际释放与接近返回是否完成。
-目标缺失或不能可靠对齐时沿用正式程序的跳过该目标策略，不会伪造目标；
-要验收两段完整往返，现场必须提供黄色与任务分配颜色目标。
+单机入口不创建无人机发送器，不发送 CLOSE/REMAP/TASK/START/STOP，不等待无人机 ACK。
+HC-15 继续接收地面站 RUN/STOP/PING 并回复 ACK。
+`car_only_test` 与模拟物资无关；只在离线测试显式传入内部模拟参数时跳过物资硬件，
+同时保留完整接近、等待和返回。模拟日志 success=false、simulated=true；真实 PWM
+失败明确报错并停车，不伪造成功。写入成功也不代表存在物资落下的机械反馈。
 
-测试入口不创建无人机任务发送器，不发送无人机关闭、重建图、任务、启动或 STOP
-指令，也不等待无人机回应。HC-15 继续接收地面站 RUN/STOP/PING 并回复 ACK。
-小车抛投舵机在启动、任务、STOP、异常和退出时均无输出；相机舵机正常工作。
-底盘停车、定位丢失、任务超时、STOP 文件及信号清理沿用现有机制。
+路线唯一来源为 `competition_task.ROUTE_POINTS`：
+`((0,0), (7.60,0), (7.60,7.36), (0,7.36))`，三段航向 `(0°,90°,180°)`。
+沿用启动 D500 中心局部坐标和一次性融合原点、现有 D500 安装偏移；不复制另一套路线。
+目标缺失或不能稳定对齐时沿用跳过本次目标策略；PWM 不可用时中止真实投放任务。
+实际定位精度、外参、转弯空间、舵机脉宽与机构动作仍需现场验收。
 
-路线唯一来源为 `code/competition_task.py` 的 `ROUTE_POINTS`：
-`((0.00,0.00), (7.60,0.00), (7.60,7.36), (0.00,7.36))`，
-对应启动 D500 雷达中心的局部坐标；三段航向为 `(0°,90°,180°)`。
-测试入口没有独立坐标副本。OCR 后一次性记录融合 base_link 起点，
-读取既有 D500 XY 安装偏移，把局部雷达目标转换为融合底盘目标；途中不刷新原点。
-转向以底盘轴中心为轴，雷达可能绕弧，现场须人工核对雷达 offset 和车轮转弯空间。
-`DROP_SAFE_M=0.43 m` 不变。该入口是真实运动测试，软件仿真不代表实车精度验收。
-本次路线修改仅本地测试和提交；以下是之后人工确认部署时的操作参考，
-本次不执行推送/部署设备、安装或 service 重启。
+两只物资舵机接线、0777 权限预启动、overlay 和独立测试见 [PAYLOAD_SG90.md](PAYLOAD_SG90.md)。
+部署须 PC 提交推送后板端干净快进，安装更新 service 模板；重启监听立即操作舵机，
+由操作者确认现场机构可操作后执行。当前入口不改回正式比赛入口。
 
-部署须先在 PC 提交并推送，再确认板端分支、HEAD、工作区干净且能够快进，运行
-`git pull --ff-only`。然后在板端仓库运行：
-
-```sh
-sudo sh deploy/install_car_services.sh
-sudo systemctl restart competition-boot.service
-systemctl show competition-boot.service -p ExecStart -p ActiveState
-```
-
-安装器更新 service 内容，保留原有启用状态。若原来未启用，执行
-`sudo systemctl enable competition-boot.service`。重启监听服务不会发出 RUN。
-不要在任务执行中重启服务。查看日志用
-`journalctl -u competition-boot.service -f`。
-
-本车使用 Debian 12 的 RoboStack 环境，不存在 `/opt/ros/humble/setup.bash`。
-SLAM 服务通过 `robocup_ros/bin/micromamba run -p robocup_ros/env` 启动。
-任务监听同样激活该 ROS 环境，并使用带系统包的 `vision_env/bin/python`，
-通过 `PYTHONPATH=robocup_ros/python_ext:car/code` 加载既有 T265 扩展。
-安装器会实际导入 ROS、T265、OCR 和 YOLO 依赖，缺少任何一项都拒绝安装，
-避免仅能接收 RUN 却在建图或视觉启动时才失败。
-
-恢复正式空地协同：在 PC 将 `deploy/competition-boot.service` 的 ExecStart 入口改回
-`code/competition_boot.py`，提交推送、板端快进更新后重新安装并重启监听服务。
-正式入口默认继续执行无人机协同和真实抛投策略。
+比赛与监听使用已安装 RoboStack/micromamba 与 vision_env Python，保留原 ROS、T265、
+OCR、YOLO 导入检查。恢复空地协同时由操作者在 PC 修改 service 入口为
+`code/competition_boot.py`，提交推送、板端快进后重新安装服务。

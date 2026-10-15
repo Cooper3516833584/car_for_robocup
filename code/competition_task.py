@@ -796,10 +796,12 @@ def perform_payload_detour(runtime, *, servo=None, camera=None,
     """Turn at the centred stop, side line, reverse, one inward turn."""
     from payload_detour import DetourSettings, run_payload_detour
     if not simulate_release and not payload_configured(payload_slot):
-        runtime.record_event('payload_release_skipped', actuator='payload_servo', cargo_count=1,
+        runtime.record_event('payload_release_failed', actuator='payload_servo', cargo_count=1,
                              slot=payload_slot, color=color,
-                             reason='PWM addresses unconfigured; continuing route')
-        return None
+                             reason='PWM unavailable or not writable')
+        runtime.drive.stop()
+        runtime.mission.request_safe_stop('payload PWM unavailable')
+        raise RuntimeError('payload PWM unavailable or not writable')
     settings = DetourSettings(
         payload_slot=payload_slot,
         approach_m=DROP_SAFE_M if safe_distance_m is None else safe_distance_m,
@@ -901,7 +903,7 @@ def _actual_route_pose(runtime):
 
 
 def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
-                                    vision, servo, latches, *, car_only_test=False):
+                                    vision, servo, latches, *, simulate_release=False):
     """Resume the same fixed fused line after every colour-specific detour."""
     from target_patrol import find_centered_target
     if vision is None:
@@ -952,10 +954,10 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
         slot = pending_payloads[color]
         dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
             runtime, servo=servo, color=color, payload_slot=slot,
-            simulate_release=car_only_test))
+            simulate_release=simulate_release))
         runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
-                             slot=slot, color=color, success=dropped is not None and not car_only_test,
-                             skipped=dropped is None or car_only_test, simulated=car_only_test,
+                             slot=slot, color=color, success=dropped is not None and not simulate_release,
+                             skipped=dropped is None or simulate_release, simulated=simulate_release,
                              detour_completed=dropped is not None, pose_reference="fused")
         if dropped is not None:
             del pending_payloads[color]
@@ -963,7 +965,8 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
 
 
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
-                     color=TARGET_COLOR, send_drone_task=None, car_only_test=False):
+                     color=TARGET_COLOR, send_drone_task=None, car_only_test=False,
+                     simulate_release=False):
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
 
@@ -1044,12 +1047,12 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                           desired_heading_local_deg=heading)
             runtime.record_event("competition_route_leg_start", **fields, **_actual_route_pose(runtime))
             result = patrol_leg_with_pending_targets(runtime, a, b, pending_payloads,
-                vision, servo, latches, car_only_test=car_only_test)
+                vision, servo, latches, simulate_release=simulate_release)
             runtime.record_event("competition_route_leg_done", **fields, **_actual_route_pose(runtime))
         for target_color, slot in pending_payloads.items():
             runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
                                  slot=slot, color=target_color, success=False, skipped=True,
-                                 simulated=car_only_test, detour_completed=False,
+                                 simulated=simulate_release, detour_completed=False,
                                  reason="three-leg route exhausted without completed detour")
         runtime.drive.stop()
         runtime.mission.finish()
@@ -1077,7 +1080,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
                           yellow_camera=None, weights=None, send_drone_task=None,
-                          color=TARGET_COLOR, car_only_test=False):
+                          color=TARGET_COLOR, car_only_test=False, simulate_release=False):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
         raise ValueError(f"unknown competition stage: {stage}")
@@ -1102,7 +1105,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
                                 yellow_camera=yellow_camera, detector=detector, send_drone_task=send_drone_task,
-                                color=color, car_only_test=car_only_test)
+                                color=color, car_only_test=car_only_test, simulate_release=simulate_release)
     if stage == "hc-send":
         if runtime.mission.task_counts is None:
             raise RuntimeError("hc-send requires actual task counts")
@@ -1112,8 +1115,9 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
         # Read-only stage: no navigation to the observation point.
         return _stage(runtime, stage, lambda: read_task_board(task_camera, runtime=runtime))
     if stage == "drop":
-        ok = _stage(runtime, stage, lambda: open_payload())
-        runtime.record_event("payload_drop", actuator="dual_servo", success=True)
+        ok = _stage(runtime, stage, lambda: True if simulate_release else open_payload())
+        runtime.record_event("payload_drop", actuator="dual_servo",
+                             success=ok is not False and not simulate_release, simulated=simulate_release)
         return ok
     if stage == "yellow-detect":
         if detector is None:

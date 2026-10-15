@@ -64,12 +64,13 @@ def restart_car_slam_sidecar(stop_event):
 
 class CompetitionBoot:
     def __init__(self, *, driver_factory=HC15SerialDriver, mission_main=None,
-                 alarm=None, clock=time.monotonic, car_only_test=False):
+                 alarm=None, clock=time.monotonic, car_only_test=False, simulate_payload=False):
         if mission_main is None:
             from main_robocup import main
             mission_main = main
         self._mission_main = mission_main
         self._car_only_test = car_only_test
+        self._simulate_payload = simulate_payload
         self._clock = clock
         self._alarm = SoundLightAlarm() if alarm is None else alarm
         self._state_lock = threading.Lock()
@@ -102,16 +103,19 @@ class CompetitionBoot:
 
     def _attempt(self, label, action):
         try:
-            action()
+            if action() is False:
+                LOG.error('%s failed: returned False', label)
+                return False
+            LOG.info('%s command completed', label)
             return True
         except Exception:
             LOG.exception('%s failed', label)
             return False
 
     def _payload_command(self, action):
-        if self._car_only_test:
-            LOG.info('CAR TEST payload output skipped')
-            return False
+        if self._simulate_payload:
+            LOG.info('SIMULATION payload output skipped')
+            return True
         return action()
 
     def start(self):
@@ -187,8 +191,10 @@ class CompetitionBoot:
                 if stop.is_set():
                     return
                 closed = self._payload_command(close_payload)
-            LOG.info('CAR CLOSE %s run_id=%d (no mechanical feedback)',
-                     'SKIPPED' if closed is False else 'SENT', run_id)
+            if closed is False:
+                raise RuntimeError('RUN payload CLOSE failed: PWM command incomplete')
+            LOG.info('RUN payload CLOSE %s run_id=%d (no mechanical feedback)',
+                     'SIMULATED' if self._simulate_payload else 'written', run_id)
             if not self._car_only_test and not sender.close_drone_payload(run_id):
                 raise RuntimeError('drone CLOSE was not confirmed by software ACK')
             if stop.wait(max(0, t0 + RUN_DELAY_S - BUZZ_LAST_S - self._clock())):
@@ -217,9 +223,11 @@ class CompetitionBoot:
 
             kwargs = dict(stop_event=stop, send_drone_task=handoff,
                           on_runtime_ready=self._runtime_ready)
+            if self._simulate_payload:
+                kwargs['simulate_payload'] = True
             if self._car_only_test:
                 kwargs.update(car_only_test=True, send_drone_task=None)
-                LOG.info('CAR FULL-FLOW TEST: no drone commands or payload output')
+                LOG.info('CAR FULL-FLOW TEST: no drone commands; real payload servos unless explicitly simulated')
             result = self._mission_main(list(MISSION_ARGS), **kwargs)
             if result:
                 raise RuntimeError('competition mission failed: %s' % result)

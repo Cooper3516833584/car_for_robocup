@@ -15,13 +15,31 @@ from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from payload_detour import DetourSettings, run_payload_detour
 from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_config
-from tools.run_center_target_route import payload_config
 
 BOX = (0, 0, 100, 100, .9, 0)  # Valid target outside the old central 50%.
 CENTER_BOX = (290, 0, 350, 40, .9, 0)  # Horizontally centred, near the image top.
 
 
 class PayloadDetourTests(unittest.TestCase):
+    def test_false_release_stops_before_reverse_and_opens_both(self):
+        self.fixture()
+        self.open.side_effect = [False, True]
+        with self.assertRaisesRegex(RuntimeError, 'PWM command failed'):
+            self.run_detour()
+        self.assertEqual([c.args for c in self.open.call_args_list], [(0,), ()])
+        self.assertNotIn('reverse_from_drop', self.stage_poses)
+        self.assertFalse(any(e == 'payload_release_done' for e, _ in self.events))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assert_safe_exit()
+
+    def test_false_cleanup_is_reported_without_masking_original_failure(self):
+        self.fixture()
+        self.open.return_value = False
+        with self.assertRaisesRegex(ValueError, 'original failure'):
+            self.run_detour(guard=lambda: (_ for _ in ()).throw(ValueError('original failure')))
+        self.open.assert_called_once_with()
+        self.assertTrue(any(e == 'payload_detour_cleanup_failed' for e, _ in self.events))
+
     def test_simulated_release_keeps_complete_motion_and_stopped_hold(self):
         self.fixture()
         result = self.run_detour(simulate_release=True)
@@ -45,7 +63,7 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assert_safe_exit()
 
-    def test_stop_failure_preserves_primary_error_and_disconnects_relay(self):
+    def test_stop_failure_preserves_primary_error_and_opens_both_servos(self):
         from components.rear_motor import DriverStateError
         self.fixture()
         original_stop = self.runtime.drive.stop
@@ -154,7 +172,7 @@ class PayloadDetourTests(unittest.TestCase):
                 self.assertEqual([r[0] for r in self.releases], ['payload_servo'])
                 self.assert_safe_exit()
 
-    def test_abort_at_each_moving_stage_stops_and_switches_all_relays_off(self):
+    def test_abort_at_each_moving_stage_stops_and_opens_both_servos(self):
         for stage in ("left_90deg", "forward_to_drop", "reverse_from_drop", "right_90deg"):
             with self.subTest(stage=stage):
                 self.fixture()
@@ -348,7 +366,7 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertFalse(self.releases)
         self.assert_safe_exit()
 
-    def test_relay_failure_stops_instead_of_reversing_or_resuming(self):
+    def test_servo_failure_stops_instead_of_reversing_or_resuming(self):
         self.fixture()
         self.open.side_effect=RuntimeError("release failed")
         with self.assertRaisesRegex(RuntimeError, "release"):
@@ -431,23 +449,6 @@ class PayloadDetourTests(unittest.TestCase):
             route.run_route(self.runtime,Mock(),None,detour=DetourSettings())
         self.assertFalse(self.runtime.drive.is_running)
 
-    def test_explicit_relay_configuration_and_cleanup_policy(self):
-        config = load_runtime_config()
-        with self.assertRaisesRegex(ValueError, "explicit"):
-            payload_config(config, action="drop", release_mode="relay")
-        configured = payload_config(config, action="drop", release_mode="relay",
-                                    relay_port="/dev/confirmed-relay", relay_channels=4)
-        self.assertTrue(configured.relay.enabled)
-        self.assertEqual(configured.relay.port, "/dev/confirmed-relay")
-        self.assertEqual(configured.relay.channel_count, 4)
-        configured = replace(configured, relay=replace(configured.relay, disconnect_on_shutdown=False))
-        self.assertTrue(payload_config(configured, action="drop", release_mode="relay").relay.disconnect_on_shutdown)
-        with self.assertRaisesRegex(ValueError, "disabled"):
-            payload_config(configured, action="beep")
-
-        simulated = payload_config(configured, action="drop")
-        self.assertFalse(simulated.relay.enabled)
-        self.assertEqual(simulated.relay.channel_count, 4)
 
     def test_patrol_holding_failure_prevents_motion_and_disconnects_all(self):
         self.fixture(started=False)
@@ -498,11 +499,6 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertTrue(starts[1]["kwargs"]["reverse"])
         self.assert_safe_exit()
 
-    def test_real_payload_profile_rejects_missing_fourth_channel(self):
-        config = load_runtime_config()
-        with self.assertRaisesRegex(ValueError, "2, 3 and 4"):
-            payload_config(config, action="drop", release_mode="relay",
-                           relay_port="/dev/confirmed-relay", relay_channels=3)
 
     def test_visibility_slows_before_horizontal_center_trigger(self):
         self.fixture(started=False)

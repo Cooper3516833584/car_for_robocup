@@ -156,16 +156,18 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if simulate_release:
             runtime.record_event("payload_release_skipped", actuator="payload_servo",
                                  slot=settings.payload_slot, cargo_count=1,
-                                 reason="car full-flow test; physical output disabled")
+                                 reason="explicit payload simulation; physical output disabled")
         else:
             runtime.record_event("payload_release_start", actuator="payload_servo",
                                  slot=settings.payload_slot, cargo_count=1)
             released = open_payload(settings.payload_slot)
+            if released is False:
+                raise RuntimeError('payload PWM command failed: returned False')
         hold(settings.release_hold_s)
         if not simulate_release:
-            runtime.record_event("payload_release_skipped" if released is False else "payload_release_done",
+            runtime.record_event("payload_release_done",
                                  actuator="payload_servo", cargo_count=1, slot=settings.payload_slot,
-                                 reason="PWM unconfigured" if released is False else "command sent")
+                                 reason="PWM command written; no mechanical feedback")
         # Use the latest fusion after the release hold, then reverse along the
         # saved side axis. Even a small cross-track residual cannot turn this
         # into a diagonal path to the historical XY pivot.
@@ -204,7 +206,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.motion.drive = entry_drive
         if not simulate_release and (primary_error or cleanup_error):
             try:
-                open_payload()
+                if open_payload() is False:
+                    raise RuntimeError('cleanup payload OPEN failed: returned False')
             except Exception as exc:
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
                 if not primary_error:

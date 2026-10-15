@@ -21,14 +21,14 @@
 6. 默认仓位 2 对应 CH3，释放一次。随后按最新融合位置沿 side_yaw 平行倒回
    pivot 内侧截面，再右转 90°。靠边不旋转追点，不回跑历史 XY。
 
-全局 PP、融合算法、C10B 输出、watchdog、定位失效、STOP、总超时和继电器退出清理保持原路径。
+全局 PP、融合算法、C10B 输出、watchdog、定位失效、STOP、总超时保持原路径。物资硬件现已统一为双 SG90，收尾全开。
 `drop-align` / `--vision-preview` 仍可单独停车查看 0° 原图、mask 和弧线；参考照片只供预览，
 不会影响盲投终点。
 
 ## 实验与验收
 
-使用 `tools/run_ch3_drop_test.py --confirm-motor-test --release-mode simulate --drop-safe-m 0.43`
-运行下一轮底盘实验。simulate 使用内存继电器；真实投放沿用显式 relay 模式。
+使用 `tools/run_ch3_drop_test.py --confirm-motor-test --simulate-release --drop-safe-m 0.43`
+运行下一轮底盘实验。显式模拟只跳过物资 PWM；默认使用真实 SG90，槽位为 0/1。
 实验前使用部署流程在 PC 修改、检查、提交、推送，再在车端核对分支与干净状态并快进拉取。
 
 `search_frames/` 保存新鲜 YOLO 框证据。事件中的 `search_road_align_done` 给出最终水平中心；

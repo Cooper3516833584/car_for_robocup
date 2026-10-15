@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Callable
-from dataclasses import replace
 
 from .v2_models import DifferentialRobotConfig
 
@@ -79,46 +78,6 @@ def build_t265_source(config: DifferentialRobotConfig, *, fake: bool = False, sa
     from components.t265_driver import RealSenseT265PoseSource
 
     return RealSenseT265PoseSource(config.t265.serial)
-
-
-def configure_payload_relay(config: DifferentialRobotConfig, *, port: str | None = None):
-    """Explicit CLI enablement and cleanup policy; never opens hardware."""
-    relay = config.relay
-    if port is not None:
-        if not port.strip():
-            raise ValueError("payload relay port must not be empty")
-        relay = replace(relay, enabled=True, port=port)
-    if not relay.enabled:
-        return config
-    if relay.channel_count < 4:
-        raise ValueError("payload magnets require relay channels 2, 3 and 4")
-    return replace(config, relay=replace(relay, verify_writes=True, disconnect_on_shutdown=True))
-
-
-def build_relay(config: DifferentialRobotConfig, *, fake: bool = False):
-    """Build the optional LCUS payload relay; construction never opens the port.
-
-    Returns ``None`` when ``[devices.relay] enabled = false``. The real driver
-    opens its serial port only when the runtime starts, and the dry-run/replay
-    fake never touches a device.
-    """
-
-    relay_config = config.relay
-    if not relay_config.enabled:
-        return None
-    if fake:
-        from components.relay_lcus import FakeLCUSRelay
-
-        return FakeLCUSRelay(channel_count=relay_config.channel_count)
-    from components.relay_lcus import LCUSRelay
-
-    return LCUSRelay(
-        port=relay_config.port,
-        baudrate=relay_config.baudrate,
-        channel_count=relay_config.channel_count,
-        timeout=relay_config.read_timeout_s,
-        query_timeout=relay_config.query_timeout_s,
-    )
 
 
 def build_servo(config: DifferentialRobotConfig, *, fake: bool = False):

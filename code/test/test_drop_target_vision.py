@@ -13,8 +13,6 @@ import competition_task as task
 import payload_detour
 from components import drop_target_vision as dvision
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
-from components.relay_lcus import FakeLCUSRelay
-from components.payload_task import prepare_payload
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from robocup_runtime import build_runtime, load_runtime_config
