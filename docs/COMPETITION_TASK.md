@@ -4,7 +4,8 @@
 融合定位、BasicMotionController、DifferentialDrive、OCR、HC15SerialDriver、LCUSRelay。
 本次任务层整合未改动 D500/T265/融合算法、C10B 帧发送器或底盘 watchdog。
 
-完整流程：等待融合定位 → 车道入口 → 任务板观察点 → OCR → 无人机配额/启动确认 → 第一转角
+完整流程：启动相机舵机到 +90° → 出发点 OCR → 等待融合定位 → 无人机配额/启动确认
+→ 车道入口 → 第一转角
 → 横向车道 → 连续黄色搜索至画面横向中部 → 融合位置投放往返（含 0° 视觉精对准）
 → 第二转角 → 终点坐标停车。
 
@@ -13,14 +14,14 @@
 | 函数 | 固定路线段/动作 |
 |---|---|
 | `go_to_lane` | 起点进入 `LANE_ENTRY`，保留点到点导航及入口朝向 |
-| `go_to_task_board` | `LANE_ENTRY → TASK_BOARD`，到位后转到任务板观察朝向 |
-| `go_to_first_corner` | `TASK_BOARD → CORNER_1` |
+| `go_to_first_corner` | `LANE_ENTRY → CORNER_1` |
 | `enter_cross_lane` | 转到横向车道朝向，沿 `CORNER_1 → YELLOW_SEARCH_START` 行驶 |
 | `go_to_second_corner` | 按 `YELLOW_SEARCH_START → CORNER_2` 固定车道回线、到达第二转角 |
 | `go_to_finish` | `CORNER_2 → FINISH`，只按位置到达，不要求最终 yaw |
 
-`TASK_BOARD_X/Y` 是车道上的读板观察位置，不是任务板实体中心。若现场观察点离开
-车道，应在任务层明确安排观察和回车道路线后再运行，不改变底层导航算法。
+任务板在出发点通过摄像头 +90° 视角识别，不再为了 OCR 驶到车道上的观察点。
+`TASK_BOARD_X/Y` 与 `go_to_task_board()` 保留给独立定位/路线操作使用；完整主流程
+从车道入口直接接入第一转角路线。
 
 ## 2026-10-10 验证能力合入
 
@@ -30,7 +31,8 @@
 的速度/继电器策略，以及相机舵机的 PWM 导出重试。旧 `center_target_route.py`
 仅保留导入兼容入口。
 
-读板结束后，在黄色搜索阶段把相机舵机保持在标定的 +90°（2500 us）。沿主程序
+完整主流程启动后先把相机舵机转到标定的 +90°（2500 us）并在出发点读板；之后在黄色搜索阶段
+继续保持同一角度。沿主程序
 `YELLOW_SEARCH_START → YELLOW_SEARCH_END` 连续推理，只接受 yellow 类且置信度
 至少 0.8 的目标。目标可见时将速度限制到 `8 cm/s × translation_speed_scale`，
 目标中心 X 进入画面横向 45%～55% 即停止搜索；Y 不作为触发条件。
@@ -79,7 +81,7 @@
 | 参数 | 当前值/现场要做的事 |
 |---|---|
 | `START_*` | 起点记录，供现场参考；不重置或变换融合坐标系 |
-| `LANE_ENTRY_* / TASK_BOARD_* / CORNER_1_* / CORNER_2_* / FINISH_*` | 全部为 0 的未实测占位值，填写真实融合 XY；入口、任务板观察朝向分别设置 |
+| `LANE_ENTRY_* / TASK_BOARD_* / CORNER_1_* / CORNER_2_* / FINISH_*` | 全部为 0 的未实测占位值，填写真实融合 XY；任务板坐标仅供独立观察路线使用 |
 | `FINISH_YAW_DEG / CORNER_1_YAW_DEG / CORNER_2_YAW_DEG` | 保留记录值，当前正式车道和终点不以它们做最终朝向对齐 |
 | `CROSS_LANE_YAW_DEG / YELLOW_SEARCH_START_* / YELLOW_SEARCH_END_*` | 测量横向车道朝向、搜索起止点；默认搜索段长度为 0 |
 | `FIXED_DROP_ROUTE` | 当前仅 `[("drive", 0.0)]`，只用于独立 `drop-route` 调试；full 使用共享融合投放往返 |

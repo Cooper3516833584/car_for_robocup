@@ -262,7 +262,7 @@ class CompetitionTaskTests(unittest.TestCase):
         with patch.object(task, "track_lane_line", wraps=task.track_lane_line) as follow:
             task.run_full_mission(self.runtime, detector=None)
         self.assertEqual([(c.args[1], c.args[2]) for c in follow.call_args_list], [
-            ((0.10, 0.0), (0.20, 0.0)), ((0.20, 0.0), (0.30, 0.0)),
+            ((0.10, 0.0), (0.30, 0.0)),
             ((0.30, 0.0), (0.35, 0.0)), ((0.35, 0.0), (0.45, 0.0)),
             ((0.45, 0.0), (0.55, 0.0))])
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)

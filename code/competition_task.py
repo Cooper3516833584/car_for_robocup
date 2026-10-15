@@ -16,6 +16,7 @@ from components.payload_servos import open_payload, payload_configured
 from mission_control import LocalizationLostError, step_runtime as _step, usable_pose as _usable_pose
 from components.yellow_yolo_adapter import load_detector, select_yellow
 from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
+from config.v2_runtime import RuntimeMode
 from robocup_runtime import RobocupMissionState
 
 # ============================================================
@@ -29,7 +30,7 @@ LOCALIZATION_WAIT_S = 30.0
 TASK_BOARD_CAMERA = 0
 YELLOW_CAMERA = 0
 # Continuous target search holds the calibrated servo at +90 deg, facing left.
-# Task-board acquisition still completes before the camera is parked for search.
+# Full mission reads the task board at the start with the camera already at +90°.
 
 # START_* are field notes only.
 # All route coordinates below use the current fused pose frame directly.
@@ -311,7 +312,7 @@ def send_task_to_drone_once(counts, *, runtime=None, start_drone=True):
 
 
 def go_to_first_corner(runtime):
-    return track_lane_line(runtime, (TASK_BOARD_X, TASK_BOARD_Y),
+    return track_lane_line(runtime, (LANE_ENTRY_X, LANE_ENTRY_Y),
                                (CORNER_1_X, CORNER_1_Y))
 
 
@@ -865,15 +866,18 @@ def _stage(runtime, name, action):
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
                      color=TARGET_COLOR, send_drone_task=None):
     from config.v2_factory import build_servo
+    from components.servo_positioning import park_servo
 
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
-    wait_for_fused_localization(runtime)
-    # Search borrows the +90 camera axis; the blind drop leaves it at +90.
-    servo = build_servo(runtime.config)
+    runtime.drive.stop()
+    # The boot service homes at 0 degrees. Turn to the task-board view as soon
+    # as the mission process starts, before localization wait or chassis motion.
+    servo = build_servo(runtime.config, fake=runtime.mode is not RuntimeMode.HARDWARE_MISSION)
+    if servo is None:
+        raise RuntimeError("full competition requires the configured camera servo")
     try:
-        _stage(runtime, "lane", lambda: go_to_lane(runtime))
-        _stage(runtime, "task-board-position", lambda: go_to_task_board(runtime))
+        park_servo(servo, 90)
         try:
             counts = _stage(runtime, "task-board", lambda: read_task_board(
                 task_camera, runtime=runtime, allow_fallback=False))
@@ -881,6 +885,12 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.drive.stop()
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
             raise
+        if detector is None and runtime.mode is RuntimeMode.HARDWARE_MISSION:
+            try:
+                detector = load_detector(YELLOW_MODEL_PATH)
+            except Exception:
+                LOG.exception("yellow model unavailable; skip visual drop")
+        wait_for_fused_localization(runtime)
         runtime.mission.set_task_counts(counts)
         car_color, drone_counts = split_task_allocation(counts)
         runtime.record_event('payload_target_assignment', car_color=car_color, car_mandatory_yellow=1,
@@ -899,6 +909,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.drive.stop()
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
+        _stage(runtime, "lane", lambda: go_to_lane(runtime))
         _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
         _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
         # Each cargo opens its own servo; never release both at the first target.
@@ -940,7 +951,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     detector = None
-    if stage in {"full", "yellow-detect", "yellow-search", "yellow-align"}:
+    if stage in {"yellow-detect", "yellow-search", "yellow-align"}:
         # Loading is outside any moving action, including on repeated calls.
         runtime.drive.stop()
         try:
