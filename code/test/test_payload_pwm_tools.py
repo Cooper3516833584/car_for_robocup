@@ -26,6 +26,7 @@ class PermissionTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.resolve = self.stack.enter_context(patch.object(permissions, 'resolve_chip', side_effect=self.chips))
         self.chmod = self.stack.enter_context(patch.object(Path, 'chmod'))
+        self.settle = self.stack.enter_context(patch.object(permissions, '_settle_udev'))
         self.stack.enter_context(patch.object(permissions.stat, 'S_IMODE', return_value=0o777))
         self.stack.enter_context(patch('builtins.print'))
         return root
@@ -53,7 +54,12 @@ class PermissionTests(unittest.TestCase):
     def test_export_waits_for_channel_and_does_not_enable_it(self):
         root = self.fixture(False)
         pending = iter(self.chips)
+        def settled():
+            self.assertTrue(all((chip / 'pwm0').exists() for chip in self.chips))
+            self.chmod.assert_not_called()
+        self.settle.side_effect = settled
         permissions.setup(root, sleep=lambda _: self.export(next(pending)))
+        self.settle.assert_called_once_with()
         for chip in self.chips:
             self.assertEqual((chip / 'export').read_text(), '0\n')
             self.assertEqual((chip / 'pwm0/enable').read_text(), '0')
@@ -75,6 +81,23 @@ class PermissionTests(unittest.TestCase):
         with patch.object(permissions.stat, 'S_IMODE', return_value=0o644), \
              self.assertRaisesRegex(RuntimeError, 'did not take effect'):
             permissions.setup(root)
+
+    def test_udev_failure_does_not_claim_permissions_are_ready(self):
+        root = self.fixture()
+        self.settle.side_effect = RuntimeError('events did not settle')
+        with self.assertRaisesRegex(RuntimeError, 'events did not settle'):
+            permissions.setup(root)
+        self.chmod.assert_not_called()
+
+    def test_udev_wait_is_bounded_and_checked(self):
+        import subprocess
+        with patch.object(permissions.subprocess, 'run') as run:
+            permissions._settle_udev()
+        run.assert_called_once_with(['/usr/bin/udevadm', 'settle', '--timeout=10'],
+                                    check=True, timeout=12)
+        with patch.object(permissions.subprocess, 'run', side_effect=subprocess.TimeoutExpired('udevadm', 12)), \
+             self.assertRaisesRegex(RuntimeError, 'did not settle'):
+            permissions._settle_udev()
 
     def test_service_runs_root_preparation_and_installer_rewrites_paths(self):
         service = (ROOT / 'deploy/competition-boot.service').read_text()

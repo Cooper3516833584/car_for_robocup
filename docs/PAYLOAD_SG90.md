@@ -70,6 +70,8 @@ overlay 重启生效；重启须另经操作者同意。不要在 PC 开发阶�
 运行 `tools/setup_payload_pwm_permissions.py`。它精确导出上述三路 pwm0，
 对各自 export/unexport、通道目录及 period/duty_cycle/enable/polarity 设置 0777，
 打印实际路径和最终权限。缺节点或 chmod 失败均非零退出；仅准备权限，不写位置或启用 PWM。
+本车 Radxa udev 规则会在 PWM add/change 事件中统一重设为 0775；脚本先完成三路导出，
+再有界等待 udev 事件处理完毕，最后统一设置并核验三路 0777，避免启动事件覆盖结果。
 安装器仍替换仓库路径、安装模板并保留比赛服务启用状态。
 
 ```sh
