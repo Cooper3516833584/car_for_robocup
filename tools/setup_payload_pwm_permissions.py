@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export and chmod only the project's three servo channels; never set PWM."""
+"""Export and chmod the four payload and one camera channels; never set PWM."""
 from pathlib import Path
 import stat
 import subprocess
@@ -8,10 +8,12 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'code'))
 from hal.pwm import resolve_chip
-from components.payload_servos import SERVO_1_PWM_NODE, SERVO_2_PWM_NODE
+from components.payload_servos import (SERVO_1_PWM_NODE, SERVO_2_PWM_NODE,
+                                       SERVO_3_PWM_NODE, SERVO_4_PWM_NODE)
 from components.servo_axis import ROCK5A_PWM7_M0_CHIP
 
-NODES = (SERVO_1_PWM_NODE, SERVO_2_PWM_NODE, ROCK5A_PWM7_M0_CHIP)
+NODES = (SERVO_1_PWM_NODE, SERVO_2_PWM_NODE, SERVO_3_PWM_NODE, SERVO_4_PWM_NODE,
+         ROCK5A_PWM7_M0_CHIP)
 
 
 def _settle_udev():

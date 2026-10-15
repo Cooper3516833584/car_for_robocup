@@ -8,14 +8,26 @@ import unittest
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from components.drop_task_protocol import DropTask, decode_drop_task, decode_drop_start
+from components.drop_task_protocol import (DropTask, decode_drop_task, decode_drop_start,
+                                            encode_drop_task, encode_drop_start)
 from components.fleet_task_sender import FleetTaskSender, send_task_and_start
 from components.fleet_models import AckPayload, AckStatus, CommandId, Frame, MessageKind, NodeId
 from components.fleet_protocol import decode_command, encode_ack, pack_frame, unpack_frame
 
 
 class HandoffTests(unittest.TestCase):
-    counts = SimpleNamespace(red=2, blue=0, green=1)
+    counts = SimpleNamespace(red=0, blue=0, green=1)
+
+    def test_v2_single_quota_roundtrip_and_old_rule_rejection(self):
+        for counts in ((1,0,0),(0,1,0),(0,0,1)):
+            task = DropTask(42, *counts)
+            self.assertEqual(decode_drop_task(encode_drop_task(task)), task)
+        self.assertEqual(encode_drop_task(task)[0], 2)
+        self.assertEqual(decode_drop_start(encode_drop_start(42)), 42)
+        for body in (struct.pack('<BI3B',1,42,1,0,0), struct.pack('<BI3B',2,42,2,0,1),
+                     struct.pack('<BI3B',2,42,0,0,0)):
+            with self.assertRaises(ValueError): decode_drop_task(body)
+        with self.assertRaises(ValueError): decode_drop_start(struct.pack('<BI',1,42))
 
     def make_sender(self, send, retries=1, stop_event=None):
         driver = Mock()
@@ -39,7 +51,7 @@ class HandoffTests(unittest.TestCase):
         sender = self.make_sender(send)
         self.assertTrue(sender.send_task_and_start(self.counts, task_id=42))
         tasks = [decode_command(unpack_frame(raw).payload) for raw in sent]
-        self.assertEqual(decode_drop_task(tasks[0].command_body), DropTask(42, 2, 0, 1))
+        self.assertEqual(decode_drop_task(tasks[0].command_body), DropTask(42, 0, 0, 1))
         self.assertEqual(decode_drop_start(tasks[1].command_body), 42)
         self.assertEqual([t.command_id for t in tasks], [CommandId.DRONE_SET_DROP_TASK, CommandId.DRONE_START_DROP_TASK])
         self.assertTrue(all(unpack_frame(raw).dst == NodeId.DRONE and unpack_frame(raw).src == NodeId.CAR for raw in sent))

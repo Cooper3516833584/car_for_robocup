@@ -56,7 +56,7 @@ class DirectCompetitionStageTests(unittest.TestCase):
                 self.assertEqual(main(["--competition-stage", "hc-send", "--task-red-count", "2",
                                        "--task-blue-count", "1", "--task-green-count", "1"]), 0 if success else 1)
                 send.assert_called_once()
-                self.assertEqual(tuple(send.call_args.args[0].as_dict().values()), (2, 0, 1))
+                self.assertEqual(tuple(send.call_args.args[0].as_dict().values()), (0, 0, 1))
                 self.assertFalse(send.call_args.kwargs["start_drone"])
                 self.assertEqual(send.call_args.kwargs["baudrate"], 115200)
         self.loader.assert_not_called()

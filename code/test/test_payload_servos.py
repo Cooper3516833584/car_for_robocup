@@ -12,10 +12,10 @@ class PayloadServoTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.outputs = [Mock(is_running=False), Mock(is_running=False)]
+        self.outputs = [Mock(is_running=False) for _ in range(4)]
         for output in self.outputs:
             output.start.side_effect = lambda output=output: setattr(output, 'is_running', True)
-        self.stack.enter_context(patch.object(payload, '_axes', [None, None]))
+        self.stack.enter_context(patch.object(payload, '_axes', [None]*4))
         self.factory = self.stack.enter_context(patch.object(payload, 'LinuxSysfsPWMOutput', side_effect=self.outputs))
 
     def test_addresses_period_and_actual_open_close_pulses(self):
@@ -23,7 +23,9 @@ class PayloadServoTests(unittest.TestCase):
         self.assertTrue(payload.close_payload())
         self.assertEqual(self.factory.call_args_list,
                          [call(chip_device_match='fd8b0000.pwm', channel=0),
-                          call(chip_device_match='fd8b0010.pwm', channel=0)])
+                          call(chip_device_match='fd8b0010.pwm', channel=0),
+                          call(chip_device_match='febe0030.pwm', channel=0),
+                          call(chip_device_match='febf0020.pwm', channel=0)])
         self.assertEqual(payload.SG90_TRAVEL.period_us, 20000)
         for output in self.outputs:
             self.assertEqual(output.set_pulse_us.call_args_list, [call(1000), call(1500)])
@@ -40,6 +42,10 @@ class PayloadServoTests(unittest.TestCase):
         payload.open_payload(0)
         payload.open_payload(0)
         self.assertEqual(self.outputs[0].set_pulse_us.call_args_list, [call(1000), call(1000)])
+        payload.open_payload(2)
+        payload.open_payload(3)
+        for output in self.outputs[2:]:
+            output.set_pulse_us.assert_called_once_with(1000)
 
     def test_first_write_failure_still_commands_second(self):
         self.outputs[0].set_pulse_us.side_effect = OSError('PWM write denied')
@@ -66,7 +72,7 @@ class PayloadServoTests(unittest.TestCase):
         self.outputs[0].disable.assert_not_called()
 
     def test_invalid_slots_do_not_construct_pwm(self):
-        for slot in (-1, 2, True, '0'):
+        for slot in (-1, 4, True, '0'):
             with self.subTest(slot=slot), self.assertRaises(ValueError): payload.open_payload(slot)
         self.factory.assert_not_called()
 
@@ -77,7 +83,7 @@ class PayloadServoTests(unittest.TestCase):
     def test_configuration_checks_real_nodes_and_write_access_without_output(self):
         with patch.object(payload, 'resolve_chip', return_value=Path('/fake/pwmchip9')) as resolve, patch.object(payload.os, 'access', return_value=True):
             self.assertTrue(payload.payload_configured())
-            self.assertEqual([c.args[1] for c in resolve.call_args_list], ['fd8b0000.pwm', 'fd8b0010.pwm'])
+            self.assertEqual([c.args[1] for c in resolve.call_args_list], ['fd8b0000.pwm', 'fd8b0010.pwm', 'febe0030.pwm', 'febf0020.pwm'])
         with patch.object(payload, 'resolve_chip', side_effect=RuntimeError('overlay absent')):
             self.assertFalse(payload.payload_configured())
         with patch.object(payload, 'resolve_chip', return_value=Path('/fake/pwmchip9')), patch.object(payload.os, 'access', return_value=False):
@@ -92,10 +98,11 @@ class PayloadServoTests(unittest.TestCase):
         threads = [threading.Thread(target=payload.open_payload if i % 2 else payload.close_payload) for i in range(30)]
         for thread in threads: thread.start()
         for thread in threads: thread.join(2)
-        self.assertEqual(len(calls), 60)
-        for a, b in zip(calls[::2], calls[1::2]):
-            self.assertEqual((a[0], b[0]), (0, 1))
-            self.assertEqual(a[1], b[1])
+        self.assertEqual(len(calls), 120)
+        for offset in range(0, len(calls), 4):
+            group = calls[offset:offset+4]
+            self.assertEqual([index for index, pulse in group], [0, 1, 2, 3])
+            self.assertEqual(len({pulse for index, pulse in group}), 1)
 
     def test_car_only_listener_lifecycle_writes_real_conversion_pulses(self):
         import competition_boot as boot

@@ -131,7 +131,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.run_main(),0)
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
         self.assertEqual(self.runtime.mission.task_counts,self.counts)
-        self.send.assert_called_once_with(task.DroneAllocation(2,0,1),runtime=self.runtime)
+        self.send.assert_called_once_with(task.DroneAllocation(0,0,1),runtime=self.runtime)
         self.assertEqual(self.used_config.navigation.translation_speed_scale,2)
         self.assertEqual(self.used_config.drive.max_linear_accel_m_s2,self.config.drive.max_linear_accel_m_s2)
         kwargs=self.vision_factory.call_args.kwargs

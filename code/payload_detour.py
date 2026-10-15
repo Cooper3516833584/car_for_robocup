@@ -16,16 +16,24 @@ PERIOD_S = 0.05
 
 @dataclass(frozen=True)
 class DetourSettings:
-    payload_slot: int = 0  # 0: yellow cargo; 1: task-board cargo (one release each).
+    payload_slot: int = 0  # 0: yellow; 1: single target; 2/3: double target.
     approach_m: float = 0.43
     release_hold_s: float = 0.5
     position_tolerance_m: float = 0.005
     patrol_slow_speed_m_s: float = 0.08
+    payload_slots: tuple[int, ...] = ()
+
+    @property
+    def release_slots(self):
+        return self.payload_slots or (self.payload_slot,)
 
     def __post_init__(self):
         if (isinstance(self.payload_slot, bool) or not isinstance(self.payload_slot, int)
-                or self.payload_slot not in (0, 1)):
-            raise ValueError('payload cargo slot must be 0 or 1')
+                or self.payload_slot not in range(4)):
+            raise ValueError('payload cargo slot must be 0..3')
+        if (any(isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(4)
+                for slot in self.release_slots) or len(set(self.release_slots)) != len(self.release_slots)):
+            raise ValueError('payload cargo slots must be unique integers in 0..3')
         for name in ("approach_m", "release_hold_s", "position_tolerance_m",
                      "patrol_slow_speed_m_s"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
@@ -152,22 +160,23 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.motion.stop()
         runtime.drive.stop()
         record_drop_pose(A2, B2, side_yaw)
-        check()
-        if simulate_release:
-            runtime.record_event("payload_release_skipped", actuator="payload_servo",
-                                 slot=settings.payload_slot, cargo_count=1,
-                                 reason="explicit payload simulation; physical output disabled")
-        else:
-            runtime.record_event("payload_release_start", actuator="payload_servo",
-                                 slot=settings.payload_slot, cargo_count=1)
-            released = open_payload(settings.payload_slot)
-            if released is False:
-                raise RuntimeError('payload PWM command failed: returned False')
-        hold(settings.release_hold_s)
-        if not simulate_release:
-            runtime.record_event("payload_release_done",
-                                 actuator="payload_servo", cargo_count=1, slot=settings.payload_slot,
-                                 reason="PWM command written; no mechanical feedback")
+        for slot in settings.release_slots:
+            check()
+            if simulate_release:
+                runtime.record_event("payload_release_skipped", actuator="payload_servo",
+                                     slot=slot, cargo_count=1,
+                                     reason="explicit payload simulation; physical output disabled")
+            else:
+                runtime.record_event("payload_release_start", actuator="payload_servo",
+                                     slot=slot, cargo_count=1)
+                released = open_payload(slot)
+                if released is False:
+                    raise RuntimeError('payload PWM command failed: returned False')
+            hold(settings.release_hold_s)
+            if not simulate_release:
+                runtime.record_event("payload_release_done",
+                                     actuator="payload_servo", cargo_count=1, slot=slot,
+                                     reason="PWM command written; no mechanical feedback")
         # Use the latest fusion after the release hold, then reverse along the
         # saved side axis. Even a small cross-track residual cannot turn this
         # into a diagonal path to the historical XY pivot.

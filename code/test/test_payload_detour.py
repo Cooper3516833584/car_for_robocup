@@ -21,6 +21,35 @@ CENTER_BOX = (290, 0, 350, 40, .9, 0)  # Horizontally centred, near the image to
 
 
 class PayloadDetourTests(unittest.TestCase):
+    def test_double_target_releases_two_slots_during_one_detour(self):
+        self.fixture()
+        run_payload_detour(self.runtime, DetourSettings(payload_slots=(2, 3)),
+                           clock=lambda: self.now, sleep=self.advance)
+        self.assertEqual([c.args for c in self.open.call_args_list], [(2,), (3,)])
+        self.assertEqual(list(self.stage_poses), ['left_90deg', 'forward_to_drop',
+                                                 'reverse_from_drop', 'right_90deg'])
+        self.assertEqual([v['slot'] for e,v in self.events if e == 'payload_release_done'], [2,3])
+        self.assert_safe_exit()
+
+    def test_stop_between_grouped_releases_prevents_second_normal_release(self):
+        self.fixture()
+        def guard():
+            if any(e == 'payload_release_start' for e,v in self.events):
+                raise RuntimeError('STOP during release hold')
+        with self.assertRaisesRegex(RuntimeError, 'STOP during release hold'):
+            run_payload_detour(self.runtime, DetourSettings(payload_slots=(2, 3)), guard=guard,
+                               clock=lambda: self.now, sleep=self.advance)
+        self.assertEqual([c.args for c in self.open.call_args_list], [(2,), ()])
+        self.assertFalse(any(e == 'payload_release_done' for e,v in self.events))
+        self.assertNotIn('reverse_from_drop', self.stage_poses)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assert_safe_exit()
+
+    def test_grouped_slots_reject_reuse_and_out_of_range(self):
+        for slots in ((2,2),(2,4),(True,),('2',)):
+            with self.subTest(slots=slots), self.assertRaises(ValueError):
+                DetourSettings(payload_slots=slots)
+
     def test_false_release_stops_before_reverse_and_opens_both(self):
         self.fixture()
         self.open.side_effect = [False, True]
@@ -458,9 +487,9 @@ class PayloadDetourTests(unittest.TestCase):
         self.cleanup_open.assert_called_once()
         self.assertFalse(self.stage_poses)
 
-    def test_legacy_magnet_slot_is_not_a_dual_servo_option(self):
+    def test_out_of_range_slot_is_rejected(self):
         with self.assertRaises(ValueError):
-            DetourSettings(payload_slot=3)
+            DetourSettings(payload_slot=4)
 
     def test_successful_detour_opens_the_dual_servo_once(self):
         self.fixture()

@@ -1,4 +1,4 @@
-"""Two payload SG90 axes, separate from the calibrated camera axis."""
+"""Four payload SG90 axes, separate from the calibrated camera axis."""
 import threading
 import logging
 import os
@@ -11,20 +11,31 @@ SERVO_1_PWM_NODE = "fd8b0000.pwm"
 SERVO_1_PWM_CHANNEL = 0
 SERVO_2_PWM_NODE = "fd8b0010.pwm"
 SERVO_2_PWM_CHANNEL = 0
+SERVO_3_PWM_NODE = "febe0030.pwm"  # PWM11_IR_M1, physical pin 15.
+SERVO_3_PWM_CHANNEL = 0
+SERVO_4_PWM_NODE = "febf0020.pwm"  # PWM14_M1, physical pin 13.
+SERVO_4_PWM_CHANNEL = 0
 OPEN_ANGLE = 0
 CLOSE_ANGLE = 90
 SG90_TRAVEL = ServoTravel(half_range_deg=90, pulse_min_us=1000, pulse_max_us=2000)
-_axes = [None, None]
+_axes = [None, None, None, None]
 _lock = threading.RLock()
 LOG = logging.getLogger(__name__)
-PAYLOAD_COUNT = 2
-# Logical cargo slots: 0 = mandatory yellow, 1 = single-item task-board target.
+PAYLOAD_COUNT = 4
+# 0 = yellow; 1 = single-item target; 2/3 = two cargo for the double-item target.
+
+
+def _pins():
+    return ((SERVO_1_PWM_NODE, SERVO_1_PWM_CHANNEL),
+            (SERVO_2_PWM_NODE, SERVO_2_PWM_CHANNEL),
+            (SERVO_3_PWM_NODE, SERVO_3_PWM_CHANNEL),
+            (SERVO_4_PWM_NODE, SERVO_4_PWM_CHANNEL))
 
 
 def payload_configured(slot=None) -> bool:
-    pins = ((SERVO_1_PWM_NODE, SERVO_1_PWM_CHANNEL), (SERVO_2_PWM_NODE, SERVO_2_PWM_CHANNEL))
-    if slot is not None and (isinstance(slot, bool) or not isinstance(slot, int) or slot not in (0, 1)):
-        raise ValueError('payload slot must be 0 (yellow) or 1 (assigned target)')
+    pins = _pins()
+    if slot is not None and (isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(PAYLOAD_COUNT)):
+        raise ValueError('payload slot must be 0..3')
     with _lock:
         for index, (node, channel) in enumerate(pins):
             if slot is not None and index != slot:
@@ -52,11 +63,11 @@ def _command(angle, slot=None):
     errors = []
     complete = True
     with _lock:
-        if slot is not None and (isinstance(slot, bool) or not isinstance(slot, int) or slot not in (0, 1)):
-            raise ValueError('payload slot must be 0 (yellow) or 1 (assigned target)')
-        pins = ((SERVO_1_PWM_NODE, SERVO_1_PWM_CHANNEL),
-                (SERVO_2_PWM_NODE, SERVO_2_PWM_CHANNEL))
-        if all(value is not None for pin in pins for value in pin) and pins[0] == pins[1]:
+        if slot is not None and (isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(PAYLOAD_COUNT)):
+            raise ValueError('payload slot must be 0..3')
+        pins = _pins()
+        configured = [pin for pin in pins if all(value is not None for value in pin)]
+        if len(set(configured)) != len(configured):
             raise RuntimeError('payload servos cannot share a PWM channel')
         for index, (node, channel) in enumerate(pins):
             if slot is not None and slot != index:
@@ -83,10 +94,10 @@ def _command(angle, slot=None):
 
 
 def open_payload(slot=None) -> bool:
-    """OPEN both for listening/cleanup, or just cargo slot 0/1 for release."""
+    """OPEN all for listening/cleanup, or just one cargo slot for release."""
     return _command(OPEN_ANGLE, slot)
 
 
 def close_payload() -> bool:
-    """CLOSE both after accepting RUN; keep the PWM pulse train running."""
+    """CLOSE all after accepting RUN; keep the PWM pulse train running."""
     return _command(CLOSE_ANGLE)

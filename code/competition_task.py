@@ -121,15 +121,16 @@ class DroneAllocation:
 
 
 def split_task_allocation(counts):
-    """Assign one single-item color to CAR; drone gets the other three items."""
+    """CAR takes the double and first single color; drone takes the other single."""
     values = counts.as_dict()
-    if sum(values.values()) != 4:
-        raise ValueError('source task board must contain four free-color items')
-    car_color = next((color for color in ('red', 'blue', 'green') if values[color] == 1), None)
-    if car_color is None:
-        raise ValueError('no single-item target can be assigned to the car')
-    values[car_color] = 0
-    return car_color, DroneAllocation(**values)
+    if sorted(values.values()) != [1, 1, 2]:
+        raise ValueError('task board must contain one double-item and two single-item targets (2/1/1)')
+    double_color = next(color for color in ('red', 'blue', 'green') if values[color] == 2)
+    single_color = next(color for color in ('red', 'blue', 'green') if values[color] == 1)
+    car_counts = {double_color: 2, single_color: 1}
+    for color in car_counts:
+        values[color] = 0
+    return car_counts, DroneAllocation(**values)
 
 
 def wait_for_fused_localization(runtime):
@@ -792,21 +793,21 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
 
 def perform_payload_detour(runtime, *, servo=None, camera=None,
                            color=TARGET_COLOR, safe_distance_m=None, payload_slot=0,
-                           simulate_release=False):
+                           simulate_release=False, payload_slots=()):
     """Turn at the centred stop, side line, reverse, one inward turn."""
     from payload_detour import DetourSettings, run_payload_detour
-    if not simulate_release and not payload_configured(payload_slot):
-        runtime.record_event('payload_release_failed', actuator='payload_servo', cargo_count=1,
-                             slot=payload_slot, color=color,
+    settings = DetourSettings(
+        payload_slot=payload_slot, payload_slots=tuple(payload_slots),
+        approach_m=DROP_SAFE_M if safe_distance_m is None else safe_distance_m,
+        release_hold_s=PAYLOAD_RELEASE_HOLD_S,
+        patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
+    if not simulate_release and not all(payload_configured(slot) for slot in settings.release_slots):
+        runtime.record_event('payload_release_failed', actuator='payload_servo', cargo_count=len(settings.release_slots),
+                             slot=payload_slot, slots=settings.release_slots, color=color,
                              reason='PWM unavailable or not writable')
         runtime.drive.stop()
         runtime.mission.request_safe_stop('payload PWM unavailable')
         raise RuntimeError('payload PWM unavailable or not writable')
-    settings = DetourSettings(
-        payload_slot=payload_slot,
-        approach_m=DROP_SAFE_M if safe_distance_m is None else safe_distance_m,
-        release_hold_s=PAYLOAD_RELEASE_HOLD_S,
-        patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
     original_drive = runtime.motion.drive
     runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
         original_drive.max_linear_speed_m_s, settings.patrol_slow_speed_m_s))
@@ -951,12 +952,13 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
             continue
         runtime.record_event("yellow_align", source="continuous_search", color=color,
                              cx_px=(aligned[0]+aligned[2])/2, cy_px=(aligned[1]+aligned[3])/2)
-        slot = pending_payloads[color]
+        slots = pending_payloads[color]
+        slot = slots[0]
         dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
             runtime, servo=servo, color=color, payload_slot=slot,
-            simulate_release=simulate_release))
-        runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
-                             slot=slot, color=color, success=dropped is not None and not simulate_release,
+            simulate_release=simulate_release, payload_slots=slots))
+        runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=len(slots),
+                             slot=slot, slots=slots, color=color, success=dropped is not None and not simulate_release,
                              skipped=dropped is None or simulate_release, simulated=simulate_release,
                              detour_completed=dropped is not None, pose_reference="fused")
         if dropped is not None:
@@ -984,6 +986,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         try:
             counts = _stage(runtime, "task-board", lambda: read_task_board(
                 task_camera, runtime=runtime, allow_fallback=True))
+            car_counts, drone_counts = split_task_allocation(counts)
         except Exception:
             runtime.drive.stop()
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
@@ -1003,9 +1006,8 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                                                      origin_base.y_m+radar_offset[1]),
                              route_points_local=ROUTE_POINTS)
         runtime.mission.set_task_counts(counts)
-        car_color, drone_counts = split_task_allocation(counts)
-        runtime.record_event('payload_target_assignment', car_color=car_color, car_mandatory_yellow=1,
-                             car_target_required=1, drone_allocation=drone_counts.as_dict(),
+        runtime.record_event('payload_target_assignment', car_allocation=car_counts, car_mandatory_yellow=1,
+                             car_target_required=3, drone_allocation=drone_counts.as_dict(),
                              drone_mandatory_yellow=1)
         def handoff():
             if car_only_test:
@@ -1025,7 +1027,9 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
         from target_patrol import YoloVision, EntryLatch
-        pending_payloads = {"yellow": 0, car_color: 1}
+        pending_payloads = {"yellow": (0,)}
+        pending_payloads.update({name: (2, 3) if count == 2 else (1,)
+                                 for name, count in car_counts.items()})
         latches = {name: EntryLatch() for name in pending_payloads}
         if detector is not None:
             vision = YoloVision(YELLOW_MODEL_PATH, yellow_camera, confidence=YELLOW_MIN_CONF,
@@ -1049,9 +1053,9 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             result = patrol_leg_with_pending_targets(runtime, a, b, pending_payloads,
                 vision, servo, latches, simulate_release=simulate_release)
             runtime.record_event("competition_route_leg_done", **fields, **_actual_route_pose(runtime))
-        for target_color, slot in pending_payloads.items():
-            runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
-                                 slot=slot, color=target_color, success=False, skipped=True,
+        for target_color, slots in pending_payloads.items():
+            runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=len(slots),
+                                 slot=slots[0], slots=slots, color=target_color, success=False, skipped=True,
                                  simulated=simulate_release, detour_completed=False,
                                  reason="three-leg route exhausted without completed detour")
         runtime.drive.stop()
