@@ -109,6 +109,25 @@ class BootTests(unittest.TestCase):
         self.open.assert_called_once(); self.alarm.off.assert_called_once()
         self.driver.write.assert_called_once()
 
+    def test_success_does_not_stop_the_drone_before_its_own_mission_finishes(self):
+        self.run_worker()
+        self.driver.write.assert_not_called()
+
+    def test_cancelled_sender_cannot_write_after_stop(self):
+        self.listener._stop_event=threading.Event()
+        self.listener._stop_event.set()
+        with self.assertRaisesRegex(RuntimeError,'cancelled'):
+            self.listener.write(b'task')
+        self.driver.write.assert_not_called()
+
+    def test_invalid_and_non_ground_frames_cannot_start_a_mission(self):
+        for source,body in ((NodeId.DRONE,b''),(NodeId.GROUND,b'unexpected')):
+            raw=pack_frame(Frame(1,source,NodeId.CAR,MessageKind.COMMAND,0,10,1,
+                encode_command(CommandPayload(CommandId.CAR_START_MISSION,command_body=body))))
+            self.listener._on_bytes(raw)
+        self.assertIsNone(self.listener._worker)
+        self.close.assert_not_called()
+
     def test_duplicate_run_cache_and_busy_do_not_create_workers(self):
         blocker=Mock(); blocker.is_alive.return_value=True
         self.listener._worker=blocker

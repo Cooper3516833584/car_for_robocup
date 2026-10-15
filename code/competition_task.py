@@ -886,8 +886,16 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         runtime.record_event('payload_target_assignment', car_color=car_color, car_mandatory_yellow=1,
                              car_target_required=1, drone_allocation=drone_counts.as_dict(),
                              drone_mandatory_yellow=1)
-        if _stage(runtime, "hc-send", lambda: (send_drone_task(drone_counts) if send_drone_task is not None
-                else send_task_to_drone_once(drone_counts, runtime=runtime))) is not True:
+        def handoff():
+            if send_drone_task is None:
+                return send_task_to_drone_once(drone_counts, runtime=runtime)
+            ok = send_drone_task(drone_counts)
+            runtime.record_event("hc_task_send", **drone_counts.as_dict(), success=ok,
+                                 protocol="FleetBus", start_confirmed=ok is True,
+                                 bridge_envelope=HC_BRIDGE_ENVELOPE)
+            return ok
+
+        if _stage(runtime, "hc-send", handoff) is not True:
             runtime.drive.stop()
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")

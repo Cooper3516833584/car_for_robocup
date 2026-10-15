@@ -297,8 +297,12 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                     open_payload()
                 except Exception:
                     logging.exception("finally payload OPEN failed")
-            if previous_sigterm is not None:
-                signal.signal(signal.SIGTERM, previous_sigterm)
+            try:
+                if on_runtime_ready is not None:
+                    on_runtime_ready(None)
+            finally:
+                if previous_sigterm is not None:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

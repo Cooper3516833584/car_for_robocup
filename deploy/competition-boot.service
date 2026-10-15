@@ -1,21 +1,25 @@
 [Unit]
-Description=RoboCup HC-15 competition listener
-After=network.target
+Description=RoboCup car ground-command listener
+RequiresMountsFor=/home/radxa/car
 
 [Service]
 Type=simple
 User=radxa
+Group=radxa
+SupplementaryGroups=dialout
 WorkingDirectory=/home/radxa/car
-# Check the existing ROS environment, GPIO/PWM access and noninteractive
-# permission to restart robocup-slam.service before installing this template.
-ExecStart=/home/radxa/robocup_ros/env/bin/python -u /home/radxa/car/code/competition_boot.py
+ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/env/bin/python
+ExecStart=/home/radxa/robocup_ros/env/bin/python /home/radxa/car/code/competition_boot.py
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 TimeoutStopSec=40
 KillMode=control-group
 Environment=PYTHONUNBUFFERED=1
+SyslogIdentifier=car-competition-boot
 StandardOutput=journal
 StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=60
 
 [Install]
 WantedBy=multi-user.target

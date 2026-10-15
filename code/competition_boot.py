@@ -70,6 +70,7 @@ class CompetitionBoot:
         self._clock = clock
         self._alarm = SoundLightAlarm() if alarm is None else alarm
         self._state_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._tx_seq_lock = threading.Lock()
         self._payload_action_lock = threading.Lock()
         self._worker = self._stop_event = self._sender = self._runtime = None
@@ -79,10 +80,18 @@ class CompetitionBoot:
         self._session = new_session()
         self._seq = SequenceCounter()
         self._driver = driver_factory(on_bytes=self._on_bytes, port='/dev/ttyS4',
-            baudrate=115200, bridge_envelope=True, on_disconnected=self._on_disconnected)
+            baudrate=115200, bridge_envelope=True, on_disconnected=self._on_disconnected,
+            on_callback_error=self._on_callback_error)
 
     def write(self, data):
-        self._driver.write(data)
+        with self._write_lock:
+            if self._stop_event is None or self._stop_event.is_set():
+                raise RuntimeError('competition task send was cancelled')
+            self._driver.write(data)
+
+    def _write_frame(self, data):
+        with self._write_lock:
+            self._driver.write(data)
 
     def _next_seq(self):
         with self._tx_seq_lock:
@@ -101,6 +110,7 @@ class CompetitionBoot:
         self._attempt('alarm OFF', self._alarm.off)
         self._attempt('startup payload OPEN', open_payload)
         self._driver.start()
+        return self
 
     def _on_bytes(self, data):
         for frame in self._parser.feed(data):
@@ -115,7 +125,7 @@ class CompetitionBoot:
         self._cache.begin_ground_session(frame.session)
         cached = self._cache.get(frame.session, frame.seq)
         if cached is not None:
-            self._attempt('cached ACK', lambda: self.write(cached))
+            self._attempt('cached ACK', lambda: self._write_frame(cached))
             return
         command_id = frame.payload[0] if frame.payload else 0
         try:
@@ -139,7 +149,7 @@ class CompetitionBoot:
             self._session, self._next_seq(), encode_ack(AckPayload(
                 frame.session, frame.seq, command_id, status, reason))))
         self._cache.put(frame.session, frame.seq, raw)
-        self._attempt('ground ACK', lambda: self.write(raw))
+        self._attempt('ground ACK', lambda: self._write_frame(raw))
 
     def _start_mission(self):
         with self._state_lock:
@@ -151,12 +161,18 @@ class CompetitionBoot:
             sender = FleetTaskSender(self, stop_event=stop)
             self._stop_event, self._sender = stop, sender
             self._worker = threading.Thread(target=self._run_mission,
-                args=(stop, sender, run_id, t0), name='competition-mission', daemon=True)
-            self._worker.start()
+                args=(stop, sender, run_id, t0), name='competition-mission')
+            try:
+                self._worker.start()
+            except RuntimeError:
+                self._worker = self._sender = self._stop_event = None
+                LOG.exception('could not start competition worker')
+                return AckStatus.FAILED, AckReason.INTERNAL_ERROR
         LOG.info('RUN ACCEPTED run_id=%d', run_id)
         return AckStatus.ACCEPTED, AckReason.NONE
 
     def _run_mission(self, stop, sender, run_id, t0):
+        completed = False
         try:
             with self._payload_action_lock:
                 if stop.is_set():
@@ -194,6 +210,7 @@ class CompetitionBoot:
                 send_drone_task=handoff, on_runtime_ready=self._runtime_ready)
             if result:
                 raise RuntimeError('competition mission failed: %s' % result)
+            completed = not stop.is_set()
         except Exception:
             LOG.exception('competition worker failed run_id=%d', run_id)
         finally:
@@ -201,7 +218,8 @@ class CompetitionBoot:
             self._attempt('finally alarm OFF', self._alarm.off)
             with self._payload_action_lock:
                 self._attempt('finally payload OPEN', open_payload)
-            self._forward_stop()
+            if not completed:
+                self._forward_stop()
             with self._state_lock:
                 self._runtime = self._sender = self._stop_event = None
             LOG.info('FULL CLEANUP run_id=%d', run_id)
@@ -232,10 +250,15 @@ class CompetitionBoot:
     def _forward_stop(self):
         raw = pack_frame(Frame(1, NodeId.CAR, NodeId.DRONE, MessageKind.COMMAND, 0,
             self._session, self._next_seq(), encode_command(CommandPayload(CommandId.TARGETED_STOP))))
-        self._attempt('remote STOP write', lambda: self.write(raw))
+        self._attempt('remote STOP write', lambda: self._write_frame(raw))
         LOG.warning('Remote OPEN unconfirmed: STOP delivery has no awaited ACK')
 
     def _on_disconnected(self, error=None):
+        self._cancel_current()
+        self._forward_stop()
+
+    def _on_callback_error(self, error):
+        LOG.error('HC-15 callback failed: %s', error)
         self._cancel_current()
         self._forward_stop()
 
@@ -245,10 +268,10 @@ class CompetitionBoot:
             worker = self._worker
         self._cancel_current()
         self._forward_stop()
-        if worker is not None:
+        if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=35)
             if worker.is_alive():
-                LOG.error('Mission worker still cancelling; base stopped and further RUN is disabled')
+                raise RuntimeError('Mission worker still cancelling; base stopped and HC-15 remains open')
         self._driver.close()
 
 

@@ -23,7 +23,8 @@ class DetourSettings:
     patrol_slow_speed_m_s: float = 0.08
 
     def __post_init__(self):
-        if isinstance(self.payload_slot, bool) or self.payload_slot not in (0, 1):
+        if (isinstance(self.payload_slot, bool) or not isinstance(self.payload_slot, int)
+                or self.payload_slot not in (0, 1)):
             raise ValueError('payload cargo slot must be 0 or 1')
         for name in ("approach_m", "release_hold_s", "position_tolerance_m",
                      "patrol_slow_speed_m_s"):
