@@ -63,6 +63,9 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime.record_event = Mock()
         self.stack = ExitStack()
         self.stack.enter_context(patch.object(task,"payload_configured",return_value=True))
+        camera_servo = Mock()
+        camera_servo.is_running = False
+        self.stack.enter_context(patch("config.v2_factory.build_servo", return_value=camera_servo))
         self.open = self.stack.enter_context(patch("payload_detour.open_payload"))
         self.stack.enter_context(patch("main_robocup.open_payload"))
         self.stack.enter_context(patch.object(task, "open_payload"))
@@ -165,6 +168,39 @@ class CompetitionTaskTests(unittest.TestCase):
         reader.recognize_camera.side_effect = OSError("camera missing")
         self.assertEqual(task.read_task_board(reader=reader).key, (1, 2, 1))
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
+    def test_reader_retries_three_times_then_records_fallback_without_stopping(self):
+        reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+        reader.recognize_camera.side_effect = RuntimeError("camera unavailable")
+        with patch.object(task, "TASK_BOARD_RETRY_DELAY_S", 0), \
+             self.assertLogs("competition_task", level="WARNING") as logs:
+            counts = task.read_task_board(reader=reader, runtime=self.runtime)
+        self.assertEqual(counts.key, (1, 2, 1))
+        self.assertEqual(reader.recognize_camera.call_count, 3)
+        self.runtime.record_event.assert_called_with(
+            "task_board_counts", red=1, blue=2, green=1, fallback=True,
+            reason="camera unavailable")
+        self.assertIn("using fallback task", "\n".join(logs.output))
+        self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
+    def test_recognized_task_counts_keep_real_values_and_allocation(self):
+        expected = (((2, 1, 1), "blue", (2, 0, 1)),
+                    ((1, 2, 1), "red", (0, 2, 1)),
+                    ((1, 1, 2), "red", (0, 1, 2)))
+        for source, color, drone_quota in expected:
+            with self.subTest(source=source):
+                counts = TaskCounts(*source)
+                reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+                reader.recognize_camera.return_value = TaskBoardResult(
+                    counts, 0.95, votes=3)
+                actual = task.read_task_board(reader=reader, runtime=self.runtime)
+                car_color, drone_counts = task.split_task_allocation(actual)
+                self.assertEqual(actual.key, source)
+                self.assertEqual(car_color, color)
+                self.assertEqual(tuple(drone_counts.as_dict().values()), drone_quota)
+                self.runtime.record_event.assert_called_with(
+                    "task_board_counts", red=source[0], blue=source[1],
+                    green=source[2], fallback=False, votes=3, confidence=0.95)
 
     def test_search_clips_last_step_and_needs_consecutive_frames(self):
         self.stack.enter_context(patch.object(task, "YELLOW_SEARCH_END_X", 0.54))
@@ -411,7 +447,8 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "_open_yellow_camera", return_value=(Mock(), False)))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=(
             YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
-        self.stack.enter_context(patch.object(task, "send_task_and_start", return_value=hc_ok))
+        self.handoff = self.stack.enter_context(
+            patch.object(task, "send_task_and_start", return_value=hc_ok))
         def detour(runtime, **_kwargs):
             if not drop_ok:
                 runtime.mission.request_safe_stop("payload release was not confirmed")
@@ -467,11 +504,20 @@ class CompetitionTaskTests(unittest.TestCase):
         send.assert_called_once()
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
 
-    def test_full_cli_ocr_failure_never_sends_fallback_to_drone(self):
+    def test_full_cli_ocr_failure_uses_fallback_and_continues_handoff(self):
         with self.assertLogs("competition_task", level="WARNING") as logs:
-            self._run_full_cli(ocr_ok=False, expected_code=1).assert_not_called()
-        self.assertIsNone(self.runtime.mission.task_counts)
-        self.assertFalse(any("using fallback task" in message for message in logs.output))
+            self._run_full_cli(ocr_ok=False).assert_called()
+        self.assertEqual(self.runtime.mission.task_counts.key, (1, 2, 1))
+        self.assertTrue(any("using fallback task" in message for message in logs.output))
+        self.runtime.record_event.assert_any_call(
+            "task_board_counts", red=1, blue=2, green=1, fallback=True,
+            reason="OCR camera unavailable")
+        self.runtime.record_event.assert_any_call(
+            "payload_target_assignment", car_color="red", car_mandatory_yellow=1,
+            car_target_required=1, drone_allocation={"red": 0, "blue": 2, "green": 1},
+            drone_mandatory_yellow=1)
+        self.assertEqual(self.handoff.call_args.args[0].as_dict(),
+                         {"red": 0, "blue": 2, "green": 1})
 
     def test_full_cli_does_not_report_success_before_finish(self):
         with patch("main_robocup.build_runtime", return_value=self.runtime), \

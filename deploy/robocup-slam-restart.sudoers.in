@@ -1,0 +1,1 @@
+radxa ALL=(root) NOPASSWD: @SYSTEMCTL_PATH@ restart robocup-slam.service

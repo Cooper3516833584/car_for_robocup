@@ -2,6 +2,7 @@
 import logging
 import secrets
 import signal
+import shutil
 import subprocess
 import threading
 import time
@@ -19,12 +20,13 @@ LOG = logging.getLogger(__name__)
 RUN_DELAY_S = 20.0
 BUZZ_LAST_S = 5.0
 SLAM_SERVICE = 'robocup-slam.service'
+SYSTEMCTL = shutil.which('systemctl') or '/usr/bin/systemctl'
 MISSION_ARGS = ('--competition', '--mode', 'hardware-mission', '--relative-slam')
 
 
 def restart_car_slam_sidecar(stop_event):
     def identity():
-        result = subprocess.run(['systemctl', 'show', SLAM_SERVICE,
+        result = subprocess.run([SYSTEMCTL, 'show', SLAM_SERVICE,
             '--property=ActiveState,MainPID,InvocationID'], check=True,
             capture_output=True, text=True, timeout=5)
         return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
@@ -34,7 +36,7 @@ def restart_car_slam_sidecar(stop_event):
     before = identity()
     if stop_event.is_set():
         raise RuntimeError('SLAM restart cancelled')
-    process = subprocess.Popen(['systemctl', 'restart', SLAM_SERVICE],
+    process = subprocess.Popen(['sudo', '-n', SYSTEMCTL, 'restart', SLAM_SERVICE],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 30

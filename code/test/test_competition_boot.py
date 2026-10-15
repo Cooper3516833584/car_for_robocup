@@ -202,7 +202,25 @@ class SidecarTests(unittest.TestCase):
         with patch.object(boot.subprocess,'run',side_effect=[before,after]), \
              patch.object(boot.subprocess,'Popen',return_value=process):
             self.assertEqual(boot.restart_car_slam_sidecar(threading.Event())['InvocationID'],'new')
+            self.assertEqual(boot.subprocess.Popen.call_args.args[0],
+                ['sudo', '-n', boot.SYSTEMCTL, 'restart', boot.SLAM_SERVICE])
         with patch.object(boot.subprocess,'run',return_value=before), \
              patch.object(boot.subprocess,'Popen',return_value=process):
             with self.assertRaisesRegex(RuntimeError,'new SLAM'):
+                boot.restart_car_slam_sidecar(threading.Event())
+
+    def test_failed_restart_command_is_rejected(self):
+        before=Mock(stdout='ActiveState=active\nMainPID=1\nInvocationID=old')
+        process=Mock(returncode=1); process.poll.return_value=1
+        with patch.object(boot.subprocess,'run',return_value=before), \
+             patch.object(boot.subprocess,'Popen',return_value=process):
+            with self.assertRaisesRegex(RuntimeError,'restart failed'):
+                boot.restart_car_slam_sidecar(threading.Event())
+
+    def test_missing_slam_unit_cannot_be_confirmed(self):
+        missing=Mock(stdout='')
+        process=Mock(returncode=1); process.poll.return_value=1
+        with patch.object(boot.subprocess,'run',return_value=missing), \
+             patch.object(boot.subprocess,'Popen',return_value=process):
+            with self.assertRaisesRegex(RuntimeError,'restart failed'):
                 boot.restart_car_slam_sidecar(threading.Event())

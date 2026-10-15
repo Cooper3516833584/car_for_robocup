@@ -880,7 +880,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         park_servo(servo, 90)
         try:
             counts = _stage(runtime, "task-board", lambda: read_task_board(
-                task_camera, runtime=runtime, allow_fallback=False))
+                task_camera, runtime=runtime, allow_fallback=True))
         except Exception:
             runtime.drive.stop()
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
