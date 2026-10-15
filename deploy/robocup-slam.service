@@ -6,8 +6,12 @@ After=network.target
 Type=simple
 User=radxa
 WorkingDirectory=/home/radxa/car
-ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec ros2 launch /home/radxa/car/launch/robocup_slam.launch.py'
+Environment=MAMBA_ROOT_PREFIX=/home/radxa/robocup_ros/root
+ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/bin/micromamba
+ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/env/bin/ros2
+ExecStart=/home/radxa/robocup_ros/bin/micromamba run -p /home/radxa/robocup_ros/env ros2 launch /home/radxa/car/launch/robocup_slam.launch.py
 Restart=on-failure
+RestartSec=3
 KillMode=control-group
 
 [Install]

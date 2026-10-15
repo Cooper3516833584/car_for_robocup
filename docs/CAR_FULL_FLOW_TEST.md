@@ -42,6 +42,13 @@ systemctl show competition-boot.service -p ExecStart -p ActiveState
 不要在任务执行中重启服务。查看日志用
 `journalctl -u competition-boot.service -f`。
 
+本车使用 Debian 12 的 RoboStack 环境，不存在 `/opt/ros/humble/setup.bash`。
+SLAM 服务通过 `robocup_ros/bin/micromamba run -p robocup_ros/env` 启动。
+任务监听同样激活该 ROS 环境，并使用带系统包的 `vision_env/bin/python`，
+通过 `PYTHONPATH=robocup_ros/python_ext:car/code` 加载既有 T265 扩展。
+安装器会实际导入 ROS、T265、OCR 和 YOLO 依赖，缺少任何一项都拒绝安装，
+避免仅能接收 RUN 却在建图或视觉启动时才失败。
+
 恢复正式空地协同：在 PC 将 `deploy/competition-boot.service` 的 ExecStart 入口改回
 `code/competition_boot.py`，提交推送、板端快进更新后重新安装并重启监听服务。
 正式入口默认继续执行无人机协同和真实抛投策略。

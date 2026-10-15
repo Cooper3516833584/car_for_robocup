@@ -8,13 +8,16 @@ User=radxa
 Group=radxa
 SupplementaryGroups=dialout
 WorkingDirectory=/home/radxa/car
-ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/env/bin/python
-ExecStart=/home/radxa/robocup_ros/env/bin/python /home/radxa/car/code/car_full_flow_test.py
+ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/vision_env/bin/python
+ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/bin/micromamba
+ExecStart=/home/radxa/robocup_ros/bin/micromamba run -p /home/radxa/robocup_ros/env /home/radxa/robocup_ros/vision_env/bin/python /home/radxa/car/code/car_full_flow_test.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=40
 KillMode=control-group
 Environment=PYTHONUNBUFFERED=1
+Environment=MAMBA_ROOT_PREFIX=/home/radxa/robocup_ros/root
+Environment=PYTHONPATH=/home/radxa/robocup_ros/python_ext:/home/radxa/car/code
 SyslogIdentifier=car-competition-boot
 StandardOutput=journal
 StandardError=journal

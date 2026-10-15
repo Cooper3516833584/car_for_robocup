@@ -20,7 +20,8 @@ REPO_ROOT=${1:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}
 REPO_ROOT=$(CDPATH= cd -- "$REPO_ROOT" && pwd)
 CAR_CODE=$REPO_ROOT/code
 ROS_ROOT=${REPO_ROOT%/*}/robocup_ros
-COMPETITION_PYTHON=$ROS_ROOT/env/bin/python
+COMPETITION_PYTHON=$ROS_ROOT/vision_env/bin/python
+MICROMAMBA=$ROS_ROOT/bin/micromamba
 UNIT_DIR=/etc/systemd/system
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -37,13 +38,19 @@ if [ ! -x "$COMPETITION_PYTHON" ]; then
     echo "competition Python environment is missing: $COMPETITION_PYTHON" >&2
     exit 1
 fi
+if [ ! -x "$MICROMAMBA" ] || [ ! -x "$ROS_ROOT/env/bin/ros2" ]; then
+    echo "RoboStack micromamba or ros2 executable is missing under $ROS_ROOT" >&2
+    exit 1
+fi
 if [ ! -c /dev/ttyS4 ]; then
     echo "HC-15 device /dev/ttyS4 is not present; competition listener path is unverified" >&2
     exit 1
 fi
-if ! PYTHONPATH="$CAR_CODE${PYTHONPATH:+:$PYTHONPATH}" \
-    "$COMPETITION_PYTHON" -c 'import competition_boot'; then
-    echo "competition Python cannot import the listener and its dependencies" >&2
+if ! MAMBA_ROOT_PREFIX="$ROS_ROOT/root" \
+    PYTHONPATH="$ROS_ROOT/python_ext:$CAR_CODE${PYTHONPATH:+:$PYTHONPATH}" \
+    "$MICROMAMBA" run -p "$ROS_ROOT/env" "$COMPETITION_PYTHON" \
+    -c 'import competition_boot, car_full_flow_test; import rclpy, pyrealsense2, cv2, rapidocr, onnxruntime, ultralytics'; then
+    echo "competition environment cannot import ROS, T265, OCR or YOLO dependencies" >&2
     exit 1
 fi
 
