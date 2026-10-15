@@ -20,6 +20,7 @@ from components.serial_communication import FCWirelessBridgeCodec, HC15SerialDri
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=30)
+    parser.add_argument("--baudrate", type=int, choices=(9600, 115200), default=115200)
     args = parser.parse_args()
     if not 1 <= args.seconds <= 60:
         parser.error("--seconds must be between 1 and 60")
@@ -44,8 +45,8 @@ def main():
         for payload in bridge.feed(data):
             frames("BB33", wrapped.feed(payload))
 
-    driver = HC15SerialDriver(on_bytes=receive, bridge_envelope=False,
-        on_connected=lambda: emit("connected", port="/dev/ttyS4", baudrate=115200),
+    driver = HC15SerialDriver(on_bytes=receive, bridge_envelope=False, baudrate=args.baudrate,
+        on_connected=lambda: emit("connected", port="/dev/ttyS4", baudrate=args.baudrate),
         on_disconnected=lambda error: emit("disconnected", error=str(error)),
         on_callback_error=lambda error: emit("callback_error", error=str(error)))
     try:
