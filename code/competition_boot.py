@@ -188,6 +188,23 @@ class CompetitionBoot:
         LOG.info('RUN ACCEPTED run_id=%d', run_id)
         return AckStatus.ACCEPTED, AckReason.NONE
 
+    def local_command(self, action):
+        if not self._car_only_test:
+            raise ValueError('Local control is only available in the car-only test listener')
+        if action == 'start':
+            status, reason = self._start_mission()
+            LOG.info('LOCAL RUN %s reason=%s', status.name, reason.name)
+            return dict(ok=status == AckStatus.ACCEPTED, status=status.name, reason=reason.name)
+        if action == 'stop':
+            self._cancel_current()
+            LOG.info('LOCAL STOP completed')
+            return dict(ok=True, status='STOP_REQUESTED')
+        if action == 'status':
+            with self._state_lock:
+                return dict(ok=True, running=self._worker is not None and self._worker.is_alive(),
+                            closed=self._closed)
+        raise ValueError('Unknown local action')
+
     def _run_mission(self, stop, sender, run_id, t0):
         completed = False
         try:
@@ -302,17 +319,32 @@ class CompetitionBoot:
         self._driver.close()
 
 
-def main(*, car_only_test=False):
+def main(*, car_only_test=False, local_control=False):
     logging.basicConfig(level=logging.INFO)
     done = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: done.set())
     boot = CompetitionBoot(car_only_test=car_only_test)
+    control = None
+    boot_started = False
     try:
+        if local_control:
+            if not car_only_test:
+                raise ValueError('Local control requires car-only test mode')
+            from components.local_mission_control import LocalMissionControl
+            control = LocalMissionControl(boot.local_command)
+            control.bind()
+        boot_started = True
         boot.start()
+        if control is not None:
+            control.start()
+            LOG.info('Local full-flow control ready: %s', control.path)
         done.wait()
     finally:
-        boot.close()
+        if control is not None:
+            control.close()
+        if boot_started:
+            boot.close()
 
 
 if __name__ == '__main__':

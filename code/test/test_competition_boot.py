@@ -95,11 +95,46 @@ class BootTests(unittest.TestCase):
 
     def test_car_only_entry_always_selects_test_mode(self):
         import car_full_flow_test
-        with patch.object(car_full_flow_test, 'boot_main') as entry:
-            car_full_flow_test.main()
-        entry.assert_called_once_with(car_only_test=True)
+        with patch.object(boot, 'main') as entry:
+            car_full_flow_test.main(['--listen'])
+        entry.assert_called_once_with(car_only_test=True, local_control=True)
         service = (Path(__file__).resolve().parents[2] / 'deploy/competition-boot.service').read_text()
-        self.assertIn('/home/radxa/car/code/car_full_flow_test.py', service)
+        self.assertIn('/home/radxa/car/code/car_full_flow_test.py --listen', service)
+        self.assertIn('RuntimeDirectory=robocup-car', service)
+
+    def test_local_run_and_ground_run_share_busy_gate_and_ground_stop(self):
+        self.listener._car_only_test = True
+        entered = threading.Event()
+        def mission(*args, **kwargs):
+            entered.set()
+            kwargs['stop_event'].wait(2)
+            return 0
+        self.mission.side_effect = mission
+        with patch.object(boot, 'RUN_DELAY_S', 0), patch.object(boot, 'BUZZ_LAST_S', 0):
+            result = self.listener.local_command('start')
+            self.assertTrue(result['ok'])
+            self.assertTrue(entered.wait(1))
+            try:
+                self.assertTrue(self.listener.local_command('status')['running'])
+                self.assertEqual(self.listener.local_command('start')['reason'], 'BUSY')
+                for seq, command, expected in ((1, CommandId.CAR_START_MISSION, AckStatus.REJECTED),
+                                                (2, CommandId.TARGETED_STOP, AckStatus.ACCEPTED)):
+                    self.listener._on_bytes(pack_frame(Frame(1, NodeId.GROUND, NodeId.CAR,
+                        MessageKind.COMMAND, 0, 50, seq, encode_command(CommandPayload(command)))))
+                    ack = decode_ack(unpack_frame(self.driver.write.call_args.args[0]).payload)
+                    self.assertEqual(ack.status, expected)
+            finally:
+                self.listener.local_command('stop')
+                self.listener._worker.join(2)
+        self.assertFalse(self.listener.local_command('status')['running'])
+        self.assertEqual(self.mission.call_count, 1)
+        self.driver.close.assert_not_called()
+        self.assertFalse(self.sender.mock_calls)
+
+    def test_formal_listener_refuses_local_control(self):
+        with self.assertRaises(ValueError):
+            self.listener.local_command('start')
+        self.mission.assert_not_called()
 
     def setUp(self):
         self.now=0.

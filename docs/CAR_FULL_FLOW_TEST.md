@@ -1,8 +1,35 @@
 # 小车单机全流程测试
 
-自启动入口保留 `code/car_full_flow_test.py`，由 `competition-boot.service` 运行。
+自启动服务使用 `code/car_full_flow_test.py --listen`，由 `competition-boot.service` 运行。
 它使用真实底盘、视觉和两只 SG90，仅屏蔽无人机命令；上电先 OPEN 两只并监听地面站。
-收到有效 RUN 才 CLOSE 两只并开始任务，不会自行行驶。
+收到地面站有效 RUN 或本机启动请求才 CLOSE 两只并开始任务，上电不会自行行驶。
+
+## VS Code Remote SSH 无参数启动
+
+SSH 连接小车（2026-10-15 当前地址 `radxa@10.202.217.163`），打开
+`/home/radxa/car/code/car_full_flow_test.py`，直接点击 VS Code 的“运行 Python 文件”按钮，
+不填任何参数，即启动同一套完整流程。该启动入口只需 Python 标准库；实际任务仍由
+自启动服务在原 micromamba + vision_env 环境执行，不依赖 VS Code 选中的视觉/ROS 环境。
+终端跟随任务日志，Ctrl+C 会请求 STOP。程序显示“任务已结束”只代表本轮工作线程退出，
+是否成功完成须看任务日志；完赛、停止或失败后均继续监听，可再次点击运行。
+
+本机启动通过权限为 0600 的 `/run/robocup-car/control.sock` 联系已运行的监听服务，
+与地面站 RUN 复用同一任务入口、忙碌检查、20 秒倒计时和收尾。
+它不另开串口或第二个任务实例，不依赖无线链路成功；地面站 STOP 仍然有效。
+重复运行会报告 BUSY，不中断正在执行的任务。
+若服务未运行或未升级，入口报连接错误，不另起一套硬件程序。
+
+命令行等价用法：
+
+```sh
+python3 /home/radxa/car/code/car_full_flow_test.py
+python3 /home/radxa/car/code/car_full_flow_test.py --stop
+python3 /home/radxa/car/code/car_full_flow_test.py --status
+```
+
+`--status` 只读、不启动；`--listen` 专供自启动服务，手工运行它不会启动任务。
+
+## 任务流程
 正式和单机监听都通过 `--config` 明确传入当前仓库的
 `configs/robocup_diffdrive.toml` 绝对路径，启动日志打印该路径。
 该文件缺失时任务报错退出，不回退到示例配置；示例配置的相机舵机默认禁用。
