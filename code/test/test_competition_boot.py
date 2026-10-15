@@ -28,6 +28,14 @@ class ClockEvent:
 
 
 class BootTests(unittest.TestCase):
+    def test_car_only_entry_always_selects_test_mode(self):
+        import car_full_flow_test
+        with patch.object(car_full_flow_test, 'boot_main') as entry:
+            car_full_flow_test.main()
+        entry.assert_called_once_with(car_only_test=True)
+        service = (Path(__file__).resolve().parents[2] / 'deploy/competition-boot.service').read_text()
+        self.assertIn('/home/radxa/car/code/car_full_flow_test.py', service)
+
     def setUp(self):
         self.now=0.
         self.events=[]
@@ -192,6 +200,58 @@ class BootTests(unittest.TestCase):
         self.mission.side_effect=mission
         self.run_worker()
         self.sender.send_task_and_start.assert_not_called()
+
+
+    def test_car_only_full_flow_keeps_timing_slam_and_disables_all_remote_outputs(self):
+        self.listener._car_only_test = True
+        self.listener.start()
+        self.run_worker()
+        self.assertIn(('buzz_on', 15.), self.events)
+        self.assertIn(('buzz_off', 20.), self.events)
+        self.remap.assert_called_once()
+        self.mission.assert_called_once()
+        self.assertTrue(self.mission.call_args.kwargs['car_only_test'])
+        self.assertIsNone(self.mission.call_args.kwargs['send_drone_task'])
+        self.listener.close()
+        self.open.assert_not_called()
+        self.close.assert_not_called()
+        self.assertFalse(self.sender.mock_calls)
+        self.driver.write.assert_not_called()
+
+    def test_car_only_never_constructs_sender_and_only_acks_ground_commands(self):
+        self.listener._car_only_test = True
+        with patch.object(boot, 'FleetTaskSender', side_effect=AssertionError('drone sender')), \
+             patch.object(self.listener, '_run_mission') as run:
+            for seq, command in enumerate((CommandId.CAR_START_MISSION,
+                                           CommandId.TARGETED_STOP, CommandId.PING), 1):
+                raw = pack_frame(Frame(1, NodeId.GROUND, NodeId.CAR, MessageKind.COMMAND,
+                    0, 10, seq, encode_command(CommandPayload(command))))
+                self.listener._on_bytes(raw)
+                if seq == 1:
+                    self.listener._worker.join(1)
+            run.assert_called_once()
+            self.assertIsNone(run.call_args.args[1])
+        self.assertEqual(self.driver.write.call_count, 3)
+        for call in self.driver.write.call_args_list:
+            frame = unpack_frame(call.args[0])
+            self.assertEqual((frame.dst, frame.kind), (NodeId.GROUND, MessageKind.ACK))
+        self.open.assert_not_called()
+        self.close.assert_not_called()
+
+    def test_car_only_stop_disconnect_and_failure_never_command_payload_or_drone(self):
+        self.listener._car_only_test = True
+        self.run_worker(cancel_at=18.)
+        self.mission.assert_not_called()
+        self.remap.assert_not_called()
+        self.now = 0.
+        self.mission.side_effect = RuntimeError('test failure')
+        self.run_worker()
+        self.listener._on_disconnected()
+        self.listener._on_callback_error(RuntimeError('radio failed'))
+        self.open.assert_not_called()
+        self.close.assert_not_called()
+        self.assertFalse(self.sender.mock_calls)
+        self.driver.write.assert_not_called()
 
 
 class SidecarTests(unittest.TestCase):

@@ -34,7 +34,7 @@ class DetourSettings:
 
 def run_payload_detour(runtime, settings, *, guard=lambda: None,
                        check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
-                       travel_drive=None, fine_align=None):
+                       travel_drive=None, fine_align=None, simulate_release=False):
     """Left90 at the centred stop, approach, release, return, restore road yaw.
 
     Without ``fine_align`` the approach uses settings.approach_m. With it, the
@@ -153,13 +153,19 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.drive.stop()
         record_drop_pose(A2, B2, side_yaw)
         check()
-        runtime.record_event("payload_release_start", actuator="payload_servo",
-                             slot=settings.payload_slot, cargo_count=1)
-        released = open_payload(settings.payload_slot)
+        if simulate_release:
+            runtime.record_event("payload_release_skipped", actuator="payload_servo",
+                                 slot=settings.payload_slot, cargo_count=1,
+                                 reason="car full-flow test; physical output disabled")
+        else:
+            runtime.record_event("payload_release_start", actuator="payload_servo",
+                                 slot=settings.payload_slot, cargo_count=1)
+            released = open_payload(settings.payload_slot)
         hold(settings.release_hold_s)
-        runtime.record_event("payload_release_skipped" if released is False else "payload_release_done",
-                             actuator="payload_servo", cargo_count=1, slot=settings.payload_slot,
-                             reason="PWM unconfigured" if released is False else "command sent")
+        if not simulate_release:
+            runtime.record_event("payload_release_skipped" if released is False else "payload_release_done",
+                                 actuator="payload_servo", cargo_count=1, slot=settings.payload_slot,
+                                 reason="PWM unconfigured" if released is False else "command sent")
         # Use the latest fusion after the release hold, then reverse along the
         # saved side axis. Even a small cross-track residual cannot turn this
         # into a diagonal path to the historical XY pivot.
@@ -196,7 +202,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                     runtime.mission.request_safe_stop(str(exc))
         runtime.motion.navigation = original
         runtime.motion.drive = entry_drive
-        if primary_error or cleanup_error:
+        if not simulate_release and (primary_error or cleanup_error):
             try:
                 open_payload()
             except Exception as exc:

@@ -116,11 +116,15 @@ def run_direct_competition_stage(args) -> int:
 
 
 def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None,
-         on_runtime_ready=None) -> int:
+         on_runtime_ready=None, car_only_test=False) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
     direct_stage = args.competition_stage in DIRECT_COMPETITION_STAGES
+    if car_only_test and (not competition_enabled or
+                          args.competition_stage not in {None, "full"}):
+        logging.error("car full-flow test requires the full competition mission")
+        return 2
     if not math.isfinite(args.speed_scale) or args.speed_scale <= 0:
         logging.error("--speed-scale must be finite and positive")
         return 2
@@ -234,6 +238,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                     task_board_camera=camera_value(args.task_board_camera),
                     yellow_camera=camera_value(args.yellow_camera),
                     weights=args.yellow_model, send_drone_task=send_drone_task,
+                    car_only_test=car_only_test,
                 )
             logging.info("competition stage completed: %s; result=%s",
                          stage,
@@ -292,7 +297,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
         try:
             runtime.close()
         finally:
-            if competition_enabled:
+            if competition_enabled and not car_only_test:
                 try:
                     open_payload()
                 except Exception:

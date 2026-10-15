@@ -1,5 +1,5 @@
 [Unit]
-Description=RoboCup car ground-command listener
+Description=RoboCup car-only full-flow test listener (no drone or payload output)
 RequiresMountsFor=/home/radxa/car
 
 [Service]
@@ -9,7 +9,7 @@ Group=radxa
 SupplementaryGroups=dialout
 WorkingDirectory=/home/radxa/car
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/env/bin/python
-ExecStart=/home/radxa/robocup_ros/env/bin/python /home/radxa/car/code/competition_boot.py
+ExecStart=/home/radxa/robocup_ros/env/bin/python /home/radxa/car/code/car_full_flow_test.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=40

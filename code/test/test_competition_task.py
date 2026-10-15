@@ -22,6 +22,42 @@ from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_con
 
 
 class CompetitionTaskTests(unittest.TestCase):
+    def test_car_only_full_cli_runs_both_fused_detours_without_pwm_or_drone(self):
+        self.stack.enter_context(patch.object(task, 'payload_configured', return_value=False))
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2, 1, 1)))
+        search = self.stack.enter_context(patch.object(task, 'search_centered_yellow_on_line',
+            return_value=YellowDetection(320, 240, 80, 80, .9)))
+        send = self.stack.enter_context(patch.object(task, 'send_task_to_drone_once'))
+        injected_send = Mock(side_effect=AssertionError('drone task leaked'))
+        with patch('main_robocup.build_runtime', return_value=self.runtime), \
+             patch('main_robocup.open_payload') as final_open:
+            self.assertEqual(main(['--competition', '--mode', 'hardware-mission'],
+                                  car_only_test=True, send_drone_task=injected_send), 0)
+        self.assertEqual([c.kwargs['color'] for c in search.call_args_list], ['yellow', 'blue'])
+        events = self.runtime.record_event.call_args_list
+        stages = [c.kwargs['stage'] for c in events if c.args == ('payload_detour_stage_done',)]
+        self.assertEqual(stages, ['left_90deg', 'safe_side_approach', 'return_from_drop',
+                                  'right_90deg'] * 2)
+        skips = [c for c in events if c.args == ('payload_release_skipped',)]
+        self.assertEqual([c.kwargs['slot'] for c in skips], [0, 1])
+        drops = [c.kwargs for c in events if c.args == ('payload_drop',)]
+        self.assertTrue(all(d['simulated'] and d['detour_completed'] and not d['success'] for d in drops))
+        send.assert_not_called()
+        injected_send.assert_not_called()
+        self.open.assert_not_called()
+        final_open.assert_not_called()
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
+
+    def test_car_only_cli_failure_and_direct_stage_cannot_open_payload(self):
+        with patch('main_robocup.build_runtime', return_value=self.runtime), \
+             patch('main_robocup.open_payload') as final_open, \
+             patch.object(task, 'run_competition_stage', side_effect=RuntimeError('failed')):
+            self.assertEqual(main(['--competition', '--mode', 'hardware-mission'],
+                                  car_only_test=True), 1)
+            self.assertEqual(main(['--competition-stage', 'drop'], car_only_test=True), 2)
+        final_open.assert_not_called()
+
     def test_assignment_removes_exactly_one_single_item_color_from_drone(self):
         for source,color,expected in (((2,1,1),'blue',(2,0,1)),
                                        ((1,2,1),'red',(0,2,1)),

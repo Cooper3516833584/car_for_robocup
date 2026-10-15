@@ -64,11 +64,12 @@ def restart_car_slam_sidecar(stop_event):
 
 class CompetitionBoot:
     def __init__(self, *, driver_factory=HC15SerialDriver, mission_main=None,
-                 alarm=None, clock=time.monotonic):
+                 alarm=None, clock=time.monotonic, car_only_test=False):
         if mission_main is None:
             from main_robocup import main
             mission_main = main
         self._mission_main = mission_main
+        self._car_only_test = car_only_test
         self._clock = clock
         self._alarm = SoundLightAlarm() if alarm is None else alarm
         self._state_lock = threading.Lock()
@@ -107,10 +108,16 @@ class CompetitionBoot:
             LOG.exception('%s failed', label)
             return False
 
+    def _payload_command(self, action):
+        if self._car_only_test:
+            LOG.info('CAR TEST payload output skipped')
+            return False
+        return action()
+
     def start(self):
         self._attempt('alarm initialize OFF', lambda: self._alarm.initialize(active=False))
         self._attempt('alarm OFF', self._alarm.off)
-        self._attempt('startup payload OPEN', open_payload)
+        self._attempt('startup payload OPEN', lambda: self._payload_command(open_payload))
         self._driver.start()
         return self
 
@@ -160,7 +167,7 @@ class CompetitionBoot:
             stop = threading.Event()
             run_id = secrets.randbelow(0xffffffff) + 1
             t0 = self._clock()
-            sender = FleetTaskSender(self, stop_event=stop)
+            sender = None if self._car_only_test else FleetTaskSender(self, stop_event=stop)
             self._stop_event, self._sender = stop, sender
             self._worker = threading.Thread(target=self._run_mission,
                 args=(stop, sender, run_id, t0), name='competition-mission')
@@ -179,10 +186,10 @@ class CompetitionBoot:
             with self._payload_action_lock:
                 if stop.is_set():
                     return
-                closed = close_payload()
+                closed = self._payload_command(close_payload)
             LOG.info('CAR CLOSE %s run_id=%d (no mechanical feedback)',
-                     'SKIPPED: PWM unconfigured' if closed is False else 'SENT', run_id)
-            if not sender.close_drone_payload(run_id):
+                     'SKIPPED' if closed is False else 'SENT', run_id)
+            if not self._car_only_test and not sender.close_drone_payload(run_id):
                 raise RuntimeError('drone CLOSE was not confirmed by software ACK')
             if stop.wait(max(0, t0 + RUN_DELAY_S - BUZZ_LAST_S - self._clock())):
                 return
@@ -198,7 +205,7 @@ class CompetitionBoot:
             LOG.info('BUZZ OFF')
             if stop.is_set():
                 return
-            if not sender.begin_drone_remap(run_id):
+            if not self._car_only_test and not sender.begin_drone_remap(run_id):
                 raise RuntimeError('drone REMAP not accepted')
             restart_car_slam_sidecar(stop)
             if stop.is_set():
@@ -208,8 +215,12 @@ class CompetitionBoot:
                 return (sender.wait_drone_remap(run_id, stop) and
                         sender.send_task_and_start(counts, start_drone=True))
 
-            result = self._mission_main(list(MISSION_ARGS), stop_event=stop,
-                send_drone_task=handoff, on_runtime_ready=self._runtime_ready)
+            kwargs = dict(stop_event=stop, send_drone_task=handoff,
+                          on_runtime_ready=self._runtime_ready)
+            if self._car_only_test:
+                kwargs.update(car_only_test=True, send_drone_task=None)
+                LOG.info('CAR FULL-FLOW TEST: no drone commands or payload output')
+            result = self._mission_main(list(MISSION_ARGS), **kwargs)
             if result:
                 raise RuntimeError('competition mission failed: %s' % result)
             completed = not stop.is_set()
@@ -219,7 +230,7 @@ class CompetitionBoot:
             stop.set()
             self._attempt('finally alarm OFF', self._alarm.off)
             with self._payload_action_lock:
-                self._attempt('finally payload OPEN', open_payload)
+                self._attempt('finally payload OPEN', lambda: self._payload_command(open_payload))
             if not completed:
                 self._forward_stop()
             with self._state_lock:
@@ -246,10 +257,12 @@ class CompetitionBoot:
                 stop.set()
         self._attempt('STOP alarm OFF', self._alarm.off)
         with self._payload_action_lock:
-            self._attempt('STOP payload OPEN', open_payload)
+            self._attempt('STOP payload OPEN', lambda: self._payload_command(open_payload))
         self._stop_runtime(runtime)
 
     def _forward_stop(self):
+        if self._car_only_test:
+            return
         raw = pack_frame(Frame(1, NodeId.CAR, NodeId.DRONE, MessageKind.COMMAND, 0,
             self._session, self._next_seq(), encode_command(CommandPayload(CommandId.TARGETED_STOP))))
         self._attempt('remote STOP write', lambda: self._write_frame(raw))
@@ -277,12 +290,12 @@ class CompetitionBoot:
         self._driver.close()
 
 
-def main():
+def main(*, car_only_test=False):
     logging.basicConfig(level=logging.INFO)
     done = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: done.set())
-    boot = CompetitionBoot()
+    boot = CompetitionBoot(car_only_test=car_only_test)
     try:
         boot.start()
         done.wait()

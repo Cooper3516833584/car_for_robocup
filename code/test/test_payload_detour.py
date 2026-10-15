@@ -22,6 +22,29 @@ CENTER_BOX = (290, 0, 350, 40, .9, 0)  # Horizontally centred, near the image to
 
 
 class PayloadDetourTests(unittest.TestCase):
+    def test_simulated_release_keeps_complete_motion_and_stopped_hold(self):
+        self.fixture()
+        result = self.run_detour(simulate_release=True)
+        self.open.assert_not_called()
+        self.assertEqual(list(self.stage_poses), ['left_90deg', 'forward_to_drop',
+                                                 'reverse_from_drop', 'right_90deg'])
+        self.assertGreater(self.stage_poses['forward_to_drop'].y_m, .42)
+        self.assertAlmostEqual(result.y_m, 0, delta=.01)
+        self.assertTrue(any(e == 'payload_release_skipped' for e, _ in self.events))
+        self.assertFalse(any(e == 'payload_release_done' for e, _ in self.events))
+        self.assert_safe_exit()
+
+    def test_simulated_release_failure_never_opens_payload_in_cleanup(self):
+        self.fixture()
+        def fail_on_approach():
+            if self.stage == 'forward_to_drop':
+                raise RuntimeError('STOP during approach')
+        with self.assertRaisesRegex(RuntimeError, 'STOP during approach'):
+            self.run_detour(simulate_release=True, guard=fail_on_approach)
+        self.open.assert_not_called()
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assert_safe_exit()
+
     def test_stop_failure_preserves_primary_error_and_disconnects_relay(self):
         from components.rear_motor import DriverStateError
         self.fixture()

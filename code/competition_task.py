@@ -783,10 +783,11 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
 
 
 def perform_payload_detour(runtime, *, servo=None, camera=None,
-                           color=TARGET_COLOR, safe_distance_m=None, payload_slot=0):
+                           color=TARGET_COLOR, safe_distance_m=None, payload_slot=0,
+                           simulate_release=False):
     """Turn at the centred stop, side line, reverse, one inward turn."""
     from payload_detour import DetourSettings, run_payload_detour
-    if not payload_configured(payload_slot):
+    if not simulate_release and not payload_configured(payload_slot):
         runtime.record_event('payload_release_skipped', actuator='payload_servo', cargo_count=1,
                              slot=payload_slot, color=color,
                              reason='PWM addresses unconfigured; continuing route')
@@ -807,7 +808,7 @@ def perform_payload_detour(runtime, *, servo=None, camera=None,
     try:
         return run_payload_detour(runtime, settings, clock=runtime.clock,
                                   sleep=time.sleep, travel_drive=original_drive,
-                                  fine_align=fine_align)
+                                  fine_align=fine_align, simulate_release=simulate_release)
     finally:
         runtime.motion.drive = original_drive
 
@@ -864,7 +865,7 @@ def _stage(runtime, name, action):
 
 
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
-                     color=TARGET_COLOR, send_drone_task=None):
+                     color=TARGET_COLOR, send_drone_task=None, car_only_test=False):
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
 
@@ -897,6 +898,10 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                              car_target_required=1, drone_allocation=drone_counts.as_dict(),
                              drone_mandatory_yellow=1)
         def handoff():
+            if car_only_test:
+                runtime.record_event("hc_task_send_skipped", **drone_counts.as_dict(),
+                                     reason="car full-flow test; drone commands disabled")
+                return True
             if send_drone_task is None:
                 return send_task_to_drone_once(drone_counts, runtime=runtime)
             ok = send_drone_task(drone_counts)
@@ -921,10 +926,12 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                                      cx_px=detection.cx_px, cy_px=detection.cy_px)
                 dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
                     runtime, servo=servo, camera=yellow_camera, color=target_color,
-                    payload_slot=payload_slot))
+                    payload_slot=payload_slot, simulate_release=car_only_test))
                 runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
                                      slot=payload_slot, color=target_color,
-                                     success=dropped is not None, skipped=dropped is None,
+                                     success=dropped is not None and not car_only_test,
+                                     skipped=dropped is None or car_only_test,
+                                     simulated=car_only_test, detour_completed=dropped is not None,
                                      pose_reference="fused")
             else:
                 runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
@@ -944,10 +951,12 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
                           yellow_camera=None, weights=None, send_drone_task=None,
-                          color=TARGET_COLOR):
+                          color=TARGET_COLOR, car_only_test=False):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
         raise ValueError(f"unknown competition stage: {stage}")
+    if car_only_test and stage != "full":
+        raise ValueError("car full-flow test requires the full mission")
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     detector = None
@@ -964,7 +973,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
                                 yellow_camera=yellow_camera, detector=detector, send_drone_task=send_drone_task,
-                                color=color)
+                                color=color, car_only_test=car_only_test)
     if stage == "hc-send":
         if runtime.mission.task_counts is None:
             raise RuntimeError("hc-send requires actual task counts")
