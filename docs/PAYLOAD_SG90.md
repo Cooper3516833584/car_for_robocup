@@ -39,8 +39,15 @@ PWM 写入成功只代表软件命令完成，没有机械反馈，不能保证�
 
 PC 修改、离线测试、提交并推送后，板端核对分支、HEAD、干净状态及快进关系，
 使用 `git pull --ff-only`。板端是部署副本，不能直接开发或强制覆盖。
-旧本地 profile 如保留 `[devices.relay]` 会被明确拒绝；部署前在 PC 对该 profile 删除
-旧段并保留其余实测参数，按仓库部署约定同步配置，不能直接用示例覆盖实车标定。
+旧本地 profile 如保留 `[devices.relay]` 会被明确拒绝。经操作者授权后，在板端使用
+PC 开发、测试并提交的部署迁移工具清理该段：
+
+```sh
+python3 tools/retire_payload_relay_config.py
+```
+
+该工具先在 `logs/config-backups/` 保存并核验原文件，比较解析结果确认仅删除 relay。
+其余实测参数保留，不能直接用示例覆盖实车标定；不在板端开发修改工具代码。
 
 先只读查看板端 overlay：
 
