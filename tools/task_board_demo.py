@@ -20,12 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--image", type=Path)
     source.add_argument("--camera", help="camera index or stable device path")
     parser.add_argument("--debug-dir", type=Path)
-    parser.add_argument("--no-infer-missing", action="store_true")
     args = parser.parse_args(argv)
-    reader = TaskBoardReader(TaskBoardConfig(
-        debug_directory=args.debug_dir,
-        allow_missing_color_inference=not args.no_infer_missing,
-    ))
+    reader = TaskBoardReader(TaskBoardConfig(debug_directory=args.debug_dir))
     try:
         if args.image is not None:
             import cv2
