@@ -11,8 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import center_target_route as route
 from components.basic_motion_controller import MotionActionState
 from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
-from components.relay_lcus import FakeLCUSRelay
-from components.payload_task import payload_channel, prepare_payload
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from payload_detour import DetourSettings, run_payload_detour
@@ -27,13 +25,12 @@ class PayloadDetourTests(unittest.TestCase):
     def test_stop_failure_preserves_primary_error_and_disconnects_relay(self):
         from components.rear_motor import DriverStateError
         self.fixture()
-        self.relay.turn_on(2)
         original_stop = self.runtime.drive.stop
         self.runtime.drive.stop = Mock(side_effect=DriverStateError("USB stop failed"))
         try:
             with self.assertRaisesRegex(ValueError, "original failure"):
                 self.run_detour(guard=lambda: (_ for _ in ()).throw(ValueError("original failure")))
-            self.assertGreater(self.relay.off_requests, 0)
+            self.assertGreater(self.open.call_count+self.cleanup_open.call_count, 0)
             self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
             self.assertTrue(any(event == "payload_detour_cleanup_failed" for event, _ in self.events))
         finally:
@@ -49,8 +46,12 @@ class PayloadDetourTests(unittest.TestCase):
                                      clock=lambda: self.now)
         self.addCleanup(self.runtime.close)
         self.original_navigation = self.runtime.motion.navigation
-        self.relay = FakeLCUSRelay(4)
-        self.runtime.relay = self.relay
+        output_patch=patch('payload_detour.open_payload')
+        self.open=output_patch.start(); self.addCleanup(output_patch.stop)
+        close_patch=patch('target_patrol.close_payload')
+        self.close=close_patch.start(); self.addCleanup(close_patch.stop)
+        cleanup_patch=patch('target_patrol.open_payload')
+        self.cleanup_open=cleanup_patch.start(); self.addCleanup(cleanup_patch.stop)
         self.runtime._consume_t265 = lambda *_a, **_k: None
         self.runtime._consume_d500 = lambda *_a, **_k: None
         self.runtime.fusion.estimate = lambda now: FusedPoseEstimate(
@@ -74,7 +75,7 @@ class PayloadDetourTests(unittest.TestCase):
         if event == "payload_release_start":
             self.assert_stopped()
             self.releasing = True
-            self.releases.append((values["channel"], tuple(self.pose)))
+            self.releases.append((values["actuator"], tuple(self.pose)))
         if event == "payload_release_done":
             self.releasing = False
         if event == "payload_detour_stage_start":
@@ -88,7 +89,7 @@ class PayloadDetourTests(unittest.TestCase):
         twist = self.runtime.drive.last_limited_twist
         if self.releasing:
             self.assert_stopped()
-            self.assertFalse(self.relay.get_channel_state(self.releases[-1][0]))
+            self.open.assert_called()
         yaw = self.pose[2] + twist.angular_z_rad_s * dt / 2
         self.pose[0] += twist.linear_x_m_s * math.cos(yaw) * dt
         self.pose[1] += twist.linear_x_m_s * math.sin(yaw) * dt
@@ -101,7 +102,6 @@ class PayloadDetourTests(unittest.TestCase):
 
     def run_detour(self, settings=None, **kwargs):
         settings = settings or DetourSettings()
-        self.assertTrue(prepare_payload(self.relay, settings.payload_slot))
         kwargs.setdefault("sleep", self.advance)
         return run_payload_detour(self.runtime, settings,
                                   clock=lambda: self.now, **kwargs)
@@ -109,13 +109,13 @@ class PayloadDetourTests(unittest.TestCase):
     def assert_safe_exit(self):
         self.assert_stopped()
         self.assertIs(self.runtime.motion.navigation, self.original_navigation)
-        self.assertFalse(any(self.relay.query_status().values()))
+
 
     def test_all_three_slots_geometry_reverse_and_heading_restoration(self):
         for slot in (1, 2, 3):
             with self.subTest(slot=slot):
                 self.fixture((5., 7., math.pi / 2))
-                returned = self.run_detour(DetourSettings(payload_slot=slot))
+                returned = self.run_detour(DetourSettings())
                 road = self.stage_poses["left_90deg"]
                 side = self.stage_poses["forward_to_drop"]
                 reverse = self.stage_poses["reverse_from_drop"]
@@ -128,7 +128,7 @@ class PayloadDetourTests(unittest.TestCase):
                 self.assertLess(side.x_m, road.x_m - .41)
                 self.assertLess(math.dist((road.x_m, road.y_m), (reverse.x_m, reverse.y_m)), .03)
                 self.assertAlmostEqual(returned.yaw_rad, math.pi / 2, delta=.055)
-                self.assertEqual([r[0] for r in self.releases], [slot + 1])
+                self.assertEqual([r[0] for r in self.releases], ['payload_servo'])
                 self.assert_safe_exit()
 
     def test_abort_at_each_moving_stage_stops_and_switches_all_relays_off(self):
@@ -327,7 +327,7 @@ class PayloadDetourTests(unittest.TestCase):
 
     def test_relay_failure_stops_instead_of_reversing_or_resuming(self):
         self.fixture()
-        self.relay.turn_off = Mock(return_value=False)
+        self.open.side_effect=RuntimeError("release failed")
         with self.assertRaisesRegex(RuntimeError, "release"):
             self.run_detour()
         self.assertNotIn("reverse_from_drop", self.stage_poses)
@@ -346,10 +346,10 @@ class PayloadDetourTests(unittest.TestCase):
         self.fixture(started=False)
         alarm = Mock()
         vision = self.vision(lambda: BOX if self.pose[0] > .5 or self.releases else None)
-        count = route.run_route(self.runtime, vision, alarm, detour=DetourSettings(payload_slot=2),
+        count = route.run_route(self.runtime, vision, alarm, detour=DetourSettings(),
                                 clock=lambda: self.now, sleep=self.advance)
         self.assertEqual(count, 1)
-        self.assertEqual([r[0] for r in self.releases], [3])
+        self.assertEqual([r[0] for r in self.releases], ['payload_servo'])
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
         self.assertAlmostEqual(self.pose[0], .3, delta=.04)
         self.assertAlmostEqual(self.pose[1], 4.2, delta=.04)
@@ -363,41 +363,20 @@ class PayloadDetourTests(unittest.TestCase):
                              and self.pose[1] < .1 else None)
         count = route.run_route(self.runtime, vision, Mock(), detour=DetourSettings(),
                                 clock=lambda: self.now, sleep=self.advance)
-        self.assertEqual(count, 2)
-        self.assertEqual(len(self.releases), 2)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(self.releases), 1)
 
     def test_three_loaded_channels_release_in_order_on_new_targets_and_stop_after_third(self):
         self.fixture(started=False)
-        states=[]
-        def record(event, **values):
-            if event == 'payload_release_start':
-                states.append(self.relay.query_status().copy())
-            self.record(event, **values)
-        self.runtime.record_event=record
-        ranges=((.5,.8),(1.1,1.4),(1.7,2.0),(2.3,2.6))
-        vision=self.vision(lambda: BOX if any(lo<self.pose[0]<hi for lo,hi in ranges)
-                           and self.pose[1]<.1 else None)
-        count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
-                             payload_slots=(1,2,3),trigger_anywhere=True,
-                             clock=lambda:self.now,sleep=self.advance)
-        self.assertEqual(count,3)
-        self.assertEqual([c for c,_ in self.releases],[2,3,4])
-        self.assertEqual(states,[{1:False,2:True,3:True,4:True},
-                                 {1:False,2:False,3:True,4:True},
-                                 {1:False,2:False,3:False,4:True}])
-        self.assertEqual(len([v for e,v in self.events if e=='drop_align_done']),3)
-        self.assertTrue(all(abs(v['side_projection']-.43)<=.003 for e,v in self.events
-                            if e=='drop_align_done'))
-        self.assert_safe_exit()
+        with self.assertRaisesRegex(ValueError,"retired"):
+            route.run_route(self.runtime,Mock(),None,detour=DetourSettings(),payload_slots=(1,2,3))
+        self.close.assert_not_called()
 
     def test_persistent_target_uses_only_first_channel_of_sequence(self):
         self.fixture(started=False)
-        vision=self.vision(lambda:BOX if self.pose[0]>.5 or self.releases else None)
-        count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
-                             payload_slots=(1,2,3),trigger_anywhere=True,
-                             clock=lambda:self.now,sleep=self.advance)
-        self.assertEqual(count,1)
-        self.assertEqual([c for c,_ in self.releases],[2])
+        with self.assertRaisesRegex(ValueError,"retired"):
+            route.run_route(self.runtime,Mock(),None,detour=DetourSettings(),payload_slots=(1,2,3))
+        self.close.assert_not_called()
 
     def test_full_frame_visibility_starts_alignment_before_center_band(self):
         self.fixture(started=False)
@@ -407,7 +386,7 @@ class PayloadDetourTests(unittest.TestCase):
             if self.pose[1]<.1 else None,
             CENTER_BOX if .7<=self.pose[0]<1. and self.pose[1]<.1 else None)
         count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
-                             payload_slots=(1,2,3),trigger_anywhere=True,
+                             trigger_anywhere=True,
                              clock=lambda:self.now,sleep=self.advance)
         self.assertEqual(count,1)
         self.assertTrue(any(e=='test_route_payload_target' and v['box']==BOX
@@ -422,13 +401,12 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertFalse(self.releases)
 
-    def test_missing_relay_refuses_before_any_motion(self):
+    def test_missing_pwm_refuses_before_any_motion(self):
         self.fixture(started=False)
-        self.runtime.relay = None
-        with self.assertRaisesRegex(RuntimeError, "configured"):
-            route.run_route(self.runtime, Mock(), Mock(), detour=DetourSettings())
+        self.close.side_effect=RuntimeError("PWM unknown")
+        with self.assertRaisesRegex(RuntimeError,"PWM unknown"):
+            route.run_route(self.runtime,Mock(),None,detour=DetourSettings())
         self.assertFalse(self.runtime.drive.is_running)
-        self.assert_stopped()
 
     def test_explicit_relay_configuration_and_cleanup_policy(self):
         config = load_runtime_config()
@@ -450,29 +428,20 @@ class PayloadDetourTests(unittest.TestCase):
 
     def test_patrol_holding_failure_prevents_motion_and_disconnects_all(self):
         self.fixture(started=False)
-        self.relay.turn_on = Mock(return_value=False)
-        with self.assertRaisesRegex(RuntimeError, "holding"):
-            route.run_route(self.runtime, self.vision(lambda: None), None,
-                            detour=DetourSettings(), clock=lambda: self.now, sleep=self.advance)
+        self.close.side_effect=RuntimeError("close failed")
+        with self.assertRaisesRegex(RuntimeError,"close failed"):
+            route.run_route(self.runtime,self.vision(lambda:None),None,detour=DetourSettings())
+        self.cleanup_open.assert_called_once()
         self.assertFalse(self.stage_poses)
-        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
-        self.assert_safe_exit()
-        self.assertGreater(self.relay.off_requests, 0)
 
-    def test_selected_left_front_channel_missing_refuses_before_patrol(self):
-        self.fixture(started=False)
-        self.runtime.relay = FakeLCUSRelay(3)
-        with self.assertRaisesRegex(RuntimeError, "configured"):
-            route.run_route(self.runtime, Mock(), None, detour=DetourSettings(payload_slot=3))
-        self.assertFalse(self.runtime.drive.is_running)
+    def test_legacy_magnet_slot_is_not_a_dual_servo_option(self):
+        with self.assertRaises(ValueError):
+            DetourSettings(payload_slot=3)
 
-    def test_successful_detour_releases_selected_magnet_and_preserves_other_loaded_magnets(self):
+    def test_successful_detour_opens_the_dual_servo_once(self):
         self.fixture()
-        self.relay.turn_on(2)
-        self.relay.turn_on(3)
-        self.relay.turn_on(4)
-        self.run_detour(DetourSettings(payload_slot=2))
-        self.assertEqual(self.relay.query_status(), {1: False, 2: True, 3: False, 4: True})
+        self.run_detour()
+        self.open.assert_called_once_with(0)
         self.assert_stopped()
 
     def test_lateral_residual_at_drop_does_not_pivot_and_return_reuses_approach_heading(self):

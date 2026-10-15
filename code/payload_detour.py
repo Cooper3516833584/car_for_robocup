@@ -7,7 +7,7 @@ import time
 
 from core.frames import normalize_angle_rad
 from components.basic_motion_controller import MotionActionState
-from components.payload_task import drop_payload, payload_channel
+from components.payload_servos import open_payload
 from mission_control import step_runtime as _step, usable_pose as _usable_pose
 from robocup_runtime import RobocupMissionState
 
@@ -16,17 +16,15 @@ PERIOD_S = 0.05
 
 @dataclass(frozen=True)
 class DetourSettings:
-    payload_slot: int = 1  # 1=右前CH2，2=中间CH3，3=左前CH4；CH1无电磁铁。
+    payload_slot: int = 0  # 0: yellow cargo; 1: task-board cargo (one release each).
     approach_m: float = 0.43
     release_hold_s: float = 0.5
     position_tolerance_m: float = 0.005
-    verify_relay: bool = True
     patrol_slow_speed_m_s: float = 0.08
 
     def __post_init__(self):
-        if (isinstance(self.payload_slot, bool) or not isinstance(self.payload_slot, int)
-                or self.payload_slot not in (1, 2, 3)):
-            raise ValueError("payload slot must be 1, 2 or 3")
+        if isinstance(self.payload_slot, bool) or self.payload_slot not in (0, 1):
+            raise ValueError('payload cargo slot must be 0 or 1')
         for name in ("approach_m", "release_hold_s", "position_tolerance_m",
                      "patrol_slow_speed_m_s"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
@@ -43,12 +41,11 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
     Return starts at the latest fused pose and reverses parallel to side_yaw
     into the pivot's inner cross-section before the single inward turn.
 
-    Caller owns runtime/relay lifecycle and resumes its original segment.
+    Caller owns runtime lifecycle and resumes its original segment.
     Every motion/hold tick checks cancellation, vision and runtime safety.
     Absolute turn headings avoid accumulating left/right turn tolerances.
     Translation, headings and saved return endpoints share the fused pose frame.
     """
-    relay = runtime.relay
     original = runtime.motion.navigation
     entry_drive = runtime.motion.drive
     hold_failure = None
@@ -127,9 +124,6 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                              target_yaw_rad=side_yaw)
 
     try:
-        channel = payload_channel(settings.payload_slot)
-        if relay is None or not relay.connected or relay.channel_count < channel:
-            raise RuntimeError("payload relay unavailable or selected channel is missing")
         runtime.motion.navigation = replace(original, position_tolerance_m=min(
             original.position_tolerance_m, settings.position_tolerance_m))
         check()
@@ -158,14 +152,13 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.drive.stop()
         record_drop_pose(A2, B2, side_yaw)
         check()
-        runtime.record_event("payload_release_start", slot=settings.payload_slot, channel=channel)
-        released = drop_payload(relay, settings.payload_slot, hold_s=settings.release_hold_s,
-                                verify=settings.verify_relay, sleep=hold)
-        if hold_failure is not None:
-            raise hold_failure
-        if not released:
-            raise RuntimeError("payload release or relay deactivation failed")
-        runtime.record_event("payload_release_done", slot=settings.payload_slot, channel=channel)
+        runtime.record_event("payload_release_start", actuator="payload_servo",
+                             slot=settings.payload_slot, cargo_count=1)
+        released = open_payload(settings.payload_slot)
+        hold(settings.release_hold_s)
+        runtime.record_event("payload_release_skipped" if released is False else "payload_release_done",
+                             actuator="payload_servo", cargo_count=1, slot=settings.payload_slot,
+                             reason="PWM unconfigured" if released is False else "command sent")
         # Use the latest fusion after the release hold, then reverse along the
         # saved side axis. Even a small cross-track residual cannot turn this
         # into a diagonal path to the historical XY pivot.
@@ -182,7 +175,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                                  reason="already at the turn pose", pose_reference="fused")
         on_side_line = False
         returned = motion("right_90deg", "rotate_to", road_yaw)
-        runtime.record_event("payload_detour_done", slot=settings.payload_slot, pose=returned,
+        runtime.record_event("payload_detour_done", actuator="dual_servo", pose=returned,
                              pose_reference="fused")
         return returned
     except BaseException as exc:
@@ -202,15 +195,13 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                     runtime.mission.request_safe_stop(str(exc))
         runtime.motion.navigation = original
         runtime.motion.drive = entry_drive
-        # On success only the selected magnet is released; preserve other loads.
-        # On failure disconnect all contacts; runtime close retries cleanup.
-        if (primary_error or cleanup_error) and relay is not None and relay.connected:
+        if primary_error or cleanup_error:
             try:
-                if relay.all_off(verify=settings.verify_relay) is False:
-                    raise RuntimeError("payload relay all_off was not confirmed")
+                open_payload()
             except Exception as exc:
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
                 if not primary_error:
+                    cleanup_error = cleanup_error or exc
                     runtime.mission.request_safe_stop(str(exc))
         if cleanup_error is not None and not primary_error:
             raise cleanup_error

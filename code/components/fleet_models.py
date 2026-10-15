@@ -46,6 +46,8 @@ class CommandId(IntEnum):
     DRONE_SELECT_MISSION = 0x25
     DRONE_SET_DROP_TASK = 0x26
     DRONE_START_DROP_TASK = 0x27
+    DRONE_PAYLOAD_CLOSE = 0x28
+    DRONE_REBUILD_MAP = 0x29
 
 
 class MissionId(IntEnum):

@@ -1,0 +1,14 @@
+[Unit]
+Description=RoboCup unique slam_toolbox sidecar (fresh instance per RUN)
+After=network.target
+
+[Service]
+Type=simple
+User=radxa
+WorkingDirectory=/home/radxa/car
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec ros2 launch /home/radxa/car/launch/robocup_slam.launch.py'
+Restart=on-failure
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

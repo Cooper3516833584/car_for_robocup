@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 import threading
+import struct
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
@@ -14,7 +15,7 @@ from components.fleet_protocol import decode_command, encode_ack, pack_frame, un
 
 
 class HandoffTests(unittest.TestCase):
-    counts = SimpleNamespace(red=2, blue=0, green=2)
+    counts = SimpleNamespace(red=2, blue=0, green=1)
 
     def make_sender(self, send, retries=1, stop_event=None):
         driver = Mock()
@@ -38,7 +39,7 @@ class HandoffTests(unittest.TestCase):
         sender = self.make_sender(send)
         self.assertTrue(sender.send_task_and_start(self.counts, task_id=42))
         tasks = [decode_command(unpack_frame(raw).payload) for raw in sent]
-        self.assertEqual(decode_drop_task(tasks[0].command_body), DropTask(42, 2, 0, 2))
+        self.assertEqual(decode_drop_task(tasks[0].command_body), DropTask(42, 2, 0, 1))
         self.assertEqual(decode_drop_start(tasks[1].command_body), 42)
         self.assertEqual([t.command_id for t in tasks], [CommandId.DRONE_SET_DROP_TASK, CommandId.DRONE_START_DROP_TASK])
         self.assertTrue(all(unpack_frame(raw).dst == NodeId.DRONE and unpack_frame(raw).src == NodeId.CAR for raw in sent))
@@ -112,7 +113,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
 
     def test_bad_counts_or_task_id_never_write(self):
-        for counts, task_id in ((SimpleNamespace(red=1, blue=1, green=1), 1), (self.counts, 0),
+        for counts, task_id in ((SimpleNamespace(red=2, blue=1, green=1), 1), (self.counts, 0),
                                 (SimpleNamespace(red=True, blue=1, green=2), 1)):
             send = Mock()
             with self.assertRaises(ValueError):
@@ -127,6 +128,33 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue(factory.call_args.kwargs["bridge_envelope"])
         driver.write.assert_not_called()
         driver.close.assert_called_once()
+
+    def test_run_close_and_new_sequence_remap_queries(self):
+        sent=[]
+        statuses=iter((AckStatus.COMPLETED,AckStatus.ACCEPTED,AckStatus.COMPLETED))
+        def send(raw):
+            sent.append(raw)
+            self.ack(sender,raw,next(statuses))
+        sender=self.make_sender(send)
+        self.assertTrue(sender.close_drone_payload(7))
+        self.assertTrue(sender.begin_drone_remap(7))
+        self.assertTrue(sender.wait_drone_remap(7))
+        frames=[unpack_frame(raw) for raw in sent]
+        self.assertEqual(len({f.seq for f in frames}),3)
+        commands=[decode_command(f.payload) for f in frames]
+        self.assertEqual([c.command_id for c in commands],[0x28,0x29,0x29])
+        self.assertTrue(all(c.command_body==struct.pack('<BI',1,7) for c in commands))
+
+    def test_remap_rejection_and_cancellation_never_ready(self):
+        sent=[]
+        def send(raw):
+            sent.append(raw); self.ack(sender,raw,AckStatus.FAILED)
+        sender=self.make_sender(send)
+        self.assertFalse(sender.wait_drone_remap(7))
+        sender.stop_event.set()
+        self.assertFalse(sender.close_drone_payload(7))
+        self.assertFalse(sender.begin_drone_remap(7))
+        self.assertEqual(len(sent),1)
 
 
 if __name__ == "__main__":

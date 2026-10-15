@@ -2,6 +2,7 @@
 import logging
 import math
 import secrets
+import struct
 import threading
 import time
 
@@ -48,7 +49,8 @@ class FleetTaskSender:
                     self._ack = ack
                     self._condition.notify_all()
 
-    def _request(self, command_id, body, *, require_completed=False):
+    def _request(self, command_id, body, *, require_completed=False, return_status=False,
+                 deadline_s=None):
         seq = self._seq.next()
         raw = pack_frame(Frame(1, NodeId.CAR, NodeId.DRONE, MessageKind.COMMAND, 0,
             self.session, seq, encode_command(CommandPayload(command_id, command_body=body))))
@@ -57,7 +59,7 @@ class FleetTaskSender:
             self._ack = None
         try:
             for attempt in range(1, self.retries+2):
-                if self.stop_event.is_set():
+                if self.stop_event.is_set() or (deadline_s is not None and time.monotonic() >= deadline_s):
                     return False
                 try:
                     self.transport.write(raw)
@@ -65,12 +67,14 @@ class FleetTaskSender:
                 except (OSError, RuntimeError):
                     LOG.exception("Drone task write failed")
                 deadline = time.monotonic()+self.timeout
+                if deadline_s is not None:
+                    deadline = min(deadline, deadline_s)
                 with self._condition:
                     while not self.stop_event.is_set():
                         ack = self._ack
                         if ack is not None:
                             if ack.status == AckStatus.COMPLETED or (not require_completed and ack.status == AckStatus.ACCEPTED):
-                                return True
+                                return ack.status if return_status else True
                             if ack.status in (AckStatus.REJECTED, AckStatus.FAILED):
                                 LOG.error("Drone rejected command=0x%02x reason=%d", command_id, ack.reason)
                                 return False
@@ -83,6 +87,37 @@ class FleetTaskSender:
         finally:
             with self._condition:
                 self._pending = None
+
+    @staticmethod
+    def _run_body(run_id):
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or not 1 <= run_id <= 0xffffffff:
+            raise ValueError("run_id must be a nonzero u32")
+        return struct.pack('<BI', 1, run_id)
+
+    def close_drone_payload(self, run_id):
+        with self._send_lock:
+            return self._request(CommandId.DRONE_PAYLOAD_CLOSE, self._run_body(run_id),
+                                 require_completed=True)
+
+    def begin_drone_remap(self, run_id):
+        with self._send_lock:
+            return self._request(CommandId.DRONE_REBUILD_MAP, self._run_body(run_id))
+
+    def wait_drone_remap(self, run_id, stop_event=None, *, timeout_s=75., poll_s=.5):
+        stop = self.stop_event if stop_event is None else stop_event
+        deadline = time.monotonic() + timeout_s
+        while not stop.is_set() and not self.stop_event.is_set() and time.monotonic() < deadline:
+            with self._send_lock:
+                status = self._request(CommandId.DRONE_REBUILD_MAP, self._run_body(run_id),
+                                       return_status=True, deadline_s=deadline)
+            if status == AckStatus.COMPLETED:
+                return True
+            if status != AckStatus.ACCEPTED:
+                return False
+            if stop.wait(min(poll_s, max(0, deadline-time.monotonic()))):
+                return False
+        LOG.error("Drone new-map readiness not confirmed")
+        return False
 
     def send_task_and_start(self, counts, *, task_id=None, start_drone=True):
         task = DropTask(secrets.randbelow(0xffffffff)+1 if task_id is None else task_id,

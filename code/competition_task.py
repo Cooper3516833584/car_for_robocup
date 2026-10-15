@@ -5,17 +5,14 @@ from __future__ import annotations
 import logging
 import math
 from statistics import median
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
 import time
 
 from components.basic_motion_controller import MotionActionState
 from components.fleet_task_sender import send_task_and_start
-from components.payload_task import drop_payload as release_payload
-from components.payload_task import (PAYLOAD_ACTIVE_ON as DEFAULT_PAYLOAD_ACTIVE_ON,
-                                     PAYLOAD_SLOT_TO_RELAY as DEFAULT_PAYLOAD_SLOT_TO_RELAY,
-                                     payload_channel, prepare_payload)
+from components.payload_servos import open_payload, payload_configured
 from mission_control import LocalizationLostError, step_runtime as _step, usable_pose as _usable_pose
 from components.yellow_yolo_adapter import load_detector, select_yellow
 from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
@@ -95,7 +92,6 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 # ---- CH3 road visual centring, then blind fused drop ------------------------
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
-CH3_PAYLOAD_SLOT = 2  # CH3 = middle electromagnet = relay channel 3.
 SEARCH_REFERENCE_CX = 320.0  # Horizontal camera centre at +90 deg.
 DROP_SAFE_M = 0.43       # Operator revised the blind drop reach, 2026-10-11.
 DROP_FINE_SPEED_M_S = 0.05
@@ -115,16 +111,35 @@ DROP_REFERENCE = (Path(__file__).resolve().parents[1] / "assets"
 # Legacy standalone drop-route tuning; full uses the shared fused payload detour.
 # Only ("drive", m), ("rotate", deg), ("rotate_to", deg) are supported.
 FIXED_DROP_ROUTE = [("drive", 0.00)]
-PAYLOAD_SLOT_TO_RELAY = dict(DEFAULT_PAYLOAD_SLOT_TO_RELAY)  # 1=右前CH2，2=中间CH3，3=左前CH4。
-PAYLOAD_ACTIVE_ON = DEFAULT_PAYLOAD_ACTIVE_ON  # False: 通电吸住，断电释放后保持 OFF。
 PAYLOAD_RELEASE_HOLD_S = 0.50
-PAYLOAD_VERIFY_RELAY = True
 # ===== END FIELD / COMPETITION QUICK TUNING =====
 
 LOG = logging.getLogger(__name__)
 STAGES = ("full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
           "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop",
           "drop-align", "corner2", "finish")
+
+
+@dataclass(frozen=True)
+class DroneAllocation:
+    red: int
+    blue: int
+    green: int
+
+    def as_dict(self):
+        return dict(red=self.red, blue=self.blue, green=self.green)
+
+
+def split_task_allocation(counts):
+    """Assign one single-item color to CAR; drone gets the other three items."""
+    values = counts.as_dict()
+    if sum(values.values()) != 4:
+        raise ValueError('source task board must contain four free-color items')
+    car_color = next((color for color in ('red', 'blue', 'green') if values[color] == 1), None)
+    if car_color is None:
+        raise ValueError('no single-item target can be assigned to the car')
+    values[car_color] = 0
+    return car_color, DroneAllocation(**values)
 
 
 def wait_for_fused_localization(runtime):
@@ -282,6 +297,8 @@ def read_task_board(camera=None, *, reader=None, runtime=None, allow_fallback=Tr
 
 def send_task_to_drone_once(counts, *, runtime=None, start_drone=True):
     """One logical handoff: actual quotas ACK, then matching start ACK."""
+    if sum(counts.as_dict().values()) == 4:
+        _, counts = split_task_allocation(counts)
     ok = send_task_and_start(counts, port=HC_PORT, baudrate=HC_BAUDRATE,
                             connect_wait_s=HC_CONNECT_WAIT_S,
                             response_timeout_s=HC_RESPONSE_TIMEOUT_S, retries=HC_COMMAND_RETRIES,
@@ -667,12 +684,6 @@ def run_fixed_drop_route(runtime):
     return result
 
 
-def drop_payload(relay, slot=1):
-    return release_payload(relay, slot, slot_to_relay=PAYLOAD_SLOT_TO_RELAY,
-                           active_on=PAYLOAD_ACTIVE_ON, hold_s=PAYLOAD_RELEASE_HOLD_S,
-                           verify=PAYLOAD_VERIFY_RELAY)
-
-
 def _fused_translation(motion, pose, direction_yaw, distance_m, label):
     """One fused translation from ``pose`` along ``direction_yaw``.
 
@@ -770,15 +781,19 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
         runtime.drive.stop()
 
 
-def perform_payload_detour(runtime, slot=CH3_PAYLOAD_SLOT, *, servo=None, camera=None,
-                           color=TARGET_COLOR, safe_distance_m=None):
+def perform_payload_detour(runtime, *, servo=None, camera=None,
+                           color=TARGET_COLOR, safe_distance_m=None, payload_slot=0):
     """Turn at the centred stop, side line, reverse, one inward turn."""
     from payload_detour import DetourSettings, run_payload_detour
+    if not payload_configured(payload_slot):
+        runtime.record_event('payload_release_skipped', actuator='payload_servo', cargo_count=1,
+                             slot=payload_slot, color=color,
+                             reason='PWM addresses unconfigured; continuing route')
+        return None
     settings = DetourSettings(
-        payload_slot=slot,
+        payload_slot=payload_slot,
         approach_m=DROP_SAFE_M if safe_distance_m is None else safe_distance_m,
         release_hold_s=PAYLOAD_RELEASE_HOLD_S,
-        verify_relay=runtime.config.relay.verify_writes,
         patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
     original_drive = runtime.motion.drive
     runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
@@ -848,24 +863,12 @@ def _stage(runtime, name, action):
 
 
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
-                     slot=CH3_PAYLOAD_SLOT, color=TARGET_COLOR):
+                     color=TARGET_COLOR, send_drone_task=None):
     from config.v2_factory import build_servo
 
     task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     wait_for_fused_localization(runtime)
-    channel = payload_channel(slot, PAYLOAD_SLOT_TO_RELAY)
-    if runtime.relay is None:
-        runtime.drive.stop()
-        runtime.mission.request_safe_stop("payload relay unavailable")
-        raise RuntimeError("payload relay unavailable; mission will not move")
-    if runtime.relay is not None:
-        if not prepare_payload(runtime.relay, slot, slot_to_relay=PAYLOAD_SLOT_TO_RELAY,
-                               active_on=PAYLOAD_ACTIVE_ON, verify=PAYLOAD_VERIFY_RELAY):
-            runtime.drive.stop()
-            runtime.mission.request_safe_stop("payload holding state was not confirmed")
-            raise RuntimeError("payload holding state was not confirmed; mission will not move")
-        runtime.record_event("payload_hold_ready", slot=slot, channel=channel)
     # Search borrows the +90 camera axis; the blind drop leaves it at +90.
     servo = build_servo(runtime.config)
     try:
@@ -879,26 +882,35 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
             raise
         runtime.mission.set_task_counts(counts)
-        if _stage(runtime, "hc-send", lambda: send_task_to_drone_once(counts, runtime=runtime)) is not True:
+        car_color, drone_counts = split_task_allocation(counts)
+        runtime.record_event('payload_target_assignment', car_color=car_color, car_mandatory_yellow=1,
+                             car_target_required=1, drone_allocation=drone_counts.as_dict(),
+                             drone_mandatory_yellow=1)
+        if _stage(runtime, "hc-send", lambda: (send_drone_task(drone_counts) if send_drone_task is not None
+                else send_task_to_drone_once(drone_counts, runtime=runtime))) is not True:
             runtime.drive.stop()
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
         _stage(runtime, "corner1", lambda: go_to_first_corner(runtime))
         _stage(runtime, "cross-lane", lambda: enter_cross_lane(runtime))
-        detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
-            runtime, yellow_camera, detector, servo=servo, color=color))
-        aligned = None if detection is None else _stage(runtime, "yellow-align", lambda: detection)
-        if aligned is not None:
-            runtime.record_event("yellow_align", source="continuous_search",
-                                 cx_px=aligned.cx_px, cy_px=aligned.cy_px)
-        if aligned is not None:
-            _stage(runtime, "payload-detour", lambda: perform_payload_detour(
-                runtime, slot, servo=servo, camera=yellow_camera, color=color))
-            runtime.record_event("payload_drop", slot=slot, channel=channel, success=True,
-                                 pose_reference="fused")
-        else:
-            runtime.record_event("payload_drop", slot=slot, channel=channel, success=False,
-                                 skipped=True, reason="yellow search or alignment failed")
+        # Each cargo opens its own servo; never release both at the first target.
+        for payload_slot, target_color in ((0, 'yellow'), (1, car_color)):
+            detection = _stage(runtime, "yellow-search", lambda: search_centered_yellow_on_line(
+                runtime, yellow_camera, detector, servo=servo, color=target_color))
+            if detection is not None:
+                runtime.record_event("yellow_align", source="continuous_search", color=target_color,
+                                     cx_px=detection.cx_px, cy_px=detection.cy_px)
+                dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
+                    runtime, servo=servo, camera=yellow_camera, color=target_color,
+                    payload_slot=payload_slot))
+                runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
+                                     slot=payload_slot, color=target_color,
+                                     success=dropped is not None, skipped=dropped is None,
+                                     pose_reference="fused")
+            else:
+                runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=1,
+                                     slot=payload_slot, color=target_color, success=False,
+                                     skipped=True, reason="target search or alignment failed")
         _stage(runtime, "corner2", lambda: go_to_second_corner(runtime))
         return _stage(runtime, "finish", lambda: go_to_finish(runtime))
     finally:
@@ -912,7 +924,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
 
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
-                          yellow_camera=None, weights=None, slot=CH3_PAYLOAD_SLOT,
+                          yellow_camera=None, weights=None, send_drone_task=None,
                           color=TARGET_COLOR):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
@@ -932,7 +944,7 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     runtime.drive.stop()
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
-                                yellow_camera=yellow_camera, detector=detector, slot=slot,
+                                yellow_camera=yellow_camera, detector=detector, send_drone_task=send_drone_task,
                                 color=color)
     if stage == "hc-send":
         if runtime.mission.task_counts is None:
@@ -943,8 +955,8 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
         # Read-only stage: no navigation to the observation point.
         return _stage(runtime, stage, lambda: read_task_board(task_camera, runtime=runtime))
     if stage == "drop":
-        ok = _stage(runtime, stage, lambda: drop_payload(runtime.relay, slot))
-        runtime.record_event("payload_drop", slot=slot, success=ok)
+        ok = _stage(runtime, stage, lambda: open_payload())
+        runtime.record_event("payload_drop", actuator="dual_servo", success=True)
         return ok
     if stage == "yellow-detect":
         if detector is None:

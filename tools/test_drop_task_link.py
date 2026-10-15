@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 def main():
@@ -30,14 +31,20 @@ def main():
     from drone_link_test.models import AirFleetState
     from drone_link_test.hc14_transport import HC14BridgeCodec
 
+    sys.path.append(str(args.drone_sdk.resolve()))
     cases = 0
-    for red in range(5):
-        for blue in range(5-red):
-            green = 4-red-blue
+    for red in range(4):
+        for blue in range(4-red):
+            green = 3-red-blue
             counts = SimpleNamespace(red=red, blue=blue, green=green)
             for mode in ("normal", "lost_ack", "corrupt_request"):
                 stop = threading.Event()
-                receiver = RescueTaskReceiver(stop, allow_start=True)
+                payload=Mock()
+                fc=SimpleNamespace(connected=True,state=SimpleNamespace(
+                    is_fresh=lambda age:True,unlock=SimpleNamespace(value=False)))
+                navigation=Mock(running=True)
+                receiver = RescueTaskReceiver(stop, allow_start=True, payload=payload,
+                    fc=fc,navigation=navigation,validate_plan=lambda:None)
                 calls = {"task": 0, "start": 0}
                 set_task, start = receiver.set_task, receiver.request_start
                 def counted_task(*values):
@@ -81,6 +88,12 @@ def main():
                 node = RescueFleetNode(driver, lambda: AirFleetState(0, 0), AirCommandQueue(),
                                        stop, receiver=receiver)
                 sender = FleetTaskSender(driver, response_timeout_s=.003, retries=1, session=123)
+                with patch('fastlio_control.restart_and_calibrate_fastlio',
+                           return_value=dict(needs_calibration=False,pose={'stamp_ns':123})) as restart:
+                    assert sender.close_drone_payload(7)
+                    assert sender.begin_drone_remap(7)
+                    assert sender.wait_drone_remap(7,poll_s=.001)
+                    restart.assert_called_once_with(fc,navigation,timeout=45)
                 assert sender.send_task_and_start(counts, task_id=100+cases), (counts, mode)
                 task = receiver.wait_for_start(.01)
                 assert task.allocation() == dict(red=red, blue=blue, green=green)
@@ -89,8 +102,12 @@ def main():
                 assert ids[-1] == CommandId.DRONE_START_DROP_TASK
                 if mode != "normal":
                     assert sent[0] == sent[1] and sent[2] == sent[3]
+                assert payload.close_all.call_count==1
+                assert sender._request(CommandId.TARGETED_STOP,b'')
+                assert stop.is_set() and payload.open_all.call_count==1
+                assert not sender.close_drone_payload(7)
                 cases += 1
-    print(f"PASS: {cases} cross-repository cases; all 15 allocations, ACK loss, CRC corruption, fragmented BB33; no hardware opened")
+    print(f"PASS: {cases} cross-repository cases; all 10 allocations, CLOSE/async REMAP/quota/START/STOP, ACK loss, CRC corruption, fragmented BB33; no hardware opened")
 
 
 if __name__ == "__main__":

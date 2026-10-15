@@ -329,8 +329,8 @@ class DetourFineAlignTests(unittest.TestCase):
         self.runtime = build_runtime(load_runtime_config(), RuntimeMode.DRY_RUN,
                                      clock=lambda: self.now)
         self.addCleanup(self.runtime.close)
-        self.relay = FakeLCUSRelay(4)
-        self.runtime.relay = self.relay
+        output_patch=patch("payload_detour.open_payload")
+        self.open=output_patch.start(); self.addCleanup(output_patch.stop)
         self.runtime._consume_t265 = lambda *_a, **_k: None
         self.runtime._consume_d500 = lambda *_a, **_k: None
         self.runtime.fusion.estimate = lambda now: FusedPoseEstimate(
@@ -347,7 +347,7 @@ class DetourFineAlignTests(unittest.TestCase):
     def record(self, event, **values):
         self.events.append((event, values))
         if event == "payload_release_start":
-            self.releases.append((values["channel"], tuple(self.pose)))
+            self.releases.append((values["actuator"], tuple(self.pose)))
         if event == "payload_detour_stage_done":
             self.stage_poses[values["stage"]] = values["pose"]
 
@@ -369,7 +369,7 @@ class DetourFineAlignTests(unittest.TestCase):
 
     def run_detour(self, fine_align):
         return payload_detour.run_payload_detour(
-            self.runtime, payload_detour.DetourSettings(payload_slot=2),
+            self.runtime, payload_detour.DetourSettings(),
             clock=lambda: self.now, sleep=self.advance, fine_align=fine_align)
 
     def test_unequal_wheels_correct_cross_track_without_extending_47cm_reach(self):
@@ -387,7 +387,7 @@ class DetourFineAlignTests(unittest.TestCase):
         stages=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
         self.assertEqual(sum(s in ('left_90deg', 'right_90deg') for s in stages), 2)
         self.assertEqual(len(self.releases), 1)
-        self.assertEqual(self.releases[0][0], 3)
+        self.assertEqual(self.releases[0][0], 'payload_servo')
 
     def test_turn_translation_3_to_8cm_uses_actual_pivot_and_only_two_turns(self):
         for drift in (.03,.05,.08):
@@ -412,7 +412,7 @@ class DetourFineAlignTests(unittest.TestCase):
                 a,b=starts['return_from_drop']['args']
                 self.assertAlmostEqual(a[1],b[1])
                 self.assertTrue(starts['return_from_drop']['kwargs']['reverse'])
-                self.assertEqual([channel for channel,_ in self.releases],[3])
+                self.assertEqual([channel for channel,_ in self.releases],['payload_servo'])
 
     def test_old_edge_rotation_callback_is_rejected_before_motor_call(self):
         self.fixture()
@@ -437,7 +437,6 @@ class DetourFineAlignTests(unittest.TestCase):
 
     def test_return_leg_reuses_the_real_drop_pose_and_restores_road_yaw(self):
         self.fixture()
-        self.assertTrue(prepare_payload(self.relay, 2))
         returned = self.run_detour(self.fine_align)
         starts = {values["stage"]: values for event, values in self.events
                   if event == "payload_detour_stage_start"}
@@ -451,19 +450,18 @@ class DetourFineAlignTests(unittest.TestCase):
         self.assertNotAlmostEqual(math.dist(drop_xy, turn_xy), .47, delta=.05)
         self.assertAlmostEqual(math.dist(drop_xy, turn_xy), .40, delta=.01)
         self.assertAlmostEqual(returned.yaw_rad, math.pi / 2, delta=.06)
-        self.assertEqual([channel for channel, _ in self.releases], [3])
-        self.assertFalse(any(self.relay.query_status().values()))
+        self.assertEqual([channel for channel, _ in self.releases], ['payload_servo'])
+        self.open.assert_called()
 
     def test_zero_length_return_is_skipped_without_a_line_error(self):
         self.fixture()
-        self.assertTrue(prepare_payload(self.relay, 2))
 
         def back_to_turn(side_pose, road_yaw, side_yaw, motion):
             return side_pose
 
         self.run_detour(back_to_turn)
         self.assertTrue(any(event == "payload_detour_stage_skipped" for event, _ in self.events))
-        self.assertEqual([channel for channel, _ in self.releases], [3])
+        self.assertEqual([channel for channel, _ in self.releases], ['payload_servo'])
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
 

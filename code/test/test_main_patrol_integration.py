@@ -27,7 +27,10 @@ from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_con
 class MainPatrolIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
+        self.stack.enter_context(patch.object(task,"payload_configured",return_value=True))
         self.addCleanup(self.stack.close)
+        self.open=self.stack.enter_context(patch("payload_detour.open_payload"))
+        self.final_open=self.stack.enter_context(patch("main_robocup.open_payload"))
         self.now = 10.
         self.pose = [0., 0., 0.]
         self.events = []
@@ -112,26 +115,26 @@ class MainPatrolIntegrationTests(unittest.TestCase):
             self.stop_file.touch()
 
     def run_main(self, *extra):
-        return main(["--mode","hardware-mission","--competition","--release-mode","simulate",
-                     "--speed-scale","2","--payload-slot","3","--log-dir",self.directory,*extra])
+        return main(["--mode","hardware-mission","--competition",
+                     "--speed-scale","2","--log-dir",self.directory,*extra])
 
     def test_full_entry_preserves_field_route_and_uses_shared_fused_motion(self):
         self.assertEqual(self.run_main(),0)
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
         self.assertEqual(self.runtime.mission.task_counts,self.counts)
-        self.send.assert_called_once_with(self.counts,runtime=self.runtime)
+        self.send.assert_called_once_with(task.DroneAllocation(2,0,1),runtime=self.runtime)
         self.assertFalse(self.used_config.relay.enabled)
         self.assertEqual(self.used_config.navigation.translation_speed_scale,2)
         self.assertEqual(self.used_config.drive.max_linear_accel_m_s2,self.config.drive.max_linear_accel_m_s2)
         kwargs=self.vision_factory.call_args.kwargs
         self.assertEqual(kwargs["confidence"],.8)
-        self.assertEqual(kwargs["target_class_name"],"yellow")
+        self.assertEqual(kwargs["target_class_name"],"blue")
         self.assertAlmostEqual(kwargs["drop_center_width_ratio"],.1)
         # +90 search; blind drop never moves the camera servo.
         self.assertEqual(self.servo.set_angle.call_args_list,
-                         [call(90, settle=True)])
+                         [call(90, settle=True),call(90, settle=True)])
         self.servo.close.assert_called_once_with(hold=True)
-        self.vision.close.assert_called_once()
+        self.assertEqual(self.vision.close.call_count,2)
         calls=self.runtime.motion.track_global_line.call_args_list
         self.assertTrue(any(c.args==((.25,0),(1.05,0)) for c in calls))
         self.assertTrue(any(c.args==((1.05,.10),(1.05,.65)) for c in calls))
@@ -143,8 +146,8 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertTrue(any(c.kwargs.get("reverse") for c in calls))
         self.assertLess(math.dist(self.pose[:2],(1.40,.85)),.035)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
-        self.assertFalse(any(self.runtime.relay._states.values()))
-        self.assertFalse(self.runtime.relay.connected)
+        self.assertIsNone(self.runtime.relay)
+        self.final_open.assert_called()
         self.assertNotIn("advance_7cm", self.detour_caps)
         cruise_cap = self.config.drive.max_linear_speed_m_s * 2
         self.assertEqual(self.detour_caps["safe_side_approach"],{task.DROP_FINE_SPEED_M_S,.012,cruise_cap})
@@ -180,12 +183,12 @@ class MainPatrolIntegrationTests(unittest.TestCase):
 
     def test_zero_degree_camera_failure_releases_and_resumes_without_edge_turns(self):
         self.stack.enter_context(patch.object(task,'_open_yellow_camera',side_effect=OSError('camera lost')))
-        self.assertEqual(self.run_main('--payload-slot','2'),0)
+        self.assertEqual(self.run_main(),0)
         stages=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
-        self.assertEqual(stages,['left_90deg','safe_side_approach','return_from_drop','right_90deg'])
+        self.assertEqual(stages,['left_90deg','safe_side_approach','return_from_drop','right_90deg']*2)
         release=[v for e,v in self.events if e=='payload_release_done']
-        self.assertEqual(len(release),1)
-        self.assertEqual(release[0]['channel'],3)
+        self.assertEqual(len(release),2)
+        self.assertEqual(release[0]['actuator'],'payload_servo')
         self.assertTrue(any(e=='drop_align_done' and v['source']=='blind_fused_endpoint' for e,v in self.events))
 
     def test_unstable_zero_degree_arc_uses_fused_endpoint_and_continues_track(self):
@@ -197,10 +200,10 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         widths=[278,312,401,350,352,408,378,322,354,242,180,248]
         self.stack.enter_context(patch.object(vision,'extract_target_arc',
             side_effect=[(209. if i%2 else 582.,300.,w) for i,w in enumerate(widths)]*100))
-        self.assertEqual(self.run_main('--payload-slot','2'),0)
+        self.assertEqual(self.run_main(),0)
         self.assertTrue(any(e=='drop_align_done' and v['source']=='blind_fused_endpoint' for e,v in self.events))
         starts=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
-        self.assertEqual(starts,['left_90deg','safe_side_approach','return_from_drop','right_90deg'])
+        self.assertEqual(starts,['left_90deg','safe_side_approach','return_from_drop','right_90deg']*2)
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_worker_failure_stops_and_closes_vision_and_servo(self):
@@ -212,11 +215,11 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
 
     def test_release_failure_stops_before_second_corner(self):
-        with patch("payload_detour.drop_payload",return_value=False):
+        with patch("payload_detour.open_payload",side_effect=RuntimeError("release failed")):
             self.assertEqual(self.run_main(),1)
         self.assertFalse(any(e=="competition_stage_start" and v["stage"]=="corner2" for e,v in self.events))
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
-        self.assertFalse(any(self.runtime.relay._states.values()))
+        self.assertIsNone(self.runtime.relay)
 
     def test_stop_file_interrupts_nested_payload_motion_and_guard_is_scoped(self):
         self.stop_during_detour=True
@@ -247,7 +250,8 @@ class MainPatrolIntegrationTests(unittest.TestCase):
     def test_invalid_speed_and_conflicting_simulation_port_fail_before_runtime(self):
         for value in ("0","-1","nan","inf"):
             self.assertEqual(self.run_main("--speed-scale",value),2)
-        self.assertEqual(self.run_main("--relay-port","/dev/physical-relay"),2)
+        with self.assertRaises(SystemExit):
+            self.run_main("--relay-port","/dev/physical-relay")
         self.builder.assert_not_called()
 
 

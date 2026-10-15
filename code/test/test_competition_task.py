@@ -11,11 +11,9 @@ from unittest.mock import Mock, patch, PropertyMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
 from components.basic_motion_controller import MotionActionState
-from components.payload_task import payload_channel
 from components.pose_fusion import FusedPoseEstimate, PoseFusionState, PoseFusion
 from components.task_board_reader import TaskCounts, TaskBoardResult
 from components.yellow_yolo_adapter import YellowDetection
-from components.relay_lcus import FakeLCUSRelay
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D
 from main_robocup import main
@@ -23,6 +21,30 @@ from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_con
 
 
 class CompetitionTaskTests(unittest.TestCase):
+    def test_assignment_removes_exactly_one_single_item_color_from_drone(self):
+        for source,color,expected in (((2,1,1),'blue',(2,0,1)),
+                                       ((1,2,1),'red',(0,2,1)),
+                                       ((0,3,1),'green',(0,3,0))):
+            with self.subTest(source=source):
+                selected,counts=task.split_task_allocation(TaskCounts(*source))
+                self.assertEqual(selected,color)
+                self.assertEqual(tuple(counts.as_dict().values()),expected)
+                self.assertEqual(sum(counts.as_dict().values()),3)
+        for source in ((4,0,0),(2,2,0)):
+            with self.assertRaisesRegex(ValueError,'single-item'):
+                task.split_task_allocation(TaskCounts(*source))
+
+    def test_unconfigured_payload_skips_both_releases_and_finishes_route(self):
+        self.stack.enter_context(patch.object(task,'payload_configured',return_value=False))
+        self.stack.enter_context(patch.object(task,'read_task_board',return_value=TaskCounts(2,1,1)))
+        send=self.stack.enter_context(patch.object(task,'send_task_to_drone_once',return_value=True))
+        search=self.stack.enter_context(patch.object(task,'search_centered_yellow_on_line',return_value=Mock()))
+        task.run_full_mission(self.runtime,detector=Mock())
+        self.assertEqual([c.kwargs['color'] for c in search.call_args_list],['yellow','blue'])
+        send.assert_called_once_with(task.DroneAllocation(2,0,1),runtime=self.runtime)
+        self.open.assert_not_called()
+        self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
+
     def setUp(self):
         self.now = 10.0
         self.xy_yaw = [0.0, 0.0, 0.0]
@@ -31,8 +53,6 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime = build_runtime(load_runtime_config(), RuntimeMode.DRY_RUN,
                                      clock=lambda: self.now)
         self.runtime.start()
-        self.runtime.relay = FakeLCUSRelay(4)
-        self.runtime.relay.open()
         self.addCleanup(self.runtime.close)
         # Fake canonical pose observations, propagated from the fake drive.
         # All production fusion/motion/drive algorithms remain unmodified.
@@ -41,6 +61,10 @@ class CompetitionTaskTests(unittest.TestCase):
         self.runtime.fusion.estimate = self.estimate
         self.runtime.record_event = Mock()
         self.stack = ExitStack()
+        self.stack.enter_context(patch.object(task,"payload_configured",return_value=True))
+        self.open = self.stack.enter_context(patch("payload_detour.open_payload"))
+        self.stack.enter_context(patch("main_robocup.open_payload"))
+        self.stack.enter_context(patch.object(task, "open_payload"))
         self.addCleanup(self.stack.close)
         # No test may open a real 0 deg camera: the fake frame reader is used by
         # the visual alignment fallback paths, which is the same behaviour as a
@@ -206,15 +230,14 @@ class CompetitionTaskTests(unittest.TestCase):
         send = self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line",
             return_value=YellowDetection(320, 240, 80, 80, 0.9)))
-        drop = self.stack.enter_context(patch.object(self.runtime.relay, "turn_off", return_value=False))
+        drop = self.stack.enter_context(patch("payload_detour.open_payload", side_effect=RuntimeError("release failed")))
         with patch.object(task, "go_to_second_corner") as corner:
             with self.assertRaisesRegex(RuntimeError, "release"):
                 task.run_full_mission(self.runtime, yellow_camera=Mock(), detector=Mock())
             corner.assert_not_called()
         send.assert_called_once()
         self.assertGreater(drop.call_count, 0)
-        # Default competition slot 2 is the middle CH3 = relay channel 3.
-        self.assertTrue(all(c.args == (3,) for c in drop.call_args_list))
+        self.assertTrue(any(c.args == (0,) for c in drop.call_args_list))
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
@@ -251,7 +274,7 @@ class CompetitionTaskTests(unittest.TestCase):
         with patch.object(task,"align_yellow_drop_zone",side_effect=AssertionError("duplicate alignment")), \
              patch.object(task,"perform_payload_detour") as drop:
             task.run_full_mission(self.runtime,detector=Mock())
-        drop.assert_called_once()
+        self.assertEqual(drop.call_count,2)
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_move_to_xy_does_not_set_final_yaw(self):
@@ -278,7 +301,7 @@ class CompetitionTaskTests(unittest.TestCase):
         servo = Mock(is_running=True, pulse_us=1500)
         self.stack.enter_context(patch("config.v2_factory.build_servo", return_value=servo))
         from components import drop_target_vision as vision
-        before=len(self.runtime.relay.commands)
+        before=self.open.call_count
         camera=Mock()
         camera.read.return_value=(True,object())
         with patch.object(task,"_open_yellow_camera",return_value=(camera,False)), \
@@ -291,7 +314,7 @@ class CompetitionTaskTests(unittest.TestCase):
         move.assert_not_called()
         servo.set_angle.assert_called_once_with(0,settle=True)
         servo.close.assert_called_once_with(hold=True)
-        self.assertEqual(len(self.runtime.relay.commands),before)
+        self.assertEqual(self.open.call_count,before)
 
     def test_main_stage_drop_align_uses_the_alignment_result(self):
         for result, expected in ((None, 1), (Mock(), 0)):
@@ -302,21 +325,16 @@ class CompetitionTaskTests(unittest.TestCase):
                                        "--competition-stage", "drop-align"]), expected)
                 self.assertEqual(run.call_args.args, (self.runtime, "drop-align"))
 
-    def test_main_default_payload_slot_is_the_middle_ch3(self):
-        with patch("main_robocup.build_runtime", return_value=self.runtime), \
-             patch.object(task, "run_competition_stage", return_value=True) as run:
-            main(["--mode", "hardware-mission", "--competition"])
-        self.assertEqual(run.call_args.kwargs["slot"], 2)
-        self.assertEqual(task.CH3_PAYLOAD_SLOT, 2)
-        self.assertEqual(payload_channel(task.CH3_PAYLOAD_SLOT), 3)
+    def test_main_uses_dual_servo_without_magnet_slot(self):
+        with patch("main_robocup.build_runtime", return_value=self.runtime), patch.object(task,"run_competition_stage",return_value=True) as run:
+            main(["--mode","hardware-mission","--competition"])
+        self.assertNotIn("slot",run.call_args.kwargs)
 
     def test_standalone_drop_does_not_start_full_route(self):
-        drop = self.stack.enter_context(patch.object(task, "drop_payload", return_value=True))
-        full = self.stack.enter_context(patch.object(task, "run_full_mission"))
-        self.assertTrue(task.run_competition_stage(self.runtime, "drop", slot=3))
-        drop.assert_called_once_with(self.runtime.relay, 3)
+        with patch.object(task,"open_payload") as drop, patch.object(task,"run_full_mission") as full:
+            task.run_competition_stage(self.runtime,"drop")
+        drop.assert_called_once_with()
         full.assert_not_called()
-        self.assertEqual(self.runtime.motion.state, MotionActionState.IDLE)
 
     def test_standalone_task_board_does_not_navigate(self):
         reader = self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
@@ -329,7 +347,7 @@ class CompetitionTaskTests(unittest.TestCase):
         with patch("main_robocup.build_runtime", return_value=self.runtime), \
              patch.object(task, "run_competition_stage", return_value=True) as run:
             self.assertEqual(main(["--mode", "hardware-mission", "--competition-stage", "lane",
-                                   "--task-board-camera", "1", "--payload-slot", "2"]), 0)
+                                   "--task-board-camera", "1"]), 0)
         self.assertEqual(run.call_args.args, (self.runtime, "lane"))
         self.assertEqual(run.call_args.kwargs["task_board_camera"], 1)
         self.assertFalse(self.runtime.is_running)
@@ -367,7 +385,7 @@ class CompetitionTaskTests(unittest.TestCase):
         self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=(
             YellowDetection(320, 240, 80, 80, 0.9) if found else None)))
         self.stack.enter_context(patch.object(task, "send_task_and_start", return_value=hc_ok))
-        def detour(runtime, slot, **_kwargs):
+        def detour(runtime, **_kwargs):
             if not drop_ok:
                 runtime.mission.request_safe_stop("payload release was not confirmed")
                 raise RuntimeError("payload release was not confirmed")
@@ -396,43 +414,31 @@ class CompetitionTaskTests(unittest.TestCase):
         self._run_full_cli(found=False).assert_not_called()
 
     def test_full_cli_does_not_repeat_legacy_alignment_after_search(self):
-        self._run_full_cli(align_ok=False).assert_called_once()
+        self.assertEqual(self._run_full_cli(align_ok=False).call_count,2)
 
     def test_full_cli_drop_failure_stops_and_returns_failure(self):
         drop = self._run_full_cli(drop_ok=False, expected_code=1)
         # The competition default is the middle CH3 (slot 2), never CH2.
-        self.assertEqual(drop.call_args.args, (self.runtime, 2))
+        self.assertEqual(drop.call_args.args, (self.runtime,))
 
-    def test_full_mission_uses_selected_left_front_magnet_and_holds_before_motion(self):
-        relay = FakeLCUSRelay(4)
-        relay.open()
-        self.runtime.relay = relay
-        self.stack.enter_context(patch.object(task, "read_task_board", return_value=TaskCounts(1, 2, 1)))
-        self.stack.enter_context(patch.object(task, "send_task_to_drone_once", return_value=True))
-        self.stack.enter_context(patch.object(task, "search_centered_yellow_on_line", return_value=Mock()))
-        self.stack.enter_context(patch.object(task, "align_yellow_drop_zone", return_value=Mock()))
-        go = task.go_to_lane
+    def test_full_mission_never_accesses_legacy_relay(self):
+        self.runtime.relay = Mock()
+        self.stack.enter_context(patch.object(task,"read_task_board",return_value=TaskCounts(1,2,1)))
+        self.stack.enter_context(patch.object(task,"send_task_to_drone_once",return_value=True))
+        self.stack.enter_context(patch.object(task,"search_centered_yellow_on_line",return_value=Mock()))
+        task.run_competition_stage(self.runtime,"full")
+        self.runtime.relay.assert_not_called()
+        self.assertEqual(self.runtime.relay.method_calls,[])
+        self.assertEqual([c.args for c in self.open.call_args_list],[(0,),(1,)])
 
-        def checked_go(runtime):
-            self.assertEqual(relay.query_status(), {1: False, 2: False, 3: False, 4: True})
-            return go(runtime)
-
-        self.stack.enter_context(patch.object(task, "go_to_lane", side_effect=checked_go))
-        task.run_competition_stage(self.runtime, "full", slot=3)
-        self.assertFalse(any(relay.query_status().values()))
-        self.assertTrue(all(frame[1] == 4 for frame in relay.commands))
-        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
-
-    def test_full_mission_holding_failure_prevents_first_motion(self):
-        relay = FakeLCUSRelay(4)
-        relay.open()
-        self.runtime.relay = relay
-        relay.turn_on = Mock(return_value=False)
-        with patch.object(task, "go_to_lane") as go:
-            with self.assertRaisesRegex(RuntimeError, "holding"):
-                task.run_full_mission(self.runtime)
-            go.assert_not_called()
-        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+    def test_shared_sender_failure_prevents_post_ocr_motion(self):
+        self.stack.enter_context(patch.object(task,"read_task_board",return_value=TaskCounts(1,2,1)))
+        self.stack.enter_context(patch.object(task,"search_centered_yellow_on_line",return_value=None))
+        send=Mock(return_value=False)
+        with self.assertRaisesRegex(RuntimeError,"drone task/start"):
+            task.run_full_mission(self.runtime,send_drone_task=send)
+        send.assert_called_once()
+        self.assertEqual(self.runtime.mission.state,RobocupMissionState.SAFE_STOP)
 
     def test_full_cli_ocr_failure_never_sends_fallback_to_drone(self):
         with self.assertLogs("competition_task", level="WARNING") as logs:

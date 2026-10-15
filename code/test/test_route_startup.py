@@ -83,30 +83,12 @@ class RouteStartupTests(unittest.TestCase):
                 startup_countdown(self.relay, self.alarm, 2, duration)
             self.assertFalse(self.relay.connected)
 
-    def test_entry_parks_camera_before_three_channel_countdown_then_starts_route(self):
-        with tempfile.TemporaryDirectory() as directory:
-            weights=Path(directory)/'weights.pt'; weights.touch()
-            log=Path(directory)/'mission'
-            runtime=Mock(); runtime.relay.connected=True; runtime.relay.all_off.return_value=True
-            order=[]
-            with patch.object(entry,'build_runtime',return_value=runtime), \
-                 patch.object(entry,'build_servo',return_value=Mock(is_running=True,pulse_us=2500)), \
-                 patch.object(entry,'SoundLightAlarm',return_value=Mock()), \
-                 patch.object(entry,'YoloVision',return_value=Mock()), \
-                 patch.object(entry,'JsonlEventLogger',return_value=Mock()), \
-                 patch.object(entry,'park_servo',side_effect=lambda _,angle:order.append(('camera',angle))), \
-                 patch.object(entry,'startup_countdown',side_effect=lambda _r,_a,slots,secs,**kw:order.append(('hold_alarm',slots,secs))), \
-                 patch.object(entry,'run_route',side_effect=lambda *a,**kw:order.append(('route',kw))) as run, \
-                 patch.object(entry.signal,'signal'):
-                result=entry.main(['--confirm-motor-test','--release-mode','relay',
-                    '--relay-port','/dev/confirmed-relay','--startup-alarm-seconds','15',
-                    '--weights',str(weights),'--log-dir',str(log)])
-            self.assertEqual(result,0)
-            self.assertEqual(order[:2],[('camera',90),('hold_alarm',(1,2,3),15)])
-            self.assertEqual(order[2][0],'route')
-            self.assertEqual(run.call_args.kwargs['payload_slots'],(1,2,3))
-            self.assertTrue(run.call_args.kwargs['trigger_anywhere'])
-            self.assertAlmostEqual(run.call_args.kwargs['detour'].approach_m,.43)
+    def test_retired_three_channel_route_refuses_before_countdown(self):
+        with patch.object(entry,'build_runtime') as build, patch.object(entry,'park_servo') as servo:
+            with self.assertRaises(SystemExit):
+                entry.main(['--confirm-motor-test','--release-mode','relay','--relay-port','/dev/confirmed-relay','--startup-alarm-seconds','15'])
+        build.assert_not_called()
+        servo.assert_not_called()
 
 
 if __name__ == "__main__":

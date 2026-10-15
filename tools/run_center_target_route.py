@@ -104,6 +104,8 @@ def main(argv=None):
                         help="drop mode: hold selected magnets, alarm for this duration, then start (0=disabled)")
     parser.add_argument("--confirm-motor-test", action="store_true")
     args = parser.parse_args(argv)
+    if args.target_action == "drop":
+        parser.error("legacy LCUS payload test is retired; use competition_boot.py or main_robocup.py --competition-stage drop with dual servos")
     if args.payload_slot is not None and args.payload_sequence is not None:
         parser.error("use either --payload-slot or --payload-sequence")
     slots = tuple(args.payload_sequence or ((args.payload_slot,) if args.payload_slot else (1, 2, 3)))

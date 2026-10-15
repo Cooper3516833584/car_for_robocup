@@ -60,7 +60,7 @@ class DirectCompetitionStageTests(unittest.TestCase):
                 self.assertEqual(main(["--competition-stage", "hc-send", "--task-red-count", "2",
                                        "--task-blue-count", "1", "--task-green-count", "1"]), 0 if success else 1)
                 send.assert_called_once()
-                self.assertEqual(send.call_args.args[0].key, (2, 1, 1))
+                self.assertEqual(tuple(send.call_args.args[0].as_dict().values()), (2, 0, 1))
                 self.assertFalse(send.call_args.kwargs["start_drone"])
                 self.assertEqual(send.call_args.kwargs["baudrate"], 115200)
         self.loader.assert_not_called()
@@ -123,83 +123,30 @@ class DirectCompetitionStageTests(unittest.TestCase):
             self.assertIsNone(task.detect_yellow_from_camera(capture, Mock()))
         capture.release.assert_not_called()
 
-    def test_drop_only_builds_relay_and_cleans_up_in_order(self):
-        order = Mock()
-        order.attach_mock(self.relay, "relay")
-        drop = Mock(return_value=True)
-        order.attach_mock(drop, "drop")
-        with patch.object(task, "drop_payload", drop):
-            self.assertEqual(main(["--competition-stage", "drop", "--payload-slot", "3", "--config", "site.toml"]), 0)
-        self.loader.assert_called_once_with("site.toml")
-        self.factory.assert_called_once_with(self.config, fake=False)
-        self.assertEqual(order.mock_calls, [call.relay.open(), call.drop(self.relay, 3),
-                                          call.relay.all_off(verify=True), call.relay.close()])
+    def test_drop_opens_dual_servo_without_runtime_or_relay(self):
+        with patch('main_robocup.open_payload') as output:
+            self.assertEqual(main(['--competition-stage','drop']),0)
+        output.assert_called_once_with()
+        self.build.assert_not_called()
+        self.factory.assert_not_called()
 
-    def test_failed_drop_returns_one_but_cleans_up(self):
-        with patch.object(task, "drop_payload", return_value=False):
-            self.assertEqual(main(["--competition-stage", "drop"]), 1)
-        self.relay.all_off.assert_called_once_with(verify=True)
-        self.relay.close.assert_called_once()
+    def test_failed_servo_write_returns_failure(self):
+        with patch('main_robocup.open_payload',side_effect=OSError('PWM failed')):
+            self.assertEqual(main(['--competition-stage','drop']),1)
+        self.build.assert_not_called()
+        self.factory.assert_not_called()
 
-    def test_disabled_relay_returns_one_without_opening(self):
-        self.factory.return_value = None
-        with patch.object(task, "drop_payload") as drop:
-            self.assertEqual(main(["--competition-stage", "drop"]), 1)
-            drop.assert_not_called()
-        self.relay.open.assert_not_called()
+    def test_servo_interrupt_returns_130(self):
+        with patch('main_robocup.open_payload',side_effect=KeyboardInterrupt):
+            self.assertEqual(main(['--competition-stage','drop']),130)
 
-    def test_drop_exception_and_interrupt_still_clean_up(self):
-        for exception, expected in ((OSError("drop failed"), 1), (KeyboardInterrupt(), 130)):
-            with self.subTest(exception=type(exception).__name__), patch.object(task, "drop_payload", side_effect=exception):
-                self.relay.reset_mock()
-                self.assertEqual(main(["--competition-stage", "drop"]), expected)
-                self.relay.all_off.assert_called_once()
-                self.relay.close.assert_called_once()
-
-    def test_relay_open_failure_closes_without_actuation(self):
-        self.relay.connected = False
-        self.relay.open.side_effect = OSError("port unavailable")
-        with patch.object(task, "drop_payload") as drop:
-            self.assertEqual(main(["--competition-stage", "drop"]), 1)
-            drop.assert_not_called()
-        self.relay.close.assert_called_once()
-
-    def test_all_off_failure_returns_one_and_still_closes(self):
-        for value in (False, OSError("cleanup failed")):
-            with self.subTest(value=value), patch.object(task, "drop_payload", return_value=True):
-                self.relay.reset_mock()
-                self.relay.all_off.return_value = value
-                self.relay.all_off.side_effect = value if isinstance(value, Exception) else None
-                self.assertEqual(main(["--competition-stage", "drop"]), 1)
-                self.relay.close.assert_called_once()
-
-    def test_close_failure_returns_one(self):
-        self.relay.close.side_effect = OSError("close failed")
-        with patch.object(task, "drop_payload", return_value=True):
-            self.assertEqual(main(["--competition-stage", "drop"]), 1)
-
-    def test_direct_drop_always_requests_all_off(self):
-        self.config = replace(self.config, relay=replace(self.config.relay, disconnect_on_shutdown=False))
-        self.loader.return_value = self.config
-        with patch.object(task, "drop_payload", return_value=True):
-            self.assertEqual(main(["--competition-stage", "drop"]), 0)
-        self.relay.all_off.assert_called_once()
-
-    def test_real_drop_uses_confirmed_channel_and_never_reenergizes_it(self):
-        self.relay.channel_count = 4
-        self.relay.turn_off.return_value = True
-        self.assertEqual(main(["--competition-stage", "drop", "--payload-slot", "3",
-                               "--relay-port", "/dev/confirmed-relay"]), 0)
-        configured = self.factory.call_args.args[0]
-        self.assertTrue(configured.relay.enabled)
-        self.assertEqual(configured.relay.port, "/dev/confirmed-relay")
-        self.relay.turn_on.assert_not_called()
-        self.assertTrue(all(call.args == (4,) for call in self.relay.turn_off.call_args_list))
-
-    def test_relay_port_override_rejected_for_unrelated_stage(self):
-        self.assertEqual(main(["--competition-stage", "task-board", "--relay-port", "/dev/confirmed"]), 2)
-        self.relay.open.assert_not_called()
+    def test_retired_payload_flags_rejected_before_any_hardware(self):
+        for flag,value in (('--relay-port','/dev/confirmed'),('--payload-slot','2'),('--release-mode','relay')):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                main(['--competition-stage','drop',flag,value])
+        self.build.assert_not_called()
+        self.factory.assert_not_called()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

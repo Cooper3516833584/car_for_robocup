@@ -140,6 +140,8 @@ def vision_preview(args, parser):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not args.vision_preview:
+        parser.error("legacy LCUS payload test is retired; use competition_boot.py or main_robocup.py --competition-stage drop with dual servos")
     if args.vision_preview:
         return vision_preview(args, parser)
     if not args.confirm_motor_test:

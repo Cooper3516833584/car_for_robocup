@@ -14,7 +14,7 @@ import time
 import sys
 
 from components.basic_motion_controller import MotionActionState
-from components.payload_task import payload_channel, prepare_payload
+from components.payload_servos import open_payload, close_payload
 from components.yolo_cpu import (CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ,
                                  pin_vision_worker, select_fastest_cpus)
 from mission_control import step_runtime as _step, usable_pose as _usable_pose, task_scope
@@ -384,10 +384,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
     slowing = False
     slots = tuple(payload_slots) if payload_slots is not None else None
     if slots is not None:
-        if detour is None or not slots or len(set(slots)) != len(slots):
-            raise ValueError("payload sequence needs unique slots and a drop detour")
-        for slot in slots:
-            payload_channel(slot)
+        raise ValueError("legacy multi-magnet sequences are retired; dual-servo payload releases once")
 
     def guard():
         if abort():
@@ -396,10 +393,8 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
             raise RuntimeError("route test time limit expired")
 
     try:
-        if detour is not None and (runtime.relay is None
-                                  or runtime.relay.channel_count < max(payload_channel(slot)
-                                      for slot in (slots or (detour.payload_slot,)))):
-            raise RuntimeError("payload relay must be configured before patrol starts")
+        if detour is not None:
+            close_payload()
         runtime.start()
         runtime.motion.stop()  # No implicit synthetic/default navigation goal.
         localization_deadline = min(deadline, clock() + 30)
@@ -426,12 +421,8 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
             sleep(PERIOD_S)
         actions = route_from_pose(result.estimate.pose)
         if detour is not None:
-            for slot in slots or (detour.payload_slot,):
-                if not prepare_payload(runtime.relay, slot, verify=detour.verify_relay):
-                    raise RuntimeError("payload holding state was not confirmed; patrol will not move")
-                runtime.record_event("payload_hold_ready", slot=slot, channel=payload_channel(slot))
             guard()
-            vision.observe(clock())  # Recheck freshness after relay verification.
+            vision.observe(clock())
         alarm_count = 0
         drop_count = 0
         for action in actions:
@@ -454,7 +445,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                         last_drop_frame = frame_at
                         if drop_latch.update(visible, trigger=(visible is not None if trigger_anywhere
                                                               else centered is not None) and
-                                             (slots is None or drop_count < len(slots))) is not None:
+                                             drop_count < 1) is not None:
                             entry = visible if trigger_anywhere else centered
                 else:
                     entry = initial_entry if initial_entry is not None else vision.poll(clock())
@@ -462,8 +453,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                 if detour is not None and entry is not None:
                     runtime.record_event("test_route_payload_target", label=action.label, box=entry)
                     from competition_task import fine_center_on_road, align_drop_position
-                    selected = detour.payload_slot if slots is None else slots[drop_count]
-                    settings = replace(detour, payload_slot=selected)
+                    settings = detour
                     def blind_align(pivot, road_yaw, side_yaw, motion):
                         return align_drop_position(runtime, None, pivot, road_yaw, side_yaw,
                                                    motion, safe_distance_m=settings.approach_m)
@@ -478,14 +468,14 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                         aligned = (fine_center_on_road(runtime, vision, candidate)
                                    if candidate is not None else None)
                         if aligned is not None:
-                            print(f"[route] PAYLOAD DETOUR slot={selected}; CH{payload_channel(selected)}", flush=True)
+                            print("[route] DUAL SERVO PAYLOAD DETOUR", flush=True)
                             run_payload_detour(runtime, settings, guard=guard, clock=clock,
                                                sleep=sleep, travel_drive=original_drive,
                                                fine_align=blind_align)
                             drop_count += 1
                         else:
                             runtime.record_event("test_route_payload_skipped", reason="horizontal alignment failed",
-                                                 slot=selected)
+                                                 actuator="dual_servo")
                     # Frames seen while turning/dropping cannot re-arm a target.
                     drop_latch.require_clear()
                     last_drop_frame = vision.observe(clock())[0]
@@ -543,13 +533,11 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                 runtime.record_event("test_route_cleanup_failed", reason=str(exc))
                 runtime.mission.request_safe_stop(str(exc))
         runtime.motion.drive = original_drive
-        if detour is not None and runtime.relay is not None and runtime.relay.connected:
+        if detour is not None:
             try:
-                if runtime.relay.all_off(verify=detour.verify_relay) is False:
-                    raise RuntimeError("payload relay all_off was not confirmed")
+                open_payload()
             except Exception as exc:
-                runtime.mission.request_safe_stop(str(exc))
-                runtime.record_event("test_route_cleanup_failed", reason=str(exc))
                 cleanup_error = cleanup_error or exc
+                runtime.mission.request_safe_stop(str(exc))
         if cleanup_error is not None and not primary_error:
             raise cleanup_error

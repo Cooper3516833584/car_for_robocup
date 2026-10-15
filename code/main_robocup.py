@@ -8,12 +8,14 @@ import math
 from pathlib import Path
 import sys
 import signal
+import threading
+from dataclasses import replace
+from components.payload_servos import open_payload
 
 from components.diagnostics_log import JsonlEventLogger
 from components.navigation_common import NavigationGoal
 from config.relative_slam_profile import accepted_relative_slam_profile
-from config.mission_profile import payload_config, route_speed_config
-from config.v2_factory import configure_payload_relay
+from config.mission_profile import route_speed_config
 from config.v2_runtime import RuntimeMode
 from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
 
@@ -57,14 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
              "localization runtime; drop-align expects the car already at the left-turn pose")
     parser.add_argument("--yellow-camera", help="competition camera index or stable device path")
     parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
-    parser.add_argument("--payload-slot", type=int, choices=(1, 2, 3), default=2,
-                        help="drop/full selection: 1=right-front CH2, 2=middle CH3 (competition default), "
-                             "3=left-front CH4")
-    parser.add_argument("--relay-port", help="explicit LCUS port; enables real relay only for drop/full")
     parser.add_argument("--speed-scale", type=float, default=1,
                         help="shared motion speed multiplier; use 2 for the validated faster profile")
-    parser.add_argument("--release-mode", choices=("simulate", "relay"),
-                        help="competition full: simulate disables the physical relay; default uses config")
     parser.add_argument("--max-seconds", type=float, default=300,
                         help="competition motion task time limit, including nested search and detour")
     return parser
@@ -114,38 +110,13 @@ def run_direct_competition_stage(args) -> int:
                      detection.cy_px, detection.width_px, detection.height_px, detection.confidence)
         return 0
     if stage == "drop":
-        from config.v2_factory import build_relay
-
-        config = configure_payload_relay(load_runtime_config(args.config), port=args.relay_port)
-        relay = build_relay(config, fake=False)
-        if relay is None:
-            logging.error("payload relay is disabled/unavailable")
-            return 1
-        ok = False
-        try:
-            relay.open()
-            ok = task.drop_payload(relay, args.payload_slot)
-        finally:
-            # A direct test always requests all_off before closing an opened
-            # relay, including when disconnect_on_shutdown is disabled.
-            try:
-                if relay.connected and relay.all_off(verify=config.relay.verify_writes) is False:
-                    logging.error("direct drop all_off was not confirmed")
-                    ok = False
-            except Exception:
-                logging.exception("direct drop all_off failed")
-                ok = False
-            finally:
-                try:
-                    relay.close()
-                except Exception:
-                    logging.exception("direct drop close failed")
-                    ok = False
-        return 0 if ok is True else 1
+        open_payload()
+        return 0
     raise ValueError(f"unsupported direct competition stage: {stage}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None,
+         on_runtime_ready=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
@@ -155,13 +126,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not math.isfinite(args.max_seconds) or not 1 <= args.max_seconds <= 600:
         logging.error("--max-seconds must be finite and between 1 and 600")
-        return 2
-    if args.release_mode is not None and (not competition_enabled or args.competition_stage not in (None, "full")):
-        logging.error("--release-mode requires competition full")
-        return 2
-    if args.relay_port is not None and (not competition_enabled
-            or args.competition_stage not in (None, "full", "drop")):
-        logging.error("--relay-port requires competition full or drop")
         return 2
     if competition_enabled and not direct_stage and args.mode != RuntimeMode.HARDWARE_MISSION.value:
         logging.error("competition requires --mode hardware-mission; use fake unit tests for software route validation")
@@ -197,12 +161,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_runtime_config(args.config)
-        if competition_enabled and args.competition_stage in (None, "full"):
-            if args.release_mode is not None:
-                config = payload_config(config, action="drop", release_mode=args.release_mode,
-                                        relay_port=args.relay_port)
-            else:
-                config = configure_payload_relay(config, port=args.relay_port)
+        if competition_enabled:
+            config = replace(config, relay=replace(config.relay, enabled=False))
         mode = RuntimeMode(args.mode)
         if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
             config = accepted_relative_slam_profile(config)
@@ -213,9 +173,6 @@ def main(argv: list[str] | None = None) -> int:
             replay_file=args.replay_file,
             mission_profile=args.mission_profile,
         )
-        if competition_enabled and args.release_mode == "simulate":
-            from components.relay_lcus import FakeLCUSRelay
-            runtime.relay = FakeLCUSRelay(4)
         if args.log_dir is not None:
             runtime.event_logger = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
         elif task_board_enabled or competition_enabled:
@@ -242,6 +199,8 @@ def main(argv: list[str] | None = None) -> int:
 
     previous_sigterm = None
     try:
+        if on_runtime_ready is not None:
+            on_runtime_ready(runtime)
         if competition_enabled:
             from competition_task import run_competition_stage
             from mission_control import task_scope
@@ -251,11 +210,13 @@ def main(argv: list[str] | None = None) -> int:
                                  translation_speed_scale=config.navigation.translation_speed_scale,
                                  lookahead_base_m=config.navigation.lookahead_m,
                                  lookahead_max_extension_m=config.navigation.lookahead_max_extension_m,
-                                 release_mode=args.release_mode or "config")
+                                 actuator="dual_servo")
             deadline = runtime.clock() + args.max_seconds
             stop_file = Path(args.log_dir or "logs/competition") / "STOP"
 
             def guard():
+                if stop_event is not None and stop_event.is_set():
+                    raise RuntimeError("competition interrupted by STOP")
                 if stop_file.exists():
                     raise RuntimeError("competition interrupted by STOP file")
                 if runtime.clock() >= deadline:
@@ -264,14 +225,15 @@ def main(argv: list[str] | None = None) -> int:
             def terminate(*_):
                 raise KeyboardInterrupt
 
-            previous_sigterm = signal.signal(signal.SIGTERM, terminate)
+            if threading.current_thread() is threading.main_thread():
+                previous_sigterm = signal.signal(signal.SIGTERM, terminate)
             with task_scope(guard):
                 guard()
                 result = run_competition_stage(
                     runtime, stage,
                     task_board_camera=camera_value(args.task_board_camera),
                     yellow_camera=camera_value(args.yellow_camera),
-                    weights=args.yellow_model, slot=args.payload_slot,
+                    weights=args.yellow_model, send_drone_task=send_drone_task,
                 )
             logging.info("competition stage completed: %s; result=%s",
                          stage,
@@ -330,6 +292,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             runtime.close()
         finally:
+            if competition_enabled:
+                try:
+                    open_payload()
+                except Exception:
+                    logging.exception("finally payload OPEN failed")
             if previous_sigterm is not None:
                 signal.signal(signal.SIGTERM, previous_sigterm)
 
