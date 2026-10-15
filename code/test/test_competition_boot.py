@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -28,6 +29,34 @@ class ClockEvent:
 
 
 class BootTests(unittest.TestCase):
+    def test_formal_and_car_only_worker_pass_the_real_profile_to_runtime_parser(self):
+        from main_robocup import build_parser
+        expected = Path(boot.__file__).resolve().parents[1] / 'configs/robocup_diffdrive.toml'
+        for car_only in (False, True):
+            with self.subTest(car_only=car_only):
+                self.listener._car_only_test = car_only
+                self.now = 0.
+                self.mission.reset_mock()
+                self.run_worker()
+                self.mission.assert_called_once()
+                args = build_parser().parse_args(self.mission.call_args.args[0])
+                self.assertEqual(Path(args.config), expected)
+                self.assertTrue(Path(args.config).is_absolute())
+                self.assertTrue(args.competition)
+                self.assertEqual(args.mode, 'hardware-mission')
+                self.assertTrue(args.relative_slam)
+
+    def test_missing_explicit_real_profile_fails_without_falling_back_to_example(self):
+        from main_robocup import main
+        with tempfile.TemporaryDirectory() as directory:
+            args = list(boot.MISSION_ARGS)
+            args[args.index('--config') + 1] = str(Path(directory) / 'missing.toml')
+            with patch('main_robocup.build_runtime') as build, \
+                 patch('main_robocup.open_payload') as opened:
+                self.assertEqual(main(args), 2)
+            build.assert_not_called()
+            opened.assert_not_called()
+
     def test_explicit_simulation_skips_all_payload_outputs_and_is_forwarded(self):
         self.listener._simulate_payload = True
         self.listener._car_only_test = True

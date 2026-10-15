@@ -3,6 +3,9 @@
 自启动入口保留 `code/car_full_flow_test.py`，由 `competition-boot.service` 运行。
 它使用真实底盘、视觉和两只 SG90，仅屏蔽无人机命令；上电先 OPEN 两只并监听地面站。
 收到有效 RUN 才 CLOSE 两只并开始任务，不会自行行驶。
+正式和单机监听都通过 `--config` 明确传入当前仓库的
+`configs/robocup_diffdrive.toml` 绝对路径，启动日志打印该路径。
+该文件缺失时任务报错退出，不回退到示例配置；示例配置的相机舵机默认禁用。
 
 完整顺序：RUN → 两只 CLOSE（1500 μs）→ 原有 20 秒倒计时（最后 5 秒蜂鸣）
 → 重启并确认 SLAM 新实例 → 相机 +90° → 起点 OCR（三次失败用 1/2/1）

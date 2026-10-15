@@ -1,5 +1,6 @@
 """HC-15 competition listener; the mission worker shares its single radio owner."""
 import logging
+from pathlib import Path
 import secrets
 import signal
 import shutil
@@ -21,7 +22,9 @@ RUN_DELAY_S = 20.0
 BUZZ_LAST_S = 5.0
 SLAM_SERVICE = 'robocup-slam.service'
 SYSTEMCTL = shutil.which('systemctl') or '/usr/bin/systemctl'
-MISSION_ARGS = ('--competition', '--mode', 'hardware-mission', '--relative-slam')
+MISSION_CONFIG = Path(__file__).resolve().parents[1] / 'configs' / 'robocup_diffdrive.toml'
+MISSION_ARGS = ('--competition', '--mode', 'hardware-mission', '--relative-slam',
+                '--config', str(MISSION_CONFIG))
 
 
 def restart_car_slam_sidecar(stop_event):
@@ -119,6 +122,7 @@ class CompetitionBoot:
         return action()
 
     def start(self):
+        LOG.info('competition mission config: %s', MISSION_CONFIG)
         self._attempt('alarm initialize OFF', lambda: self._alarm.initialize(active=False))
         self._attempt('alarm OFF', self._alarm.off)
         self._attempt('startup payload OPEN', lambda: self._payload_command(open_payload))
