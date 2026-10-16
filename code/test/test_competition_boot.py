@@ -194,12 +194,59 @@ class BootTests(unittest.TestCase):
         self.sender.send_task_and_start.assert_called_once_with('counts',start_drone=True)
         self.assertEqual(self.events[-1],('open',20.))
 
-    def test_slow_close_does_not_shift_deadline_or_extend_beep(self):
-        self.sender.close_drone_payload.side_effect=lambda run: setattr(self,'now',18.) or True
-        self.run_worker()
-        self.assertIn(('buzz_on',18.),self.events)
-        self.assertIn(('mission',20.),[('mission',self.mission.call_args.kwargs['stop_event'].owner.now)])
-        self.assertIn(('car_map',20.),self.events)
+    def test_close_ack_always_precedes_full_beep_and_delays_start_when_late(self):
+        for ack_at, buzz_at, start_at in ((0., 15., 20.), (18., 18., 23.), (25., 25., 30.)):
+            with self.subTest(ack_at=ack_at):
+                self.now = 0.
+                self.events.clear()
+                self.sender.reset_mock()
+                self.mission.reset_mock()
+                self.sender.close_drone_payload.side_effect = (
+                    lambda run: setattr(self, 'now', ack_at) or True)
+                self.sender.begin_drone_remap.side_effect = (
+                    lambda run: self.events.append(('drone_map', self.now)) or True)
+                self.mission.side_effect = lambda *a, **k: self.events.append(('mission', self.now)) or 0
+                self.run_worker()
+                self.assertEqual(self.events[:5], [('close', 0.), ('buzz_on', buzz_at),
+                    ('buzz_off', start_at), ('drone_map', start_at), ('car_map', start_at)])
+                self.assertIn(('mission', start_at), self.events)
+                self.sender.begin_drone_remap.assert_called_once_with(7)
+
+    def test_stop_after_beep_before_remap_never_starts_task(self):
+        stop = ClockEvent(self)
+        self.alarm.off.side_effect = stop.set
+        self.listener._run_mission(stop, self.sender, 7, 0.)
+        self.alarm.off.assert_called()
+        self.sender.begin_drone_remap.assert_not_called()
+        self.remap.assert_not_called()
+        self.mission.assert_not_called()
+
+    def test_stop_while_waiting_for_payload_lock_prevents_beep(self):
+        stop = ClockEvent(self)
+        lock = Mock()
+        def acquire():
+            if lock.__enter__.call_count == 2:
+                stop.set()
+        lock.__enter__ = Mock(side_effect=acquire)
+        lock.__exit__ = Mock(return_value=False)
+        self.listener._payload_action_lock = lock
+        self.listener._run_mission(stop, self.sender, 7, 0.)
+        self.alarm.on.assert_not_called()
+        self.alarm.off.assert_called()
+        self.sender.begin_drone_remap.assert_not_called()
+        self.mission.assert_not_called()
+
+    def test_remote_close_rejection_or_timeout_never_beeps_or_launches(self):
+        for outcome in (False, TimeoutError('CLOSE ACK timed out')):
+            with self.subTest(outcome=outcome):
+                self.sender.close_drone_payload.side_effect = (
+                    outcome if isinstance(outcome, Exception) else lambda run: False)
+                self.run_worker()
+                self.alarm.on.assert_not_called()
+                self.alarm.off.assert_called()
+                self.sender.begin_drone_remap.assert_not_called()
+                self.remap.assert_not_called()
+                self.mission.assert_not_called()
 
     def test_stop_at_four_or_eighteen_never_starts_maps_or_mission(self):
         for at in (4.,18.):
@@ -209,6 +256,8 @@ class BootTests(unittest.TestCase):
                 self.remap.assert_not_called()
                 self.mission.assert_not_called()
                 self.assertEqual(self.events[-1],('open',at))
+                self.assertIn(('buzz_off', at), self.events)
+                self.sender.begin_drone_remap.assert_not_called()
 
     def test_missing_pwm_close_and_failed_remote_close_never_launch(self):
         self.close.side_effect=RuntimeError('PWM None')

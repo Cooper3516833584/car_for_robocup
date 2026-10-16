@@ -218,15 +218,16 @@ class CompetitionBoot:
                      'SIMULATED' if self._simulate_payload else 'written', run_id)
             if not self._car_only_test and not sender.close_drone_payload(run_id):
                 raise RuntimeError('drone CLOSE was not confirmed by software ACK')
-            if stop.wait(max(0, t0 + RUN_DELAY_S - BUZZ_LAST_S - self._clock())):
+            close_confirmed_at = self._clock()
+            buzz_at = max(t0 + RUN_DELAY_S - BUZZ_LAST_S, close_confirmed_at)
+            if stop.wait(max(0.0, buzz_at - self._clock())):
                 return
             with self._payload_action_lock:
                 if stop.is_set():
                     return
-                if self._clock() < t0 + RUN_DELAY_S:
-                    self._alarm.on()
-                    LOG.info('BUZZ ON')
-            if stop.wait(max(0, t0 + RUN_DELAY_S - self._clock())):
+                self._alarm.on()
+                LOG.info('BUZZ ON')
+            if stop.wait(BUZZ_LAST_S):
                 return
             self._alarm.off()
             LOG.info('BUZZ OFF')
