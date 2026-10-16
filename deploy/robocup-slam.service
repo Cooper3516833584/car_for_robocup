@@ -6,6 +6,11 @@ After=network.target
 Type=simple
 User=radxa
 WorkingDirectory=/home/radxa/car
+# Loopback multicast has to be enabled before the ROS participant is created:
+# 127.0.0.1 is the only transport this unit uses (ROS_LOCALHOST_ONLY below), and
+# without IFF_MULTICAST on lo the bridge and this node cannot discover each other.
+ExecStartPre=+/usr/bin/ip link set dev lo multicast on
+Environment=ROS_LOCALHOST_ONLY=1
 Environment=MAMBA_ROOT_PREFIX=/home/radxa/robocup_ros/root
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/bin/micromamba
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/env/bin/ros2

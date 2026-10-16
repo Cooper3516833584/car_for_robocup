@@ -29,6 +29,32 @@ python3 /home/radxa/car/code/car_full_flow_test.py --status
 
 `--status` 只读、不启动；`--listen` 专供自启动服务，手工运行它不会启动任务。
 
+## ROS 传输要求（定位链路不复现丢失）
+
+任务进程（`competition-boot.service`）与 SLAM 边车（`robocup-slam.service`）都用
+`Environment=ROS_LOCALHOST_ONLY=1`，并且两个单元在启动前执行
+`ExecStartPre=+/usr/bin/ip link set dev lo multicast on`。
+
+原因：2026-10-16 实车复现过"扫描任务板后停在 `wait_for_fused_localization`"——
+`slam_toolbox` 进程在跑、systemd 也是 active，但它的 DDS participant 不在 ROS 图里
+（`ros2 node list --no-daemon` 看不到），桥接器 `slam.tf_lookup_fail_count` 持续增长、
+`slam.pose_receive_count=0`，融合位姿全程 `unanchored`。开机后约 2 秒 `wlP4p65s0`
+还没有地址，participant 选中的接口与后建的桥接器不一致；WiFi 抖动让两个本机进程
+再也发现不了对方。固定走回环后不再依赖 WiFi 状态，但回环需要 IFF_MULTICAST，
+否则 `lo` 上没有可用的多播发现路径（本机实测：`lo` 未开多播时 100% 失败，
+开启后 5 秒内 `fused_pose.state=ok`）。
+
+RUN 前的 10 秒自检（两条都带变量，因为服务端只走回环）：
+
+```sh
+ip -br link show lo                                    # 要显示 MULTICAST
+ROS_LOCALHOST_ONLY=1 ros2 node list --no-daemon        # 要能看到 /slam_toolbox
+```
+
+`ROS_LOCALHOST_ONLY=1` 只在该小车的本机 ROS 节点之间生效；地面站与小车之间走
+HC-15 串口（`fleet_bus`），不使用 ROS 网络，因此不受影响。手工用 `ros2` 命令行
+检查时必须自己带上这个变量，否则会看到空图。
+
 ## 任务流程
 正式和单机监听都通过 `--config` 明确传入当前仓库的
 `configs/robocup_diffdrive.toml` 绝对路径，启动日志打印该路径。

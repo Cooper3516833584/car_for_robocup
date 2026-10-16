@@ -8,6 +8,9 @@ User=radxa
 Group=radxa
 SupplementaryGroups=dialout
 WorkingDirectory=/home/radxa/car
+# Loopback multicast has to be enabled before the ROS participant is created:
+# the mission bridge talks to the SLAM sidecar over 127.0.0.1 only.
+ExecStartPre=+/usr/bin/ip link set dev lo multicast on
 RuntimeDirectory=robocup-car
 RuntimeDirectoryMode=0700
 ExecStartPre=+/usr/bin/python3 /home/radxa/car/tools/setup_payload_pwm_permissions.py
@@ -19,6 +22,7 @@ RestartSec=5
 TimeoutStopSec=40
 KillMode=control-group
 Environment=PYTHONUNBUFFERED=1
+Environment=ROS_LOCALHOST_ONLY=1
 Environment=MAMBA_ROOT_PREFIX=/home/radxa/robocup_ros/root
 Environment=PYTHONPATH=/home/radxa/robocup_ros/python_ext:/home/radxa/car/code
 SyslogIdentifier=car-competition-boot
