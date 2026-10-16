@@ -1429,6 +1429,10 @@ class WallRuntime:
         if not self.drive.is_running:
             self.drive.start()
             self._drive_started = True
+            # Hardware startup advances the drive's clock beyond this wall tick.
+            # The first command must be stamped after startup, just as in the
+            # fused runtime's lazy-start path.
+            return float(self.clock())
         return now_s
 
     def request_stop(self, reason: str = "operator requested safe stop") -> None:

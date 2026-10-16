@@ -12,6 +12,7 @@ from pathlib import Path
 import random
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -242,6 +243,29 @@ class StopLatchTests(unittest.TestCase):
         clock[0] += 0.05
         self.assertIsNotNone(runtime._send(Twist2D(0.15, 0.0), clock[0]))
         self.assertEqual(len(backend.commands), 1)
+
+    def test_first_command_uses_time_after_backend_start_and_then_accelerates(self):
+        runtime, backend, clock = self.make_runtime()
+        self.addCleanup(runtime.close)
+        runtime.start()
+        original_start = backend.start
+
+        def slow_start():
+            original_start()
+            clock[0] += 0.1
+
+        with patch.object(backend, "start", side_effect=slow_start) as start:
+            # A hardware start takes time after the wall tick was sampled.
+            first = runtime._send(Twist2D(0.15, 0.0), clock[0])
+            self.assertEqual(first, Twist2D(0.0, 0.0))
+            self.assertEqual(len(backend.commands), 1)
+            clock[0] += 0.05
+            following = runtime._send(Twist2D(0.15, 0.0), clock[0])
+            self.assertGreater(following.linear_x_m_s, 0.0)
+            self.assertLessEqual(following.linear_x_m_s,
+                                 runtime.drive.max_linear_accel_m_s2 * 0.05 + 1e-12)
+            self.assertEqual(len(backend.commands), 2)
+            start.assert_called_once()
 
     def test_i11_a_new_run_clears_the_previous_stop_latch_and_action(self):
         runtime, backend, clock = self.make_runtime()
