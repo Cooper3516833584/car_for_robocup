@@ -65,6 +65,23 @@ def _payload_axis_angle(payload_angle):
     return payload_angle - 90
 
 
+def _axis_address_present(node, channel) -> bool:
+    """Whether this axis has a usable PWM address on this board right now.
+
+    A pin whose device-tree overlay is not enabled cannot be commanded, and that
+    is a property of the hardware build rather than a fault of the command. The
+    broadcast paths (RUN CLOSE, STOP/cleanup OPEN) are what the whole competition
+    depends on, so they must not be aborted by an axis that does not exist.
+    """
+    if node is None or channel is None:
+        return False
+    try:
+        resolve_chip(Path('/sys/class/pwm'), node)
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
 def _command(angle, slot=None):
     errors = []
     complete = True
@@ -93,6 +110,12 @@ def _command(angle, slot=None):
                 LOG.info('payload PWM command written slot=%d angle=%d pulse_us=%d (no mechanical feedback)',
                          index, angle, axis.pulse_us)
             except Exception as exc:
+                if not _axis_address_present(node, channel):
+                    # This pin has no overlay. The axis cannot exist, the
+                    # remaining axes still get their command, and the RUN/STOP
+                    # path must survive it.
+                    LOG.error('payload axis unavailable slot=%d node=%s: %s', index, node, exc)
+                    continue
                 errors.append("servo %d: %s" % (index + 1, exc))
     if errors:
         raise RuntimeError("payload command failed: " + "; ".join(errors))

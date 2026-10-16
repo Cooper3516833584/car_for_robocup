@@ -17,6 +17,10 @@ class PayloadServoTests(unittest.TestCase):
             output.start.side_effect = lambda output=output: setattr(output, 'is_running', True)
         self.stack.enter_context(patch.object(payload, '_axes', [None]*5))
         self.factory = self.stack.enter_context(patch.object(payload, 'LinuxSysfsPWMOutput', side_effect=self.outputs))
+        # These tests are about a real axis failing, not about a missing overlay,
+        # so every address counts as present. An address that is genuinely absent
+        # is tolerated by the broadcast paths instead of raising.
+        self.stack.enter_context(patch.object(payload, '_axis_address_present', return_value=True))
 
     def test_addresses_period_and_actual_open_close_pulses(self):
         self.assertTrue(payload.open_payload())
@@ -99,7 +103,28 @@ class PayloadServoTests(unittest.TestCase):
 
     def test_unconfigured_address_returns_false_but_commands_other_channel(self):
         with patch.object(payload, 'SERVO_1_PWM_NODE', None): self.assertFalse(payload.open_payload())
-        self.outputs[0].set_pulse_us.assert_called_once_with(1000)
+
+    def test_a_missing_overlay_does_not_abort_the_broadcast(self):
+        # The board's real state: PWM6_M0 has no overlay, so slot 4 cannot be
+        # commanded. RUN calls close_payload() first; if that raised, the
+        # countdown would never start and the whole competition would be dead.
+        with patch.object(payload, '_axis_address_present', return_value=False):
+            self.outputs[4].start.side_effect = RuntimeError("cannot find a PWM chip")
+            self.assertTrue(payload.close_payload())
+            self.assertTrue(payload.open_payload())
+        # The four real axes still got both commands.
+        for output in self.outputs[:4]:
+            self.assertEqual(output.set_pulse_us.call_args_list, [call(1500), call(1000)])
+        self.outputs[4].set_pulse_us.assert_not_called()
+
+    def test_an_absent_axis_is_reported_so_the_mission_is_not_silent(self):
+        with patch.object(payload, '_axis_address_present', return_value=False), \
+             self.assertLogs('components.payload_servos', level='ERROR') as logged:
+            self.outputs[4].start.side_effect = RuntimeError("cannot find a PWM chip")
+            payload.close_payload()
+        self.assertTrue(any('slot=4' in line for line in logged.output))
+        # The present axes were still commanded.
+        self.outputs[0].set_pulse_us.assert_called_once_with(1500)
 
     def test_configuration_checks_real_nodes_and_write_access_without_output(self):
         with patch.object(payload, 'resolve_chip', return_value=Path('/fake/pwmchip9')) as resolve, patch.object(payload.os, 'access', return_value=True):
