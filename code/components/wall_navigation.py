@@ -59,6 +59,9 @@ MIN_TERMINAL_SPAN_M = MIN_SPAN_M
 # How long a terminal wall that was already verified may stay out of view before
 # the leg gives up, rather than driving on with a distance that cannot update.
 TERMINAL_LOST_TIMEOUT_S = 5.0
+# Require continuous terminal-wall measurements only once a real distance puts
+# the car within this approach band. A far wall may be outside lidar range.
+TERMINAL_APPROACH_MARGIN_M = 0.60
 TERMINAL_DISTINCT_LINES_M = 0.10
 DROP_TERMINAL_RANGE_M = 0.06
 DROP_FINE_SPEED_M_S = 0.05
@@ -582,6 +585,7 @@ class FollowRightWall(WallAction):
         self._terminal_reference: WallLine | None = None
         self._terminal_visible = False
         self._terminal_lost_since_s: float | None = None
+        self._terminal_approach_active = False
         self._terminal_candidates: list[dict] = []
 
     def _pick_right(self, snapshot: WallSnapshot):
@@ -607,7 +611,8 @@ class FollowRightWall(WallAction):
         The scan must fit a real long wall in the requested sector. Requiring
         both supports to extend to their intersection can suppress this distance
         while a corner is occluded. The field run first accepted a distance
-        40 cm past its stop position; missing distances must instead hold zero.
+        40 cm past its stop position. Once in the measured approach band, a lost
+        distance must instead hold zero.
         """
         if self.terminal_role is None:
             return None
@@ -665,16 +670,24 @@ class FollowRightWall(WallAction):
             self._terminal_lost_since_s = None
             terminal_target = self.terminal_target_m
             terminal_measured = terminal.rho_base_m
+            if terminal_measured <= terminal_target + TERMINAL_APPROACH_MARGIN_M:
+                self._terminal_approach_active = True
             if terminal_measured < terminal_target - self.terminal_tolerance_m:
                 self._record_zero(now_s)
                 return self._finish(False, "terminal_distance_overshot",
                                     terminal_measured_m=terminal_measured,
                                     terminal_target_m=terminal_target)
+        elif not self._terminal_approach_active:
+            # Cruise while the distant wall is outside range. No timeout or
+            # stored distance is used to invent proximity to the corner.
+            terminal_target = None
+            terminal_measured = None
+            self._terminal_reference = None
+            self._terminal_lost_since_s = None
         else:
-            # A missing distance never grants permission to advance, including
-            # before the first detection. Wait at zero with a bounded timeout.
-            reason = ("terminal_wall_unconfirmed" if self.terminal_seen_at_s is None
-                      else "terminal_wall_lost")
+            # A real distance has established the near-corner approach. From
+            # here a lost wall must hold zero, never continue on a stale range.
+            reason = "terminal_wall_lost"
             if self._terminal_lost_since_s is None:
                 self._terminal_lost_since_s = now_s
             lost_for = now_s - self._terminal_lost_since_s
@@ -683,6 +696,7 @@ class FollowRightWall(WallAction):
             self._record_zero(now_s)
             fields["terminal_visible"] = False
             fields["terminal_seen"] = self.terminal_seen_at_s is not None
+            fields["terminal_approach_active"] = True
             fields["terminal_lost_for_s"] = lost_for
             return ActionOutcome(self.name, False, reason,
                                  dict(fields, command=Twist2D(0.0, 0.0)), waiting=True)
@@ -696,6 +710,7 @@ class FollowRightWall(WallAction):
         fields.update(control)
         fields["terminal_visible"] = self._terminal_visible
         fields["terminal_seen"] = self.terminal_seen_at_s is not None
+        fields["terminal_approach_active"] = self._terminal_approach_active
         fields["right_wall_rho_base_m"] = right.rho_base_m
         fields["right_wall_normal"] = right.normal_xy
         fields["right_wall_span_m"] = right.span_m

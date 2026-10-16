@@ -632,9 +632,9 @@ class ActionStateMachineTests(unittest.TestCase):
         outcome = action.step(snapshot_of(right, pillar, observed=0.98), now_s=1.0)
         self.assertFalse(outcome.done)
         self.assertFalse(outcome.fields.get("terminal_visible"))
-        # No valid front distance: hold, never drive blind past the stop point.
-        self.assertEqual(outcome.command.linear_x_m_s, 0.0)
-        self.assertEqual(outcome.reason, "terminal_wall_unconfirmed")
+        # A stub does not establish approach to the perimeter wall.
+        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+        self.assertFalse(outcome.fields["terminal_approach_active"])
 
     def test_the_right_wall_is_never_its_own_terminal(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
@@ -645,20 +645,35 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertFalse(outcome.done)
         self.assertFalse(outcome.fields.get("terminal_visible"))
 
-    def test_an_unconfirmed_front_wall_holds_zero_and_times_out(self):
+    def test_a_distant_unseen_front_wall_does_not_block_cruising_or_time_out(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.9,
                                  tracker=WallTracker())
         right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
         outcome = action.step(snapshot_of(right, observed=0.98), now_s=1.0)
         self.assertFalse(outcome.done)
-        self.assertEqual(outcome.reason, "terminal_wall_unconfirmed")
+        self.assertEqual(outcome.reason, "")
         self.assertFalse(outcome.fields["terminal_seen"])
-        self.assertEqual(outcome.command.linear_x_m_s, 0.0)
-        failed = action.step(snapshot_of(right, seq=99, observed=7.0), now_s=7.0)
-        self.assertTrue(action.finished)
-        self.assertFalse(failed.done)
-        self.assertEqual(failed.reason, "terminal_wall_unconfirmed")
+        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+        later = action.step(snapshot_of(right, seq=99, observed=7.0), now_s=7.0)
+        self.assertFalse(action.finished)
+        self.assertFalse(later.done)
+        self.assertEqual(later.reason, "")
+        self.assertGreater(later.command.linear_x_m_s, 0.0)
+
+    def test_a_far_wall_can_drop_out_then_reappear_closer_without_stopping_cruise(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.9)
+        right = make_wall(-math.pi / 2, 1.6)
+        far = action.step(snapshot_of(right, make_wall(0.0, 7.0), observed=1.0), now_s=1.05)
+        self.assertFalse(far.fields["terminal_approach_active"])
+        lost = action.step(snapshot_of(right, seq=2, observed=1.1), now_s=1.15)
+        self.assertGreater(lost.command.linear_x_m_s, 0.0)
+        near = action.step(snapshot_of(right, make_wall(0.0, 2.3), seq=3, observed=7.0), now_s=7.05)
+        self.assertTrue(near.fields["terminal_approach_active"])
+        missing = action.step(snapshot_of(right, seq=4, observed=7.1), now_s=7.15)
+        self.assertEqual(missing.command.linear_x_m_s, 0.0)
+        self.assertEqual(missing.reason, "terminal_wall_lost")
 
     def test_first_front_measurement_40cm_past_target_is_failure_not_a_corner(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
@@ -675,7 +690,7 @@ class ActionStateMachineTests(unittest.TestCase):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.895)
         right = make_wall(-math.pi / 2, 1.6)
-        first = action.step(snapshot_of(right, make_wall(0.0, 3.0), observed=1.0), now_s=1.05)
+        first = action.step(snapshot_of(right, make_wall(0.0, 2.4), observed=1.0), now_s=1.05)
         self.assertGreater(first.command.linear_x_m_s, 0.0)
         lost = action.step(snapshot_of(right, make_wall(0.0, 1.9), seq=2, observed=1.1), now_s=1.15)
         self.assertEqual(lost.reason, "terminal_wall_lost")
@@ -685,7 +700,7 @@ class ActionStateMachineTests(unittest.TestCase):
         # Once the terminal has been verified, losing it must not keep driving on
         # the last distance -- that distance cannot shrink as the chassis moves.
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
-                                 terminal_role=is_front_wall, terminal_target_m=0.5,
+                                 terminal_role=is_front_wall, terminal_target_m=1.5,
                                  tracker=WallTracker(), lost_timeout_s=5.0)
         right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
         front = wall((1.0, 0.0), 1.9, (1.9, 0.0), (-1.1, 0.0))

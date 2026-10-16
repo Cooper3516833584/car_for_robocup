@@ -268,7 +268,6 @@ def extract_lines(points: Sequence[tuple[float, float]], *, rng: random.Random,
         raise ValueError("invalid RANSAC counts")
 
     remaining = [(float(x), float(y)) for x, y in points]
-    consumed: set[int] = set()
     output: list[WallLine] = []
     for _ in range(max_models):
         if len(remaining) < min_points:
@@ -310,7 +309,10 @@ def extract_lines(points: Sequence[tuple[float, float]], *, rng: random.Random,
             if len(refined) < min_points:
                 break
             best_indices, fitted = refined, candidate
-        consumed |= set(best_indices)
+        # Indices belong to this round's shrinking point list. Reusing indices
+        # from earlier rounds discards unrelated points, including sparse far
+        # walls that should remain available for subsequent models.
+        consumed = set(best_indices)
         remaining = [point for index, point in enumerate(remaining) if index not in consumed]
         if fitted is None:
             continue

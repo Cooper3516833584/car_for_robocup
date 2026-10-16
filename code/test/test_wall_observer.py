@@ -184,6 +184,18 @@ class LineFittingTests(unittest.TestCase):
                for index in range(61)]
         self.assertEqual(extract_lines(arc, rng=rng, min_span_m=1.5, max_rms_m=0.01), ())
 
+    def test_sparse_front_wall_survives_removing_three_denser_walls(self):
+        points = ([(-3 + 8 * i / 89, -1.6) for i in range(90)]
+                  + [(-3 + 8 * i / 69, 1.2) for i in range(70)]
+                  + [(-3, -1.5 + 2.6 * i / 49) for i in range(50)]
+                  + [(5, -1.4 + 2.4 * i / 14) for i in range(15)])
+        for seed in range(3):
+            with self.subTest(seed=seed):
+                lines = extract_lines(points, rng=random.Random(seed))
+                front = [line for line in lines if line.normal_xy[0] > 0.9]
+                self.assertEqual(len(front), 1)
+                self.assertAlmostEqual(front[0].rho_base_m, 5.0, places=5)
+
     def test_w12_one_wall_only_is_still_a_usable_straight_section(self):
         lines = extract_lines(right_wall_points(1.9), rng=random.Random(23))
         self.assertEqual(len(lines), 1)
