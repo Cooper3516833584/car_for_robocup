@@ -157,7 +157,7 @@ class TaskBoardConfig:
     full_frame_fallback: bool = True
     enhanced_ocr_retry: bool = True
     required_consensus_votes: int = 3
-    maximum_frames: int = 10
+    maximum_frames: int = 3
     debug_directory: Path | None = None
 
     def __post_init__(self) -> None:
