@@ -68,18 +68,50 @@ class RectangularField:
         return result
 
     def observe(self, x, y, yaw, *, points_per_wall=45, span=3.0, jitter_m=0.004, rng=None):
-        """Generate base-frame points as the real D500 would report them."""
+        """Generate base-frame points as the real D500 would report them.
+
+        Each wall's *support* is its real extent, not a window centred on the
+        chassis. A support that slides along with the chassis would misreport
+        where the wall physically is, which matters because the terminal-wall
+        gate judges whether the opposite wall's support reaches the corner: with
+        a sliding support it is handed geometry that no real wall could produce.
+
+        The reported segment is the wall's own extent intersected with the
+        chassis' ``span`` observation window, so no wall is ever reported beyond
+        a corner and none is reported where it does not physically exist.
+        """
         rng = random.Random(0) if rng is None else rng
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+
+        def to_body(px, py):
+            dx, dy = px - x, py - y
+            return (cos_y * dx + sin_y * dy, -sin_y * dx + cos_y * dy)
+
+        hw, hl = self.half_width, self.half_length
+        # (wall normal, coordinate axis the wall runs along, that axis' limits,
+        # the wall's constant coordinate on the other axis).
+        walls = (
+            ((0.0, -1.0), 0, (-hl, hl), -hw),   # world right
+            ((0.0, 1.0), 0, (-hl, hl), hw),     # world left
+            ((1.0, 0.0), 1, (-hw, hw), hl),     # world front
+            ((-1.0, 0.0), 1, (-hw, hw), -hl),   # world rear
+        )
         points = []
-        for normal, rho in self.lines_in_body(x, y, yaw):
-            tangent = (-normal[1], normal[0])
-            centre = (normal[0] * rho, normal[1] * rho)
+        for normal_world, wall_axis, (axis_lo, axis_hi), constant in walls:
+            chassis_along = x if wall_axis == 0 else y
+            lo = max(axis_lo, chassis_along - span)
+            hi = min(axis_hi, chassis_along + span)
+            if hi - lo < 0.3:
+                continue
             for index in range(points_per_wall):
-                along = -span / 2 + span * index / (points_per_wall - 1)
-                px = centre[0] + along * tangent[0] + rng.gauss(0.0, jitter_m) * normal[0]
-                py = centre[1] + along * tangent[1] + rng.gauss(0.0, jitter_m) * normal[1]
-                points.append((px, py))
+                value = lo + (hi - lo) * index / (points_per_wall - 1)
+                px, py = ((value, constant) if wall_axis == 0
+                          else (constant, value))
+                bx, by = to_body(px, py)
+                normal_body = (cos_y * normal_world[0] + sin_y * normal_world[1],
+                               -sin_y * normal_world[0] + cos_y * normal_world[1])
+                points.append((bx + rng.gauss(0.0, jitter_m) * normal_body[0],
+                               by + rng.gauss(0.0, jitter_m) * normal_body[1]))
         return points
 
 
