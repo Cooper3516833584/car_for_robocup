@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from workspace_temp import WorkspaceTempDir
 sys.path.insert(0, str(ROOT / "code"))
 
 from components.basic_motion_controller import MotionActionState  # noqa: E402
@@ -339,7 +340,7 @@ class ClosedLoopMainSafetyTests(unittest.TestCase):
         runtime = self._Runtime()
         builder = (MagicMock(side_effect=build_error) if build_error is not None
                    else MagicMock(return_value=runtime))
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             config_path = Path(tmp) / "car.toml"
             shutil.copyfile(ROOT / "configs" / "robocup_diffdrive.example.toml", config_path)
             output = Path(tmp) / "run"

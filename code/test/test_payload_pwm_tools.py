@@ -8,13 +8,14 @@ from unittest.mock import Mock, patch, call
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from workspace_temp import WorkspaceTempDir
 from tools import setup_payload_pwm_permissions as permissions
 from tools import payload_servo_test as cli
 
 
 class PermissionTests(unittest.TestCase):
     def fixture(self, exported=True):
-        temporary = tempfile.TemporaryDirectory()
+        temporary = WorkspaceTempDir()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         self.chips = [root / ('pwmchip%d' % n) for n in (8, 2, 11, 15, 19, 18)]

@@ -212,12 +212,21 @@ class FollowCommandTests(unittest.TestCase):
         self.assertEqual(math.copysign(1, forward.angular_z_rad_s),
                          -math.copysign(1, reverse.angular_z_rad_s))
 
-    def test_a_terminal_distance_without_a_target_is_rejected(self):
+    def test_a_terminal_target_without_a_measurement_creeps_instead_of_failing(self):
+        # The terminal wall can drop out of view for a scan or two. That must
+        # bound the approach, not abort the leg: the caller keeps its last
+        # measured remaining as a conservative cap.
+        wall = make_wall(-math.pi / 2, 1.6)
+        command, fields = follow_command(wall, 1.6, +1, limits=LIMITS,
+                                        terminal_target_m=1.9)
+        self.assertLessEqual(abs(command.linear_x_m_s), 0.008 + 1e-12)
+        self.assertIsNone(fields["terminal_measured_m"])
+        self.assertFalse(fields["at_terminal"])
+
+    def test_a_terminal_measurement_without_a_target_is_rejected(self):
         wall = make_wall(-math.pi / 2, 1.6)
         with self.assertRaises(ValueError):
             follow_command(wall, 1.6, +1, limits=LIMITS, terminal_measured_m=1.7)
-        with self.assertRaises(ValueError):
-            follow_command(wall, 1.6, +1, limits=LIMITS, terminal_target_m=1.7)
 
     def test_an_invalid_direction_is_rejected(self):
         wall = make_wall(-math.pi / 2, 1.6)

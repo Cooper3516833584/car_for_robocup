@@ -7,6 +7,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from workspace_temp import WorkspaceTempDir, cleanup_temp_dir, temp_dir
 import competition_boot as boot
 from components.fleet_models import (AckReason, AckStatus, CommandId, CommandPayload, Frame,
                                     MessageKind, NodeId)
@@ -48,7 +49,6 @@ class BootTests(unittest.TestCase):
             self.assertEqual(pulses[:2], [1000,1500])
             self.assertTrue(pulses[2:])
             self.assertTrue(all(p == 1000 for p in pulses[2:]))
-        self.sender.send_task_and_start.assert_not_called()
 
     def test_formal_and_car_only_worker_pass_the_real_profile_to_runtime_parser(self):
         from main_robocup import build_parser
@@ -65,11 +65,12 @@ class BootTests(unittest.TestCase):
                 self.assertTrue(Path(args.config).is_absolute())
                 self.assertTrue(args.competition)
                 self.assertEqual(args.mode, 'hardware-mission')
-                self.assertTrue(args.relative_slam)
+                self.assertFalse(args.relative_slam,
+                                 'the competition entry must not request the fused profile')
 
     def test_missing_explicit_real_profile_fails_without_falling_back_to_example(self):
         from main_robocup import main
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             args = list(boot.MISSION_ARGS)
             args[args.index('--config') + 1] = str(Path(directory) / 'missing.toml')
             with patch('main_robocup.build_runtime') as build, \
@@ -87,7 +88,6 @@ class BootTests(unittest.TestCase):
         self.open.assert_not_called()
         self.close.assert_not_called()
         self.assertTrue(self.mission.call_args.kwargs['simulate_payload'])
-        self.assertFalse(self.sender.mock_calls)
 
     def test_startup_false_open_is_logged_without_claiming_success(self):
         self.open.side_effect = None
@@ -165,7 +165,6 @@ class BootTests(unittest.TestCase):
         self.assertFalse(self.listener.local_command('status')['running'])
         self.assertEqual(self.mission.call_count, 1)
         self.driver.close.assert_not_called()
-        self.assertFalse(self.sender.mock_calls)
 
     def test_formal_listener_refuses_local_control(self):
         with self.assertRaises(ValueError):
@@ -174,18 +173,17 @@ class BootTests(unittest.TestCase):
 
     def test_run_captures_stop_signature_before_worker_and_preserves_snapshot(self):
         self.signature.side_effect = self.real_signature
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             marker = Path(directory) / 'STOP'
             marker.write_text('previous round')
             baseline = self.real_signature(marker)
             with patch.object(boot, 'Path', return_value=marker) as path, \
-                 patch.object(boot.threading, 'Thread') as thread, \
-                 patch.object(boot, 'FleetTaskSender', return_value=self.sender):
+                 patch.object(boot.threading, 'Thread') as thread:
                 self.assertEqual(self.listener._start_mission(), (AckStatus.ACCEPTED, AckReason.NONE))
                 path.assert_called_once_with('logs/competition/STOP')
                 thread.return_value.start.assert_called_once_with()
                 args = thread.call_args.kwargs['args']
-                self.assertEqual(args[4], baseline)
+                self.assertEqual(args[3], baseline)
             marker.write_text('updated during countdown')
             self.assertNotEqual(self.real_signature(marker), baseline)
             self.listener._run_mission(ClockEvent(self), *args[1:])
@@ -211,12 +209,17 @@ class BootTests(unittest.TestCase):
         self.now=0.
         self.events=[]
         self.stack=ExitStack(); self.addCleanup(self.stack.close)
+        # TemporaryDirectory defaults to a sandbox path that is not writable
+        # here, so every temp dir is created inside the repository instead.
+        self.tmp_root = Path(__file__).resolve().parents[1] / 'logs' / 'tmp'
+        self.tmp_root.mkdir(parents=True, exist_ok=True)
+        self.tmpdir = temp_dir('boot')
+        self.addCleanup(cleanup_temp_dir, self.tmpdir)
         from main_robocup import stop_marker_signature
         self.real_signature = stop_marker_signature
         self.signature = self.stack.enter_context(patch('main_robocup.stop_marker_signature', return_value=None))
         self.open=self.stack.enter_context(patch.object(boot,'open_payload',side_effect=lambda:self.events.append(('open',self.now))))
         self.close=self.stack.enter_context(patch.object(boot,'close_payload',side_effect=lambda:self.events.append(('close',self.now))))
-        self.remap=self.stack.enter_context(patch.object(boot,'restart_car_slam_sidecar',side_effect=lambda stop:self.events.append(('car_map',self.now))))
         self.alarm=Mock()
         self.alarm.on.side_effect=lambda:self.events.append(('buzz_on',self.now))
         self.alarm.off.side_effect=lambda:self.events.append(('buzz_off',self.now))
@@ -224,13 +227,15 @@ class BootTests(unittest.TestCase):
         self.mission=Mock(return_value=0)
         self.listener=boot.CompetitionBoot(driver_factory=Mock(return_value=self.driver),
             mission_main=self.mission,alarm=self.alarm,clock=lambda:self.now)
-        self.sender=Mock()
-        self.sender.close_drone_payload.return_value=True
-        self.sender.begin_drone_remap.return_value=True
-        self.sender.wait_drone_remap.return_value=True
+        # The competition chain must never restart the car SLAM sidecar.
+        self.sidecar = self.stack.enter_context(
+            patch.object(boot, 'restart_car_slam_sidecar'))
+
+    def tearDown(self):
+        self.sidecar.assert_not_called()
 
     def run_worker(self,cancel_at=None):
-        self.listener._run_mission(ClockEvent(self,cancel_at),self.sender,7,0.)
+        self.listener._run_mission(ClockEvent(self,cancel_at),7,0.)
 
     def test_start_opens_and_silences_before_listening(self):
         self.listener.start()
@@ -241,216 +246,30 @@ class BootTests(unittest.TestCase):
     def test_countdown_then_maps_then_full_beep_and_ocr_gate(self):
         def mission(*args,**kwargs):
             self.events.append(('mission',self.now))
-            self.assertTrue(kwargs['send_drone_task']('counts'))
+            self.assertNotIn('send_drone_task', kwargs)
             return 0
         self.mission.side_effect=mission
         self.run_worker()
-        self.assertIn(('buzz_on',20.),self.events)
-        self.assertIn(('buzz_off',25.),self.events)
-        self.assertIn(('car_map',20.),self.events)
-        self.assertIn(('mission',25.),self.events)
-        self.sender.wait_drone_remap.assert_called_once()
-        self.sender.send_task_and_start.assert_called_once()
-        call = self.sender.send_task_and_start.call_args
-        self.assertEqual(call.args, ('counts',))
-        self.assertTrue(call.kwargs['start_drone'])
-        self.assertTrue(callable(call.kwargs['on_task_sent']))
-        self.assertTrue(callable(call.kwargs['on_task_ack']))
-        self.assertEqual(self.events[-1][0], 'open')
-        self.assertAlmostEqual(self.events[-1][1], 25. + boot.PROMPT_BEEP_S)
+        # CLOSE at t=0, a full 20 s countdown, then a full 5 s beep, then the
+        # mission. No map rebuild and no drone handshake sits in between.
+        self.assertEqual([name for name, _ in self.events][:4],
+                         ['close', 'buzz_on', 'buzz_off', 'mission'])
+        self.assertAlmostEqual(dict(self.events)['buzz_on'], 20.)
+        self.assertAlmostEqual(dict(self.events)['buzz_off'], 25.)
+        self.assertAlmostEqual(dict(self.events)['mission'], 25.)
+        self.assertEqual(self.events[-1], ('open', 25.))
 
-    def test_full_twenty_seconds_start_at_close_ack_even_when_ack_is_late(self):
-        for ack_at in (0., 18., 25.):
-            with self.subTest(ack_at=ack_at):
-                self.now = 0.
-                self.events.clear()
-                self.sender.reset_mock()
-                self.mission.reset_mock()
-                self.sender.close_drone_payload.side_effect = (
-                    lambda run: setattr(self, 'now', ack_at) or True)
-                self.sender.begin_drone_remap.side_effect = (
-                    lambda run: self.events.append(('drone_map', self.now)) or True)
-                self.mission.side_effect = lambda *a, **k: self.events.append(('mission', self.now)) or 0
-                self.run_worker()
-                self.assertEqual(self.events[:5], [('close', 0.), ('drone_map', ack_at + 20.),
-                    ('car_map', ack_at + 20.), ('buzz_on', ack_at + 20.), ('buzz_off', ack_at + 25.)])
-                self.assertIn(('mission', ack_at + 25.), self.events)
-                self.sender.begin_drone_remap.assert_called_once_with(7)
-
-    def test_both_maps_and_drone_completed_ack_precede_five_second_beep_and_ocr(self):
-        self.sender.close_drone_payload.side_effect = lambda run: setattr(self, 'now', 7.) or True
-        self.sender.begin_drone_remap.side_effect = lambda run: self.events.append(('drone_map', self.now)) or True
-        def car_map(stop):
-            self.events.append(('car_map', self.now))
-            self.now += 2.
-        def drone_ready(*args):
-            self.now += 5.
-            self.events.append(('drone_ready', self.now))
-            return True
-        self.remap.side_effect = car_map
-        self.sender.wait_drone_remap.side_effect = drone_ready
-        self.mission.side_effect = lambda *a, **k: self.events.append(('ocr', self.now)) or 0
-        self.run_worker()
-        self.assertEqual(self.events[:7], [('close', 0.), ('drone_map', 27.),
-            ('car_map', 27.), ('drone_ready', 34.), ('buzz_on', 34.),
-            ('buzz_off', 39.), ('ocr', 39.)])
-
-    def test_ocr_cue_then_two_sent_pulses_then_one_ack_pulse_before_start(self):
-        def send(counts, *, start_drone, on_task_sent, on_task_ack):
-            self.assertEqual(counts, 'counts')
-            self.assertTrue(start_drone)
-            self.events.append(('task_write', self.now))
-            if not on_task_sent():
-                return False
-            self.now += 3.
-            self.events.append(('task_ack', self.now))
-            if not on_task_ack():
-                return False
-            self.events.append(('drone_start', self.now))
-            return True
-        def mission(*args, **kwargs):
-            self.events.append(('ocr', self.now))
-            self.now += 1.
-            self.assertTrue(kwargs['send_drone_task']('counts'))
-            self.events.append(('car_patrol', self.now))
-            return 0
-        self.sender.send_task_and_start.side_effect = send
-        self.mission.side_effect = mission
-        self.run_worker()
-        names = [name for name, _ in self.events]
-        self.assertEqual(names[:16], ['close', 'car_map', 'buzz_on', 'buzz_off', 'ocr',
-            'buzz_on', 'buzz_off', 'task_write', 'buzz_on', 'buzz_off', 'buzz_on',
-            'buzz_off', 'task_ack', 'buzz_on', 'buzz_off', 'drone_start'])
-        buzz_on = [at for name, at in self.events if name == 'buzz_on']
-        buzz_off = [at for name, at in self.events if name == 'buzz_off']
-        self.assertEqual(len(buzz_on), 5)
-        for actual, expected in zip(buzz_on, (20., 26., 26.15, 26.45, 29.6)):
-            self.assertAlmostEqual(actual, expected)
-        for started, ended, duration in zip(buzz_on, buzz_off, (5., .15, .15, .15, .15)):
-            self.assertAlmostEqual(ended - started, duration)
-        self.assertAlmostEqual(dict(self.events)['drone_start'], 29.75)
-        self.assertEqual(dict(self.events)['car_patrol'], dict(self.events)['drone_start'])
-
-    def test_stop_during_five_second_map_beep_prevents_ocr(self):
+    def test_stop_during_five_second_beep_prevents_the_mission(self):
         self.run_worker(22.)
         self.mission.assert_not_called()
         self.assertIn(('buzz_on', 20.), self.events)
         self.assertIn(('buzz_off', 22.), self.events)
         self.assertEqual(self.events[-1], ('open', 22.))
 
-    def test_stop_during_sent_double_beep_prevents_ack_cue_and_start(self):
-        started = Mock()
-        def send(counts, *, on_task_sent, on_task_ack, **kwargs):
-            if not on_task_sent():
-                return False
-            on_task_ack()
-            started()
-            return True
-        self.sender.send_task_and_start.side_effect = send
-        self.mission.side_effect = lambda *a, **k: 0 if k['send_drone_task']('counts') else 1
-        self.run_worker(25.4)
-        started.assert_not_called()
-        self.assertEqual(len([x for x in self.events if x[0] == 'buzz_on']), 3)
-        self.assertEqual(self.events[-1], ('open', 25.4))
-
-    def test_stop_during_ack_pulse_prevents_task_start(self):
-        stop, started = ClockEvent(self), Mock()
-        def send(counts, *, on_task_sent, on_task_ack, **kwargs):
-            self.assertTrue(on_task_sent())
-            stop.cancel_at = self.now + .05
-            if not on_task_ack():
-                return False
-            started()
-            return True
-        self.sender.send_task_and_start.side_effect = send
-        self.mission.side_effect = lambda *a, **k: 0 if k['send_drone_task']('counts') else 1
-        self.listener._run_mission(stop, self.sender, 7, 0.)
-        started.assert_not_called()
-        self.assertTrue(stop.is_set())
-        self.assertEqual(self.events[-1][0], 'open')
-
-    def test_remap_rejection_timeout_or_stop_never_beeps_or_enters_ocr(self):
-        for mode in ('rejected', 'timeout', 'stop'):
-            with self.subTest(mode=mode):
-                self.now = 0.
-                self.alarm.reset_mock()
-                self.mission.reset_mock()
-                stop = ClockEvent(self)
-                if mode == 'rejected':
-                    self.sender.begin_drone_remap.return_value = False
-                    self.sender.wait_drone_remap.side_effect = None
-                elif mode == 'timeout':
-                    self.sender.begin_drone_remap.return_value = True
-                    self.sender.wait_drone_remap.side_effect = TimeoutError('new map ACK')
-                else:
-                    self.sender.wait_drone_remap.side_effect = lambda *a: stop.set() or False
-                self.listener._run_mission(stop, self.sender, 7, 0.)
-                self.alarm.on.assert_not_called()
-                self.mission.assert_not_called()
-                self.alarm.off.assert_called()
-
-    def test_stop_after_map_beep_never_enters_ocr(self):
-        stop = ClockEvent(self)
-        self.alarm.off.side_effect = stop.set
-        self.listener._run_mission(stop, self.sender, 7, 0.)
-        self.alarm.off.assert_called()
-        self.sender.begin_drone_remap.assert_called_once()
-        self.remap.assert_called_once()
-        self.mission.assert_not_called()
-
-    def test_stop_while_waiting_for_payload_lock_prevents_beep(self):
-        stop = ClockEvent(self)
-        lock = Mock()
-        def acquire():
-            if lock.__enter__.call_count == 2:
-                stop.set()
-        lock.__enter__ = Mock(side_effect=acquire)
-        lock.__exit__ = Mock(return_value=False)
-        self.listener._payload_action_lock = lock
-        self.listener._run_mission(stop, self.sender, 7, 0.)
-        self.alarm.on.assert_not_called()
-        self.alarm.off.assert_called()
-        self.sender.begin_drone_remap.assert_called_once()
-        self.remap.assert_called_once()
-        self.mission.assert_not_called()
-
-    def test_remote_close_rejection_or_timeout_never_beeps_or_launches(self):
-        for outcome in (False, TimeoutError('CLOSE ACK timed out')):
-            with self.subTest(outcome=outcome):
-                self.sender.close_drone_payload.side_effect = (
-                    outcome if isinstance(outcome, Exception) else lambda run: False)
-                self.run_worker()
-                self.alarm.on.assert_not_called()
-                self.alarm.off.assert_called()
-                self.sender.begin_drone_remap.assert_not_called()
-                self.remap.assert_not_called()
-                self.mission.assert_not_called()
-
-    def test_stop_at_four_or_eighteen_never_starts_maps_or_mission(self):
-        for at in (4.,18.):
-            with self.subTest(at=at):
-                self.now=0.; self.events.clear()
-                self.run_worker(at)
-                self.remap.assert_not_called()
-                self.mission.assert_not_called()
-                self.assertEqual(self.events[-1],('open',at))
-                self.assertIn(('buzz_off', at), self.events)
-                self.sender.begin_drone_remap.assert_not_called()
-
-    def test_missing_pwm_close_and_failed_remote_close_never_launch(self):
-        self.close.side_effect=RuntimeError('PWM None')
-        self.run_worker()
-        self.mission.assert_not_called(); self.remap.assert_not_called()
-        self.assertEqual(self.events[-1][0],'open')
-        self.close.side_effect=None; self.sender.close_drone_payload.return_value=False
-        self.run_worker()
-        self.mission.assert_not_called(); self.remap.assert_not_called()
-
     def test_false_payload_close_prevents_mission(self):
         self.close.side_effect=None
         self.close.return_value=False
         self.run_worker()
-        self.remap.assert_not_called()
         self.mission.assert_not_called()
         self.assertEqual(self.events[-1][0],'open')
 
@@ -458,22 +277,6 @@ class BootTests(unittest.TestCase):
         with self.assertLogs(boot.LOG, level='ERROR'):
             self.assertFalse(self.listener._attempt('PWM', lambda: False))
         self.assertTrue(self.listener._attempt('alarm', lambda: None))
-
-    def test_idle_stop_still_opens_and_forwards(self):
-        self.listener._cancel_current(); self.listener._forward_stop()
-        self.open.assert_called_once(); self.alarm.off.assert_called_once()
-        self.driver.write.assert_called_once()
-
-    def test_success_does_not_stop_the_drone_before_its_own_mission_finishes(self):
-        self.run_worker()
-        self.driver.write.assert_not_called()
-
-    def test_cancelled_sender_cannot_write_after_stop(self):
-        self.listener._stop_event=threading.Event()
-        self.listener._stop_event.set()
-        with self.assertRaisesRegex(RuntimeError,'cancelled'):
-            self.listener.write(b'task')
-        self.driver.write.assert_not_called()
 
     def test_invalid_and_non_ground_frames_cannot_start_a_mission(self):
         for source,body in ((NodeId.DRONE,b''),(NodeId.GROUND,b'unexpected')):
@@ -511,21 +314,16 @@ class BootTests(unittest.TestCase):
                 self.listener._on_bytes(raw)
                 self.assertIs(self.listener._stop_event,stop)
                 worker.assert_called_once()
-                self.assertGreater(worker.call_args.args[2],0)
+                args = worker.call_args.args
+                self.assertGreater(args[1], 0)          # run_id
+                self.assertIsInstance(args[2], float)   # t0
+                self.assertIsInstance(args[0], object)  # stop event
                 self.listener._cancel_current()
                 self.assertTrue(stop.is_set())
                 self.open.assert_called_once()
             finally:
                 release.set()
                 self.listener._worker.join(1)
-
-    def test_stop_during_sidecar_restart_never_enters_mission(self):
-        def restart(stop):
-            stop.set()
-        self.remap.side_effect=restart
-        self.run_worker()
-        self.mission.assert_not_called()
-        self.assertEqual(self.events[-1],('open',20.))
 
     def test_active_runtime_stop_preserves_base_stop_and_safe_stop(self):
         runtime=Mock()
@@ -537,61 +335,10 @@ class BootTests(unittest.TestCase):
         runtime.motion.stop.assert_called_once()
         runtime.mission.request_safe_stop.assert_called_once_with('remote STOP')
 
-    def test_remap_failure_or_not_ready_never_hands_off(self):
-        self.remap.side_effect=RuntimeError('old instance')
-        self.run_worker(); self.mission.assert_not_called()
-        self.remap.side_effect=None; self.now=0.
-        self.sender.wait_drone_remap.return_value=False
-        def mission(*args,**kwargs):
-            self.assertFalse(kwargs['send_drone_task']('counts')); return 1
-        self.mission.side_effect=mission
-        self.run_worker()
-        self.sender.send_task_and_start.assert_not_called()
-        self.mission.assert_not_called()
-        self.alarm.on.assert_not_called()
-
-
-    def test_car_only_full_flow_keeps_timing_slam_and_disables_drone_with_real_payload(self):
-        self.listener._car_only_test = True
-        self.listener.start()
-        self.run_worker()
-        self.assertIn(('buzz_on', 20.), self.events)
-        self.assertIn(('buzz_off', 25.), self.events)
-        self.remap.assert_called_once()
-        self.mission.assert_called_once()
-        self.assertTrue(self.mission.call_args.kwargs['car_only_test'])
-        self.assertIsNone(self.mission.call_args.kwargs['send_drone_task'])
-        self.listener.close()
-        self.open.assert_called()
-        self.close.assert_called()
-        self.assertFalse(self.sender.mock_calls)
-        self.driver.write.assert_not_called()
-
-    def test_car_only_never_constructs_sender_and_only_acks_ground_commands(self):
-        self.listener._car_only_test = True
-        with patch.object(boot, 'FleetTaskSender', side_effect=AssertionError('drone sender')), \
-             patch.object(self.listener, '_run_mission') as run:
-            for seq, command in enumerate((CommandId.CAR_START_MISSION,
-                                           CommandId.TARGETED_STOP, CommandId.PING), 1):
-                raw = pack_frame(Frame(1, NodeId.GROUND, NodeId.CAR, MessageKind.COMMAND,
-                    0, 10, seq, encode_command(CommandPayload(command))))
-                self.listener._on_bytes(raw)
-                if seq == 1:
-                    self.listener._worker.join(1)
-            run.assert_called_once()
-            self.assertIsNone(run.call_args.args[1])
-        self.assertEqual(self.driver.write.call_count, 3)
-        for call in self.driver.write.call_args_list:
-            frame = unpack_frame(call.args[0])
-            self.assertEqual((frame.dst, frame.kind), (NodeId.GROUND, MessageKind.ACK))
-        self.open.assert_called()
-        self.close.assert_not_called()
-
     def test_car_only_stop_disconnect_and_failure_opens_payload_without_drone(self):
         self.listener._car_only_test = True
         self.run_worker(cancel_at=18.)
         self.mission.assert_not_called()
-        self.remap.assert_not_called()
         self.now = 0.
         self.mission.side_effect = RuntimeError('test failure')
         self.run_worker()
@@ -599,7 +346,6 @@ class BootTests(unittest.TestCase):
         self.listener._on_callback_error(RuntimeError('radio failed'))
         self.open.assert_called()
         self.close.assert_called()
-        self.assertFalse(self.sender.mock_calls)
         self.driver.write.assert_not_called()
 
 

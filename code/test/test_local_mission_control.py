@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from workspace_temp import WorkspaceTempDir
 import car_full_flow_test as entry
 from components.local_mission_control import LocalMissionControl, request_local
 
@@ -42,7 +43,7 @@ class LocalEntryTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'posix' and hasattr(socket, 'AF_UNIX'), 'Unix socket integration runs on Linux')
 class LocalSocketTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = WorkspaceTempDir()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / 'control.sock'
         self.handler = Mock(side_effect=lambda action: dict(ok=True, action=action))

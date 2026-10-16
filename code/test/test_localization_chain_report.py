@@ -12,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from workspace_temp import WorkspaceTempDir
 sys.path.insert(0, str(ROOT / "code"))
 
 from tools import localization_chain_report as report  # noqa: E402
@@ -57,7 +58,7 @@ class LocalizationChainReportTests(unittest.TestCase):
         events += [_slam(float(t), first_tf=100.0, last_tf=100.0 + t, publish=t * 10, inputs=t * 12)
                    for t in range(1, 21)]
         events += [_fused(float(t), "ok", ("t265", "slam", "fused")) for t in range(0, 21)]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["verdict"]["tf_never_starved"], True)
         self.assertEqual(result["verdict"]["scan_publish_hz_ok"], True)
@@ -67,7 +68,7 @@ class LocalizationChainReportTests(unittest.TestCase):
     def test_design_rate_of_five_scans_per_second_is_healthy(self) -> None:
         events = [_slam(float(t), first_tf=100.0, last_tf=100.0 + t,
                         publish=t * 5, inputs=t * 10) for t in range(21)]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["scan_publish_hz"], 5.0)
         self.assertTrue(result["verdict"]["scan_publish_hz_ok"])
@@ -78,7 +79,7 @@ class LocalizationChainReportTests(unittest.TestCase):
         events = [_slam(float(t), first_tf=None, last_tf=None, publish=0,
                         no_window=t * 14, inputs=t * 14) for t in range(0, 21)]
         events += [_fused(float(t), "lost", ()) for t in range(0, 21)]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["verdict"]["tf_never_starved"], False)
         self.assertEqual(result["verdict"]["scan_publish_hz_ok"], False)
@@ -88,7 +89,7 @@ class LocalizationChainReportTests(unittest.TestCase):
         events = [_slam(0.0, first_tf=None, last_tf=None, publish=0),
                   _slam(1.0, first_tf=10.0, last_tf=11.0, publish=5),
                   _slam(2.0, first_tf=None, last_tf=None, publish=5)]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["tf_window"]["first_tf_stamp_s"]["first_non_null"], 10.0)
         self.assertEqual(result["tf_window"]["first_tf_stamp_s"]["null_after_first_non_null"], 1)
@@ -97,7 +98,7 @@ class LocalizationChainReportTests(unittest.TestCase):
     def test_watchdog_counters_are_reported(self) -> None:
         events = [_slam(0.0, first_tf=None, last_tf=None, publish=0),
                   _slam(5.0, first_tf=10.0, last_tf=15.0, publish=30, starved=2)]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["counters"]["tf_starved_force_count"]["delta"], 2)
         self.assertEqual(result["verdict"]["watchdog_fired"], True)
@@ -109,7 +110,7 @@ class LocalizationChainReportTests(unittest.TestCase):
         events += [_fused(float(t), "ok", ("t265", "slam", "fused")) for t in range(0, 6)]
         events += [_fused(6.5, "lost", ())]
         events += [_fused(float(t), "ok", ("t265", "slam", "fused")) for t in range(7, 10)]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["fused"]["longest_ok_s"], 5.0)
         self.assertEqual(result["verdict"]["stationary_preflight_ok"], False)
@@ -120,7 +121,7 @@ class LocalizationChainReportTests(unittest.TestCase):
         events = [_slam(0.0, first_tf=100.0, last_tf=100.0, publish=0),
                   _slam(1.0, first_tf=100.0, last_tf=100.0, publish=2),
                   _slam(2.0, first_tf=100.0, last_tf=100.0, publish=2, state="SLAM_FAILED")]
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), events))
         self.assertEqual(result["slam"]["failed_samples"], 1)
         self.assertEqual(result["slam"]["last_state"], "SLAM_FAILED")
@@ -128,12 +129,12 @@ class LocalizationChainReportTests(unittest.TestCase):
         self.assertEqual(result["verdict"]["tf_never_starved"], False)
 
     def test_missing_slam_status_is_reported_not_crashed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = report.summarize(_write_run(Path(tmp), [_fused(0.0, "lost", ())]))
         self.assertIn("no slam_status samples", result["note"])
 
     def test_main_prints_a_before_after_comparison(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             root = Path(tmp)
             before = _write_run(root / "before", [
                 _slam(0.0, first_tf=None, last_tf=None, publish=0, no_window=291)])
@@ -151,7 +152,7 @@ class LocalizationChainReportTests(unittest.TestCase):
         self.assertIn("291", text)
 
     def test_json_mode_is_machine_readable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             run = _write_run(Path(tmp), [_slam(0.0, first_tf=1.0, last_tf=2.0, publish=3)])
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):

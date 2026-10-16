@@ -10,6 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from workspace_temp import WorkspaceTempDir
 sys.path.insert(0, str(ROOT / "code"))
 
 from tools import c10b_telemetry_probe as probe  # noqa: E402
@@ -73,7 +74,7 @@ def _find(events: list[dict], kind: str, *, at: float | None = None) -> dict:
 
 class ClosedLoopAnalyzeTests(unittest.TestCase):
     def test_clean_run_reports_commanded_and_measured_motion(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = analyze.summarize(_write_run(Path(tmp)))
         self.assertEqual(result["action"], "drive-distance")
         self.assertAlmostEqual(result["commanded"]["integral_linear_m"], 0.5, places=3)
@@ -86,7 +87,7 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         self.assertEqual(result["validity"]["invalid_reasons"], [])
 
     def test_injected_pose_jump_and_innovation_are_reported(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = analyze.summarize(_write_run(Path(tmp), jump_at=40, innovation_m=0.21))
         self.assertGreater(result["fused_jumps"]["max_step_m"], 0.02)
         self.assertAlmostEqual(result["fused_jumps"]["max_step_at_s"], 12.0, places=1)
@@ -111,7 +112,7 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
                  "yaw_rad": -3.13, "tracker_confidence": 2},
             ])
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = analyze.summarize(_write_run(Path(tmp), mutate=mutate))
         self.assertEqual(result["slam_anchor_events"]["total"], 2)
         self.assertEqual(result["slam_anchor_events"]["accepted"], 1)
@@ -125,7 +126,7 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         def mutate(events: list[dict]) -> None:
             _find(events, "fused_pose", at=12.0)["x_m"] += 0.20
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = analyze.summarize(_write_run(Path(tmp), mutate=mutate))
         self.assertFalse(result["validity"]["action_valid"])
         self.assertTrue(any("jumped" in reason for reason in result["validity"]["invalid_reasons"]))
@@ -134,7 +135,7 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         def mutate(events: list[dict]) -> None:
             _find(events, "fused_pose", at=12.0)["source_flags"] = ["t265", "fused"]
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = analyze.summarize(_write_run(Path(tmp), mutate=mutate))
         self.assertFalse(result["validity"]["action_valid"])
         self.assertTrue(any("missing sources" in reason
@@ -144,13 +145,13 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         def mutate(events: list[dict]) -> None:
             _find(events, "fused_pose", at=12.0)["state"] = "lost"
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             result = analyze.summarize(_write_run(Path(tmp), mutate=mutate))
         self.assertFalse(result["validity"]["action_valid"])
         self.assertTrue(any("healthy set" in reason for reason in result["validity"]["invalid_reasons"]))
 
     def test_incomplete_run_without_motion_events_does_not_raise(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             run = Path(tmp) / "empty"
             run.mkdir()
             (run / "events.jsonl").write_text('{"t": 0.0, "type": "runtime_started"}\n', encoding="utf-8")
@@ -158,7 +159,7 @@ class ClosedLoopAnalyzeTests(unittest.TestCase):
         self.assertIn("note", result)
 
     def test_truncated_json_lines_are_skipped(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with WorkspaceTempDir() as tmp:
             run = _write_run(Path(tmp))
             with (run / "events.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write('{"t": 99.0, "type": "fused_pose"\n')

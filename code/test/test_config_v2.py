@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from workspace_temp import WorkspaceTempDir
 
 from config.relative_slam_profile import accepted_relative_slam_profile
 from config.v2_loader import DEFAULT_V2_CONFIG, load_v2_config
@@ -56,7 +57,7 @@ class ConfigV2Tests(unittest.TestCase):
         for old, new in replacements.items():
             self.assertIn(old, source)
             source = source.replace(old, new, 1)
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             path = Path(directory) / "profile.toml"
             path.write_text(source, encoding="utf-8")
             return load_v2_config(path)
@@ -101,7 +102,7 @@ class ConfigV2Tests(unittest.TestCase):
         self.assertEqual(constraints.max_angular_speed_rad_s, 0.35)
 
     def test_v1_profile_is_rejected_with_migration_instruction(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             path = Path(directory) / "v1.toml"
             path.write_text("schema_version = 1\n", encoding="utf-8")
             with self.assertRaisesRegex(ConfigV2Error, "schema-v2"):

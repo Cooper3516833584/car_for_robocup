@@ -9,6 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from workspace_temp import WorkspaceTempDir
 sys.path.insert(0, str(ROOT / "code"))
 
 from tools import motion_diag_snapshot, yaw_truth_analyze  # noqa: E402
@@ -24,7 +25,7 @@ class MotionDiagToolsTests(unittest.TestCase):
         self.assertFalse(payload["c10b_diff_firmware_verified"])
 
     def test_yaw_truth_aligns_adapter_fusion_and_external_csv(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+        with WorkspaceTempDir() as temporary:
             root = Path(temporary)
             events = root / "events.jsonl"
             truth = root / "truth.csv"

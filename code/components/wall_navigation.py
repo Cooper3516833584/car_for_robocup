@@ -199,30 +199,40 @@ def follow_command(right: WallLine, target_distance_m: float, direction: int, *,
     """
     if direction not in (-1, 1) or isinstance(direction, bool):
         raise ValueError("direction must be +1 or -1")
-    if (terminal_measured_m is None) != (terminal_target_m is None):
-        raise ValueError("terminal distance and target must be supplied together")
+    # A terminal target may be supplied with no measurement: the terminal wall
+    # can vanish for a scan or two, and the caller then keeps its last measured
+    # remaining distance as a conservative cap and creeps rather than stopping
+    # dead outside tolerance. Refusing that combination would turn a momentary
+    # dropout into a mission abort.
+    if terminal_target_m is None and terminal_measured_m is not None:
+        raise ValueError("terminal_measured_m requires terminal_target_m")
     planned_speed = limits.follow_speed_m_s if speed_cap_m_s is None else \
         min(limits.follow_speed_m_s, speed_cap_m_s)
     terminal_fields: dict = {}
     at_terminal = False
-    if terminal_measured_m is not None:
-        terminal_fields = {
-            "terminal_measured_m": terminal_measured_m,
-            "terminal_target_m": terminal_target_m,
-            "terminal_remaining_m": terminal_measured_m - terminal_target_m,
-        }
-        remaining = terminal_measured_m - terminal_target_m
-        if remaining <= terminal_tolerance_m:
-            at_terminal = True
+    if terminal_target_m is not None:
+        terminal_fields = {"terminal_target_m": terminal_target_m}
+        if terminal_measured_m is not None:
+            terminal_fields["terminal_measured_m"] = terminal_measured_m
+            terminal_fields["terminal_remaining_m"] = terminal_measured_m - terminal_target_m
+            remaining = terminal_measured_m - terminal_target_m
+            if remaining <= terminal_tolerance_m:
+                at_terminal = True
+            else:
+                brakable = braking_cap(terminal_measured_m, terminal_target_m, planned_speed,
+                                       deceleration_m_s2=limits.max_linear_accel_m_s2,
+                                       tolerance_m=terminal_tolerance_m)
+                # Never creep faster than the caller's cap, and never force an
+                # abrupt stop outside tolerance just because the braking curve
+                # rounds to zero.
+                planned_speed = min(max(brakable, min(terminal_creep_m_s, planned_speed)),
+                                    planned_speed)
         else:
-            brakable = braking_cap(terminal_measured_m, terminal_target_m, planned_speed,
-                                   deceleration_m_s2=limits.max_linear_accel_m_s2,
-                                   tolerance_m=terminal_tolerance_m)
-            # Never creep faster than the caller's cap, and never force an
-            # abrupt stop outside tolerance just because the braking curve
-            # rounds to zero.
-            planned_speed = min(max(brakable, min(terminal_creep_m_s, planned_speed)),
-                                planned_speed)
+            # Terminal wall momentarily out of view: bound the approach by the
+            # creep speed until a fresh distance is measured again.
+            terminal_fields["terminal_measured_m"] = None
+            terminal_fields["terminal_remaining_m"] = None
+            planned_speed = min(planned_speed, terminal_creep_m_s)
     if at_terminal:
         return Twist2D(0.0, 0.0), {"curvature": 0.0, "carrot_xy": (0.0, 0.0),
                                    "measured_base_m": right.rho_base_m,

@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from workspace_temp import WorkspaceTempDir
 from tools import run_ch3_drop_test as entry
 
 
@@ -53,7 +54,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         entry.open_payload.assert_called_once_with()
 
     def fixture(self, *, box=BOX, search_error=None, servo_ok=True):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = WorkspaceTempDir()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.weights = self.root / "weights.pt"

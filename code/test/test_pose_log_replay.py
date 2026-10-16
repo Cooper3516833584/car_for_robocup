@@ -8,6 +8,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from workspace_temp import WorkspaceTempDir
 
 from components.diagnostics_log import JsonlEventLogger
 from components.pose_fusion import PoseFusion
@@ -52,7 +53,7 @@ def synthetic_trajectory(path: Path) -> None:
 
 class PoseLogReplayTests(unittest.TestCase):
     def test_golden_synthetic_log_replays_fusion_and_rejects_outlier(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             path = Path(directory) / "golden.jsonl"
             synthetic_trajectory(path)
             events = read_pose_events(path)
@@ -71,7 +72,7 @@ class PoseLogReplayTests(unittest.TestCase):
         self.assertAlmostEqual(final.pose.y_m, 1.0, delta=0.10)
 
     def test_replay_uses_predicted_global_fallback_after_t265_dropout(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             path = Path(directory) / "fallback.jsonl"
             path.write_text(
                 '{"t":0.0,"type":"t265_pose","x_m":0,"y_m":0,"yaw_rad":0}\n'
@@ -90,7 +91,7 @@ class PoseLogReplayTests(unittest.TestCase):
         self.assertAlmostEqual(final.pose.x_m, 1.4)
 
     def test_runtime_replay_consumes_events_without_sensor_devices(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             path = Path(directory) / "replay.jsonl"
             path.write_text(
                 '{"t":0.0,"type":"t265_pose","x_m":0,"y_m":0,"yaw_rad":0}\n'
@@ -108,7 +109,7 @@ class PoseLogReplayTests(unittest.TestCase):
         self.assertGreaterEqual(results[-1].estimate.pose.x_m, 0.09)
 
     def test_async_jsonl_logger_writes_events(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             path = Path(directory) / "events.jsonl"
             logger = JsonlEventLogger(path, capacity=16)
             logger.emit({"t": 0.0, "type": "safety", "state": "safe_stop"}, priority=True)

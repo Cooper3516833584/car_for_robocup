@@ -10,6 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+from workspace_temp import WorkspaceTempDir
 sys.path.insert(0, str(ROOT / "code"))
 
 from components.c10b_diff_backend import FakeDriveBackend
@@ -124,7 +125,7 @@ class ManualAccuracyTests(unittest.TestCase):
             source.stop()
 
     def test_truth_is_independent_of_nominal_distance_and_yaw_unwraps(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.preflight_ok = True
@@ -142,7 +143,7 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertAlmostEqual(row["position_error_cm"], 0.0)
 
     def test_stale_anchor_invalidates_even_when_distance_matches(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.preflight_ok = True
@@ -161,7 +162,7 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertIn("not healthy", row["invalid_reasons"])
 
     def test_pivot_centre_drift_is_measured_as_position_error(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.preflight_ok = True
@@ -176,7 +177,7 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertAlmostEqual(row["position_error_cm"], 4.0)
 
     def test_angle_only_scores_signed_turn_without_inventing_position_truth(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.preflight_ok = True
@@ -212,7 +213,7 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertEqual(row["angle_truth_uncertainty_deg"], 2.0)
 
     def test_angle_only_uncertainty_prevents_false_pass(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.preflight_ok = True
@@ -231,7 +232,7 @@ class ManualAccuracyTests(unittest.TestCase):
             self.assertEqual(row["yaw_error_deg"], -2.5)
 
     def test_angle_only_rejects_non_pivot_and_invalid_uncertainty(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.preflight_ok = True
@@ -247,7 +248,7 @@ class ManualAccuracyTests(unittest.TestCase):
                 session.truth_angle(0.0, -1.0)
 
     def test_rectangle_closure_uses_its_own_start_pose(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with WorkspaceTempDir() as directory:
             session = AccuracySession(None, _Logger(), Path(directory))
             session.start_time_s = 0.0
             session.loop_start_snapshot = Snapshot(10.0, 2.0, 3.0, 0.0, 40)

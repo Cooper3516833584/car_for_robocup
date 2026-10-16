@@ -502,6 +502,7 @@ class WallObserver:
     def __init__(self, *, port: str = DEFAULT_D500_PORT, baudrate: int = DEFAULT_D500_BAUDRATE,
                  mount=None, clock: Callable[[], float] = time.monotonic,
                  max_age_s: float = MAX_AGE_S, seed: int | None = None,
+                 seed_source: Callable[[], int] | None = None,
                  assembler: RadarScanAssembler | None = None,
                  serial_driver=None, driver_factory=None) -> None:
         if not math.isfinite(max_age_s) or max_age_s <= 0:
@@ -513,7 +514,11 @@ class WallObserver:
         self.max_age_s = max_age_s
         self._assembler = assembler or RadarScanAssembler()
         self._clock_mapper = DeviceClockMapper(modulus_ms=D500_TIMESTAMP_MODULUS_MS)
-        self._rng = random.Random(seed)
+        # Production owns one RNG for the whole run. ``seed_source`` re-seeds per
+        # scan and exists so a simulated or replayed sequence is reproducible;
+        # the live path never uses it.
+        self._seed_source = seed_source
+        self._rng = random.Random(seed if seed_source is None else seed_source())
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._pending: tuple[int, RadarScan, float, float, float] | None = None
@@ -690,6 +695,8 @@ class WallObserver:
         error = None
         lines: tuple[WallLine, ...] = ()
         try:
+            if self._seed_source is not None:
+                self._rng = random.Random(self._seed_source())
             lines = extract_lines(sampled, rng=self._rng)
         except Exception as exc:
             error = f"extraction failed: {exc}"

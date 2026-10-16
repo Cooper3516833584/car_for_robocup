@@ -710,5 +710,146 @@ def wrap(angle):
     return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
+# ---------------------------------------------------------------------------
+# Task-board read and allocation, which the wall mission uses unchanged
+# ---------------------------------------------------------------------------
+
+class TaskBoardAndAllocationTests(unittest.TestCase):
+    @staticmethod
+    def stub_runtime(events):
+        """Minimal runtime: the reader only stops the drive and records events."""
+        return type('R', (), {
+            'drive': type('D', (), {'stop': lambda self: None})(),
+            'record_event': lambda self, name, **f: events.append(dict(type=name, **f)),
+        })()
+
+    def test_the_car_takes_every_rgb_item_plus_yellow_and_the_drone_gets_none(self):
+        counts, drone = task.split_task_allocation(TaskCounts(2, 1, 1))
+        self.assertEqual(counts, {'red': 2, 'blue': 1, 'green': 1})
+        self.assertEqual(drone.as_dict(), {'red': 0, 'blue': 0, 'green': 0})
+
+    def test_a_bad_board_shape_is_refused_before_any_motion(self):
+        for values in ((1, 1, 1), (3, 1, 1), (2, 2, 1), (0, 1, 1)):
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    task.split_task_allocation(TaskCounts(*values))
+
+    def test_three_failed_reads_fall_back_to_one_two_one_without_stopping(self):
+        events = []
+        runtime = self.stub_runtime(events)
+        reader = type('Reader', (), {'config': type('C', (), {'required_consensus_votes': 1})(),
+                                     'recognize_camera': lambda self, camera: None})()
+        counts = task.read_task_board(0, reader=reader, runtime=runtime)
+        self.assertEqual(counts.key, (1, 2, 1))
+        self.assertTrue(any(event.get('fallback') for event in events))
+
+    def test_a_valid_read_is_used_and_not_marked_as_a_fallback(self):
+        events = []
+        runtime = self.stub_runtime(events)
+        result = type('Result', (), {'valid': True, 'votes': 2, 'confidence': .9,
+                                     'counts': TaskCounts(1, 2, 1)})()
+        reader = type('Reader', (), {'config': type('C', (), {'required_consensus_votes': 1})(),
+                                     'recognize_camera': lambda self, camera: result})()
+        counts = task.read_task_board(0, reader=reader, runtime=runtime)
+        self.assertEqual(counts.key, (1, 2, 1))
+        self.assertTrue(events)
+        self.assertFalse(any(event.get('fallback') for event in events))
+
+    def test_an_invalid_quota_shape_falls_back_instead_of_stopping_the_run(self):
+        result = type('Result', (), {'valid': True, 'votes': 2, 'confidence': .9,
+                                     'counts': TaskCounts(2, 2, 0)})()
+        reader = type('Reader', (), {'config': type('C', (), {'required_consensus_votes': 1})(),
+                                     'recognize_camera': lambda self, camera: result})()
+        counts = task.read_task_board(0, reader=reader)
+        self.assertEqual(counts.key, (1, 2, 1))
+
+    def test_a_reader_exception_is_retried_then_falls_back(self):
+        attempts = []
+
+        def explode(self, camera):
+            attempts.append(camera)
+            raise RuntimeError('camera busy')
+
+        reader = type('Reader', (), {'config': type('C', (), {'required_consensus_votes': 1})(),
+                                     'recognize_camera': explode})()
+        counts = task.read_task_board(0, reader=reader)
+        self.assertEqual(counts.key, (1, 2, 1))
+        self.assertEqual(len(attempts), task.TASK_BOARD_MAX_TRIES)
+
+    def test_read_only_mode_raises_instead_of_inventing_counts(self):
+        reader = type('Reader', (), {'config': type('C', (), {'required_consensus_votes': 1})(),
+                                     'recognize_camera': lambda self, camera: None})()
+        with self.assertRaises(RuntimeError):
+            task.read_task_board(0, reader=reader, allow_fallback=False)
+
+
+# ---------------------------------------------------------------------------
+# Finish zone: the one parameter the operator may still have to measure
+# ---------------------------------------------------------------------------
+
+class FinishZoneTests(unittest.TestCase):
+    def limits(self):
+        return _limits()
+
+    def make(self, *, finish_m, mount_x=0.0):
+        from components.wall_navigation import FollowRightWall, WallTracker
+        return FollowRightWall, WallTracker
+
+    def tracker_with_right_wall(self, rho=1.69):
+        from components.wall_navigation import WallTracker
+        tracker = WallTracker()
+        tracker.set_reference(make_wall(-math.pi / 2, rho))
+        return tracker
+
+    def test_r10_a_supplied_finish_distance_parks_on_the_front_wall(self):
+        from components.wall_navigation import FollowRightWall, is_front_wall
+        with patch.object(task, "FINISH_FRONT_DISTANCE_M", 1.10):
+            target = finish_front_base(0.10)
+            self.assertAlmostEqual(target, 1.20, places=9)
+            action = FollowRightWall(target_distance_m=1.69, direction=+1,
+                                     limits=self.limits(),
+                                     tracker=self.tracker_with_right_wall(),
+                                     terminal_role=is_front_wall,
+                                     terminal_target_m=target)
+            self.assertTrue(action.terminal_role(make_wall(0.0, 1.25)))
+            self.assertFalse(action.terminal_role(make_wall(math.pi, 1.25)))
+            snapshot = WallSnapshot(scan_seq=1, scan_started_s=0.98,
+                                    scan_completed_s=1.02, observed_at_s=1.0,
+                                    lines=(make_wall(-math.pi / 2, 1.69),
+                                           make_wall(0.0, 1.21)), point_count=40)
+            outcome = action.step(snapshot, now_s=1.05)
+            self.assertTrue(outcome.done)
+            self.assertEqual(outcome.reason, "terminal_reached")
+            self.assertEqual(outcome.command.linear_x_m_s, 0.0)
+
+    def test_r09_a_missing_finish_distance_stops_at_the_corner_without_driving_on(self):
+        from components.wall_navigation import FollowRightWall
+        with patch.object(task, "FINISH_FRONT_DISTANCE_M", None):
+            self.assertIsNone(finish_front_base(0.0))
+            # Without a finish distance there is no front-wall terminal to build,
+            # so the approach would run forever; the caller must refuse instead.
+            action = FollowRightWall(target_distance_m=1.69, direction=+1,
+                                     limits=self.limits(),
+                                     tracker=self.tracker_with_right_wall(),
+                                     terminal_role=None, terminal_target_m=None)
+            self.assertIsNone(action.terminal_role)
+
+    def test_the_finish_decision_reports_a_partial_result(self):
+        result = task.MissionResult(route_done=True, parking_done=False,
+                                    commanded_release_slots=(4, 2, 3),
+                                    pending_slots=(), simulated=False,
+                                    reason="finish_parameter_missing")
+        self.assertTrue(result.route_done)
+        self.assertFalse(result.parking_done)
+        self.assertEqual(result.reason, "finish_parameter_missing")
+
+    def test_a_good_finish_reports_parking_done(self):
+        result = task.MissionResult(route_done=True, parking_done=True,
+                                    commanded_release_slots=(4, 2, 3, 1, 0),
+                                    pending_slots=(), reason="")
+        self.assertTrue(result.parking_done)
+        self.assertEqual(result.reason, "")
+
+
 if __name__ == '__main__':
     unittest.main()

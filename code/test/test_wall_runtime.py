@@ -262,7 +262,13 @@ class ClosedLoopLegTests(unittest.TestCase):
             command_timeout_s=config.drive.command_timeout_s,
             hardware_lock_path=None,
             clock=lambda: clock[0])
-        observer = WallObserver(clock=lambda: clock[0], serial_driver=None)
+        observer = WallObserver(
+            clock=lambda: clock[0], serial_driver=None,
+            # One reproducible extraction per simulated scan, mirroring how a
+            # real revolution differs from the previous one. Seeding the observer
+            # once instead would pin every scan to the same RANSAC stream, which
+            # is both unrealistic and needlessly fragile.
+            seed_source=lambda: int(clock[0] * 1000))
         runtime = WallRuntime(config, RuntimeMode.DRY_RUN, drive=drive, observer=observer,
                               clock=lambda: clock[0])
         runtime.start()
