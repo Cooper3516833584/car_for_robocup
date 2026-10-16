@@ -71,6 +71,15 @@ DROP_TERMINAL_SPEED_M_S = 0.012
 # is the allowed residual tilt; outside it the correction is proportional with a
 # gain that reaches the chassis angular limit at the edge of a 5 deg-plus band.
 DROP_HEADING_BAND_RAD = math.radians(5.0)
+# Success is judged slightly outside the dead band. If the two were equal, the
+# controller would stop correcting exactly at the edge and any residual just
+# beyond it would never be corrected again, so the move could sit one
+# thousandth of a degree from success forever. The extra half degree is the
+# settle margin, not a wider allowance: correction still starts at 5.0.
+DROP_HEADING_TOLERANCE_RAD = math.radians(5.5)
+# Extra room, in radians, added to a custom dead band so the tolerance always
+# sits strictly outside it.
+HEADING_SETTLE_MARGIN_RAD = math.radians(0.5)
 DROP_HEADING_GAIN = 1.5
 DROP_HEADING_SPEED_FLOOR = 0.4
 DROP_NORMAL_ANGLE_TOLERANCE_RAD = math.radians(35.0)
@@ -508,7 +517,7 @@ class WallAction:
             self.last_error_s = None
         return outcome
 
-    def _wait(self, now_s: float, reason: str) -> ActionOutcome:
+    def _wait(self, now_s: float, reason: str, **fields) -> ActionOutcome:
         # Stamp the start of the outage once; re-stamping every tick would mean
         # the lost-wall timeout could never elapse.
         if self.last_error_s is None:
@@ -516,7 +525,7 @@ class WallAction:
         self._record_zero(now_s)
         if now_s - self.last_error_s > self.lost_timeout_s:
             return self._finish(False, reason)
-        return ActionOutcome(self.name, False, reason, waiting=True)
+        return ActionOutcome(self.name, False, reason, dict(fields), waiting=True)
 
     def _tick(self, snapshot: WallSnapshot, now_s: float) -> ActionOutcome:  # pragma: no cover
         raise NotImplementedError
@@ -817,10 +826,13 @@ class MoveNormalToWall(WallAction):
                  tolerance_m: float = DROP_TOLERANCE_M,
                  heading_gain: float = DROP_HEADING_GAIN,
                  heading_band_rad: float = DROP_HEADING_BAND_RAD,
+                 heading_tolerance_rad: float | None = None,
+                 settle_margin_rad: float = HEADING_SETTLE_MARGIN_RAD,
                  desired_bearing_rad: float | None = None,
+                 lost_timeout_s: float = WALL_LOST_TIMEOUT_S,
                  clock: Callable[[], float] = time.monotonic,
                  max_age_s: float = 0.40) -> None:
-        super().__init__(clock=clock, max_age_s=max_age_s)
+        super().__init__(clock=clock, max_age_s=max_age_s, lost_timeout_s=lost_timeout_s)
         if direction not in (-1, 1) or isinstance(direction, bool):
             raise ValueError("direction must be +1 or -1")
         if not math.isfinite(target_distance_m) or target_distance_m <= 0:
@@ -840,6 +852,16 @@ class MoveNormalToWall(WallAction):
         self.tolerance_m = tolerance_m
         self.heading_gain = heading_gain
         self.heading_band_rad = heading_band_rad
+        # Success is judged a little outside the dead band. The two must not be
+        # equal: the controller stops correcting exactly at the band edge, so a
+        # residual that settles a nanoradian beyond it would never be corrected
+        # again and the move would wait forever just short of success.
+        self.heading_tolerance_rad = (max(heading_band_rad + settle_margin_rad,
+                                          DROP_HEADING_TOLERANCE_RAD)
+                                      if heading_tolerance_rad is None
+                                      else heading_tolerance_rad)
+        if self.heading_tolerance_rad < heading_band_rad:
+            raise ValueError("heading_tolerance_rad must not be below the dead band")
         # The heading this move holds: the reference wall keeps its bearing while
         # the chassis translates square to it.
         self.desired_bearing_rad = (reference_bearing_rad if desired_bearing_rad is None
@@ -875,13 +897,6 @@ class MoveNormalToWall(WallAction):
             # Not yet normal to the reference wall. Hold zero and let the shared
             # outage timeout bound it, instead of retrying forever.
             return self._wait(now_s, f"heading_not_normal ({exc})")
-        if abs(probe_speed) < 1e-9:
-            self._record_zero(now_s)
-            _, fields = normal_move_command(wall, self.target_distance_m, self.direction,
-                                            max_speed_m_s=self.max_speed_m_s,
-                                            tolerance_m=self.tolerance_m)
-            fields["speed_cap_m_s"] = self.max_speed_m_s
-            return self._finish(True, "distance_reached", **fields)
         # The remaining distance in METRES comes from the command's own report.
         # Comparing the returned speed (m/s) against terminal_range_m (m) would
         # put the whole 43/32 cm approach into the final 6 cm slow zone.
@@ -891,27 +906,63 @@ class MoveNormalToWall(WallAction):
         speed, fields = normal_move_command(wall, self.target_distance_m, self.direction,
                                             max_speed_m_s=cap, tolerance_m=self.tolerance_m)
         fields["speed_cap_m_s"] = cap
-        if abs(speed) < 1e-9:
-            self._record_zero(now_s)
-            return self._finish(True, "distance_reached", **fields)
+        reaching = abs(speed) < 1e-9
         # Hold the chassis square to the same wall while it translates. With the
         # chassis facing the reference wall, the wall normal is parallel to the
         # nose, so the angle between that wall and the radar's forward axis is
         # exactly ``90 deg - heading_error``. Inside the band the heading is good
-        # enough and the command is an exact zero; outside it the error is
+        # enough and the angular command is an exact zero; outside it the error is
         # corrected while the move continues, which is what makes the 43/32 cm
         # reach land squarely instead of carrying a tilt sideways.
         desired = (self.desired_bearing_rad if self.desired_bearing_rad is not None
                    else wall.bearing_rad)
-        heading_error = wrap_to_pi(wall.bearing_rad - desired)
-        omega = self.heading_command(heading_error)
+        heading_error = self._axis_error(wall)
         fields["desired_bearing_rad"] = desired
         fields["heading_error_rad"] = heading_error
         fields["heading_error_deg"] = math.degrees(heading_error)
-        fields["heading_within_band"] = abs(heading_error) <= self.heading_band_rad
+        fields["heading_band_deg"] = math.degrees(self.heading_band_rad)
+        square = abs(heading_error) <= self.heading_tolerance_rad
+        fields["heading_within_band"] = square
+        if reaching and square:
+            self._record_zero(now_s)
+            return self._finish(True, "distance_reached", **fields)
+        # Reaching the distance is not success on its own. A chassis that arrives
+        # 40 degrees off has the right perpendicular distance and the wrong
+        # orientation, and calling that done would abandon the correction the
+        # operator asked for. So the move keeps working the heading, in place,
+        # until it is square; the shared outage timeout bounds it if it cannot.
+        if reaching and not square:
+            omega = self.heading_command(heading_error)
+            fields["corrected_omega_rad_s"] = omega
+            fields["speed_cap_m_s"] = self.max_speed_m_s
+            fields["squaring_in_place"] = True
+            self._record_zero(now_s)
+            if self.last_error_s is None:
+                self.last_error_s = now_s
+            if now_s - self.last_error_s > self.lost_timeout_s:
+                return self._finish(False, "squaring_heading", **fields)
+            # Rotate in place: the distance is already met, so the only thing
+            # left is the orientation the operator asked for.
+            return ActionOutcome(self.name, False, "squaring_heading",
+                                 dict(fields, command=Twist2D(0.0, omega)),
+                                 waiting=True)
+        omega = self.heading_command(heading_error)
         fields["corrected_omega_rad_s"] = omega
         self._record_nonzero(now_s)
         return ActionOutcome(self.name, False, "", dict(fields, command=Twist2D(speed, omega)))
+
+    def _axis_error(self, line: WallLine) -> float:
+        """Heading error of ``line`` against the axis it was locked on at entry.
+
+        ``rho`` and the normal are both invariant under ``n -> -n``, so a wall
+        seen from the far side is indistinguishable in those terms and the
+        tracked bearing can flip by pi. Comparing against the storage axis of the
+        *entry* bearing keeps a 180 degree flip from reading as a 180 degree
+        heading error, without needing to know which side the wall is on.
+        """
+        storage = wrap_to_pi(self.reference_bearing_rad)
+        unwrapped = storage + wrap_to_pi(line.bearing_rad - storage)
+        return wrap_to_pi(unwrapped - self.desired_bearing_rad)
 
     def heading_command(self, heading_error_rad: float) -> float:
         """Angular command that holds the wall square, with a dead band.

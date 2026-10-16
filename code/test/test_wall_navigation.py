@@ -394,20 +394,26 @@ class DropHeadingBandTests(unittest.TestCase):
     """
 
     def action(self, *, direction=+1, target=2.03, bearing=REAR_BEARING_RAD,
-               band_deg=5.0, gain=1.5):
+               band_deg=5.0, gain=1.5, desired=None, lost_timeout=None,
+               tolerance_m=None):
         tracker = WallTracker()
         wall = make_wall(bearing, 1.6)
         tracker.set_reference(wall)
+        extra = {} if lost_timeout is None else {"lost_timeout_s": lost_timeout}
+        if tolerance_m is not None:
+            extra["tolerance_m"] = tolerance_m
         return MoveNormalToWall(target_distance_m=target, direction=direction,
                                 reference_bearing_rad=bearing, limits=LIMITS,
                                 tracker=tracker,
-                                desired_bearing_rad=REAR_BEARING_RAD,
+                                desired_bearing_rad=(bearing if desired is None
+                                                     else desired),
                                 heading_gain=gain,
                                 heading_band_rad=math.radians(band_deg),
-                                clock=lambda: 0.0)
+                                clock=lambda: 0.0, **extra)
 
     def command_at_tilt(self, tilt_deg, **kwargs):
         action = self.action(**kwargs)
+        # The wall sits ``tilt`` away from the heading the move is holding.
         bearing = REAR_BEARING_RAD + math.radians(tilt_deg)
         wall = make_wall(bearing, 1.6)
         snapshot = snapshot_of(wall, observed=1.0)
@@ -465,6 +471,74 @@ class DropHeadingBandTests(unittest.TestCase):
             self.action(gain=-1.0)
         with self.assertRaises(ValueError):
             self.action(band_deg=-1.0)
+
+    def test_reaching_the_distance_while_off_axis_is_not_success(self):
+        # The whole point of the band: arriving at the right perpendicular
+        # distance while badly rotated is not the finished move. The generous
+        # tolerance makes "the distance is already met" explicit rather than
+        # depending on the exact float comparison at the tolerance edge.
+        action = self.action(target=1.62, tolerance_m=0.05)
+        wall = make_wall(REAR_BEARING_RAD + math.radians(30.0), 1.6)
+        out = action.step(snapshot_of(wall, observed=1.0), now_s=1.05)
+        self.assertFalse(out.done)
+        self.assertTrue(out.waiting)
+        self.assertEqual(out.reason, "squaring_heading")
+        # It corrects in place rather than translating further.
+        self.assertEqual(out.command.linear_x_m_s, 0.0)
+        self.assertNotEqual(out.command.angular_z_rad_s, 0.0)
+
+    def test_success_needs_the_distance_and_a_square_chassis(self):
+        # Same distance, square chassis: now it is done.
+        action = self.action(target=1.62, tolerance_m=0.05)
+        wall = make_wall(REAR_BEARING_RAD, 1.6)
+        out = action.step(snapshot_of(wall, observed=1.0), now_s=1.05)
+        self.assertTrue(out.done)
+        self.assertEqual(out.reason, "distance_reached")
+
+    def test_the_tolerance_sits_outside_the_dead_band(self):
+        # If they were equal, the controller would stop correcting exactly at
+        # the edge and a residual just beyond it could never be resolved.
+        action = self.action(target=1.62, tolerance_m=0.05)
+        self.assertGreater(action.heading_tolerance_rad, action.heading_band_rad)
+        # A residual of exactly the band is accepted at the target distance...
+        within = action.step(snapshot_of(make_wall(REAR_BEARING_RAD + action.heading_band_rad,
+                                                   1.6), observed=1.0), now_s=1.05)
+        self.assertTrue(within.done)
+        # ...while the same residual away from the target keeps being corrected.
+        action2 = self.action()
+        just_out = action2.step(snapshot_of(
+            make_wall(REAR_BEARING_RAD + math.radians(5.2), 1.6), observed=1.0), now_s=1.05)
+        self.assertFalse(just_out.done)
+        self.assertGreater(abs(just_out.command.angular_z_rad_s), 0.0)
+
+    def test_squaring_in_place_is_bounded_by_the_outage_timeout(self):
+        # A chassis that cannot rotate must fail, not wait forever.
+        action = self.action(target=1.62, tolerance_m=0.05, lost_timeout=1.0)
+        wall = make_wall(REAR_BEARING_RAD + math.radians(30.0), 1.6)
+        first = action.step(snapshot_of(wall, observed=1.0), now_s=1.0)
+        self.assertEqual(first.reason, "squaring_heading")
+        final = action.step(snapshot_of(wall, seq=9, observed=3.0), now_s=3.0)
+        self.assertTrue(action.finished)
+        self.assertFalse(final.done)
+        self.assertEqual(final.reason, "squaring_heading")
+
+    def test_the_axis_unwrap_survives_a_stored_bearing_flip(self):
+        # rho and the normal are invariant under n -> -n, so the stored bearing
+        # of a rear wall may be reported on the +pi side. That is the same wall,
+        # not a 180 degree heading error.
+        # Both sides of the pi wrap describe the same physical wall.
+        for stored in (math.pi - math.radians(8.0), -math.pi + math.radians(8.0)):
+            with self.subTest(stored=stored):
+                action = self.action(bearing=stored, desired=stored, target=2.03)
+                action.reference_bearing_rad = stored
+                self.assertAlmostEqual(
+                    action._axis_error(make_wall(stored, 1.6)), 0.0, places=9)
+
+    def test_a_heading_error_of_pi_is_still_reported_as_pi(self):
+        action = self.action(bearing=REAR_BEARING_RAD, desired=REAR_BEARING_RAD)
+        action.reference_bearing_rad = REAR_BEARING_RAD
+        self.assertAlmostEqual(abs(action._axis_error(make_wall(0.0, 1.6))), math.pi,
+                               places=9)
 
     def test_both_move_directions_keep_the_same_heading_behaviour(self):
         # ``rho_dot = -n_x * v``: for a wall astern (n_x = -1) a forward move
