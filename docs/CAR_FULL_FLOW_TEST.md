@@ -1,15 +1,21 @@
 # 小车单机全流程测试
 
-自启动服务使用 `code/car_full_flow_test.py --listen`，由 `competition-boot.service` 运行。
-它使用真实底盘、视觉和两只 SG90，仅屏蔽无人机命令；上电先 OPEN 两只并监听地面站。
-收到地面站有效 RUN 或本机启动请求才 CLOSE 两只并开始任务，上电不会自行行驶。
+正式比赛（无人机协同）由 `competition-boot.service` 运行 `code/competition_boot.py`，
+即 `CompetitionBoot(car_only_test=False)`：真实底盘、视觉、四只 SG90，并且会向无人机
+发送 CLOSE / REMAP / 任务配额 / START（失败会 fail closed）。
+仅当服务使用 `code/car_full_flow_test.py --listen`（car-only 测试入口）时才屏蔽无人机命令；
+2026-10-16 之后仓库里的 unit 一律指向 `competition_boot.py` 并由
+`test_competition_boot.test_car_only_entry_always_selects_test_mode` 守住。
 
-## VS Code Remote SSH 无参数启动
+上电先 OPEN 四只并监听地面站；收到地面站有效 RUN 或本机启动请求才 CLOSE 并开始任务，
+上电不会自行行驶。所有无人机构建、串口和 ROS 交互细节见 `COMPETITION_TASK.md`。
 
-SSH 连接小车（2026-10-15 当前地址 `radxa@10.202.217.163`），打开
+## VS Code Remote SSH 无参数启动（car-only 测试入口）
+
+SSH 连接小车（2026-10-16 当前地址 `radxa@10.202.217.163`），打开
 `/home/radxa/car/code/car_full_flow_test.py`，直接点击 VS Code 的“运行 Python 文件”按钮，
-不填任何参数，即启动同一套完整流程。该启动入口只需 Python 标准库；实际任务仍由
-自启动服务在原 micromamba + vision_env 环境执行，不依赖 VS Code 选中的视觉/ROS 环境。
+不填任何参数，即请求自启动服务起一轮**本机 car-only** 任务：真实底盘/视觉/舵机，
+但按设计不向无人机发任何命令（事件记录 `hc_task_send_skipped`）。
 终端跟随任务日志，Ctrl+C 会请求 STOP。程序显示“任务已结束”只代表本轮工作线程退出，
 是否成功完成须看任务日志；完赛、停止或失败后均继续监听，可再次点击运行。
 
