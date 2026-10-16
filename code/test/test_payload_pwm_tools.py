@@ -17,7 +17,7 @@ class PermissionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        self.chips = [root / ('pwmchip%d' % n) for n in (8, 2, 11, 15, 18)]
+        self.chips = [root / ('pwmchip%d' % n) for n in (8, 2, 11, 15, 19, 18)]
         for chip in self.chips:
             chip.mkdir()
             for name in ('export', 'unexport'): (chip / name).write_text('')
@@ -38,12 +38,12 @@ class PermissionTests(unittest.TestCase):
                             ('duty_cycle', 'old duty'), ('polarity', 'normal')):
             (pwm / name).write_text(value)
 
-    def test_exact_five_nodes_and_permissions_without_setting_pwm(self):
+    def test_exact_six_nodes_and_permissions_without_setting_pwm(self):
         root = self.fixture()
         permissions.setup(root)
         self.assertEqual(self.resolve.call_args_list, [call(root, node) for node in
-            ('fd8b0000.pwm', 'fd8b0010.pwm', 'febe0030.pwm', 'febf0020.pwm', 'febd0030.pwm')])
-        self.assertEqual(self.chmod.call_count, 35)
+            ('fd8b0000.pwm', 'fd8b0010.pwm', 'febe0030.pwm', 'febf0020.pwm', 'febd0020.pwm', 'febd0030.pwm')])
+        self.assertEqual(self.chmod.call_count, 42)
         self.assertTrue(all(c.args == (0o777,) for c in self.chmod.call_args_list))
         for chip in self.chips:
             self.assertEqual((chip / 'export').read_text(), '')
@@ -69,8 +69,8 @@ class PermissionTests(unittest.TestCase):
         self.resolve.side_effect = [RuntimeError('missing overlay'), *self.chips[1:]]
         with self.assertRaisesRegex(RuntimeError, 'fd8b0000.pwm: missing overlay'):
             permissions.setup(root)
-        self.assertEqual(self.resolve.call_count, 5)
-        self.assertEqual(self.chmod.call_count, 28)
+        self.assertEqual(self.resolve.call_count, 6)
+        self.assertEqual(self.chmod.call_count, 35)
 
     def test_chmod_error_and_ineffective_chmod_are_failures(self):
         root = self.fixture()
@@ -118,11 +118,11 @@ class PayloadCLITests(unittest.TestCase):
     def test_actions_delegate_to_existing_component_and_hold_on_exit(self):
         with patch.object(cli, 'open_payload', return_value=True) as opened, \
              patch.object(cli, 'close_payload', return_value=True) as closed:
-            for slot in ('0', '1', '2', '3', 'all'): self.assertEqual(cli.main(['open', slot]), 0)
-            self.assertEqual(opened.call_args_list, [call(0), call(1), call(2), call(3), call(None)])
+            for slot in ('0', '1', '2', '3', '4', 'all'): self.assertEqual(cli.main(['open', slot]), 0)
+            self.assertEqual(opened.call_args_list, [call(0), call(1), call(2), call(3), call(4), call(None)])
             self.assertEqual(cli.main(['close', 'all']), 0)
             closed.assert_called_once_with()
-            self.assertEqual(opened.call_count, 5)  # no opposite command on normal exit
+            self.assertEqual(opened.call_count, 6)  # no opposite command on normal exit
 
     def test_false_exception_and_invalid_slot_are_failures(self):
         with patch.object(cli, 'open_payload', return_value=False): self.assertEqual(cli.main(['open', '0']), 1)
@@ -132,6 +132,18 @@ class PayloadCLITests(unittest.TestCase):
         opened.assert_called_once_with()
         with patch.object(cli, 'close_payload') as closed, self.assertRaises(SystemExit): cli.main(['close', '0'])
         closed.assert_not_called()
+        with patch.object(cli, 'open_payload') as opened, self.assertRaises(SystemExit):
+            cli.main(['open', '5'])
+        opened.assert_not_called()
+
+    def test_missing_pwm6_reports_node_and_still_checks_camera(self):
+        test = PermissionTests()
+        self.addCleanup(test.doCleanups)
+        root = test.fixture()
+        test.resolve.side_effect = [*test.chips[:4], RuntimeError('PWM6 overlay absent'), test.chips[5]]
+        with self.assertRaisesRegex(RuntimeError, 'febd0020.pwm: PWM6 overlay absent'):
+            permissions.setup(root)
+        self.assertEqual(test.resolve.call_args_list[-1], call(root, 'febd0030.pwm'))
 
 
 if __name__ == '__main__': unittest.main()

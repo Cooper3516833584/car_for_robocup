@@ -3,7 +3,7 @@
 
 Use --confirm-motor-test for motion, --simulate-release to explicitly suppress
 payload PWM, or --vision-preview for stationary camera evidence only.
-The historical filename is retained; slots are now 0 (yellow) and 1 (assigned).
+The historical filename is retained; slots are 0..4; slot 4 uses the right-mounted release at 32 cm.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 
 from competition_task import (perform_payload_detour, wait_for_fused_localization,
-                              DROP_SAFE_M, _open_yellow_camera)
+                              DROP_SAFE_M, RIGHT_MOUNT_DROP_M, RIGHT_MOUNT_SLOT, _open_yellow_camera)
 from components.diagnostics_log import JsonlEventLogger
 from components.payload_servos import close_payload, open_payload
 from components.servo_positioning import park_servo
@@ -58,8 +58,8 @@ def build_parser():
     parser.add_argument("--target-class-name", default="yellow")
     parser.add_argument("--drop-center-width-ratio", type=float, default=0.1,
                         help="horizontal trigger band, default middle 10%%; vertical position is unrestricted")
-    parser.add_argument("--payload-slot", type=int, choices=(0, 1), default=0,
-                        help="0=yellow, 1=assigned task-board colour")
+    parser.add_argument("--payload-slot", type=int, choices=(0, 1, 2, 3, 4), default=0,
+                        help="0=yellow; 1/2/3=standard assigned cargo; 4=right_mount at fixed 32 cm")
     parser.add_argument("--simulate-release", action="store_true", help="explicitly skip payload PWM")
     parser.add_argument("--search-distance-m", type=float, default=3.0,
                         help="forward distance along the current fused heading while searching")
@@ -79,7 +79,7 @@ def build_parser():
     parser.add_argument("--vision-preview", action="store_true",
                         help="stationary servo-0 snapshots only; no runtime, drive or payload PWM")
     parser.add_argument("--drop-safe-m", type=float, default=DROP_SAFE_M,
-                        help="measured safe fused travel from post-left-turn pivot")
+                        help="standard slots only: measured fused reach; slot 4 always uses 0.32 m")
     return parser
 
 
@@ -122,6 +122,8 @@ def vision_preview(args, parser):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.payload_slot == RIGHT_MOUNT_SLOT:
+        args.drop_safe_m = RIGHT_MOUNT_DROP_M
     if args.vision_preview:
         return vision_preview(args, parser)
     if not args.confirm_motor_test:

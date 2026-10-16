@@ -1,13 +1,13 @@
 # 小车单机全流程测试
 
 正式比赛（无人机协同）由 `competition-boot.service` 运行 `code/competition_boot.py`，
-即 `CompetitionBoot(car_only_test=False)`：真实底盘、视觉、四只 SG90，并且会向无人机
+即 `CompetitionBoot(car_only_test=False)`：真实底盘、视觉、五只 SG90，并且会向无人机
 发送 CLOSE / REMAP / 任务配额 / START（失败会 fail closed）。
 仅当服务使用 `code/car_full_flow_test.py --listen`（car-only 测试入口）时才屏蔽无人机命令；
 2026-10-16 之后仓库里的 unit 一律指向 `competition_boot.py` 并由
 `test_competition_boot.test_car_only_entry_always_selects_test_mode` 守住。
 
-上电先 OPEN 四只并监听地面站；收到地面站有效 RUN 或本机启动请求才 CLOSE 并开始任务，
+上电先 OPEN 五只并监听地面站；收到地面站有效 RUN 或本机启动请求才 CLOSE 并开始任务，
 上电不会自行行驶。所有无人机构建、串口和 ROS 交互细节见 `COMPETITION_TASK.md`。
 
 ## VS Code Remote SSH 无参数启动（car-only 测试入口）
@@ -69,9 +69,10 @@ HC-15 串口（`fleet_bus`），不使用 ROS 网络，因此不受影响。手�
 单机完整顺序：RUN → 物资 CLOSE（1500 μs）→ 完整计时 20 秒（不蜂鸣）
 → 重启并确认 SLAM 新实例 → 完整蜂鸣 5 秒 → 相机 +90° → 起点 OCR（三次失败用 1/2/1）
 → 等待融合定位 → 分配小车颜色 → 三边固定道路 → 任意先后识别黄色和分配色
-→ 道路精对齐、左转 90°、融合接近 43 cm、停车复测 → 只 OPEN 对应槽位（1000 μs）
-→ 保持 0.5 秒、原轴倒退、右转恢复、继续原道路 → 第三段末端停车 → 两只 OPEN，继续监听。
-STOP、定位丢失、超时、异常、信号退出均停车并 OPEN 两只，不会完赛后自动 CLOSE。
+→ 原画面中央10%即停车 → 同一投放组件：slot0～3 左90/43cm，slot4 左90/32cm/再左90
+→ 只 OPEN 对应槽位（1000 μs），保持 0.5 秒；slot4 保持结束后先右90回侧轴
+→ 原轴倒退、右转恢复、继续原道路 → 第三段末端停车 → 五只 OPEN，继续监听。
+STOP、定位丢失、超时、异常、信号退出均停车并 OPEN 五只，不会完赛后自动 CLOSE。
 
 单机入口不创建无人机发送器，不发送 CLOSE/REMAP/TASK/START/STOP，不等待无人机 ACK。
 正式模式则从无人机 CLOSE `COMPLETED` ACK 后开始计时 20 秒；两端重建图、无人机建图完成 ACK 后蜂鸣 5 秒，再进入 OCR。
@@ -88,10 +89,11 @@ HC-15 继续接收地面站 RUN/STOP/PING 并回复 ACK。
 目标缺失或不能稳定对齐时沿用跳过本次目标策略；PWM 不可用时中止真实投放任务。
 实际定位精度、外参、转弯空间、舵机脉宽与机构动作仍需现场验收。
 
-两只物资舵机接线、0777 权限预启动、overlay 和独立测试见 [PAYLOAD_SG90.md](PAYLOAD_SG90.md)。
+五只物资舵机接线、0777 权限预启动、overlay 和独立测试见 [PAYLOAD_SG90.md](PAYLOAD_SG90.md)。
 部署须 PC 提交推送后板端干净快进，安装更新 service 模板；重启监听立即操作舵机，
-由操作者确认现场机构可操作后执行。当前入口不改回正式比赛入口。
+由操作者确认现场机构可操作后执行。正式服务仍为 `competition_boot.py`，单机测试入口保持独立选择 car-only。
 
 比赛与监听使用已安装 RoboStack/micromamba 与 vision_env Python，保留原 ROS、T265、
-OCR、YOLO 导入检查。恢复空地协同时由操作者在 PC 修改 service 入口为
-`code/competition_boot.py`，提交推送、板端快进后重新安装服务。
+OCR、YOLO 导入检查。正式服务已使用 `code/competition_boot.py`；仅经操作者同意才部署或重启。
+本轮车载五件（四颜色目标），无人机只投隐含黄色一件，RGB 全零；TASK/START v3 必须双端同步。
+相机保持 Pin28/PWM7；slot4 独占 Pin27/PWM6，详见投放文档。

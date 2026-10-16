@@ -16,12 +16,13 @@ PERIOD_S = 0.05
 
 @dataclass(frozen=True)
 class DetourSettings:
-    payload_slot: int = 0  # 0: yellow; 1: single target; 2/3: double target.
+    payload_slot: int = 0  # 0: yellow; 1/4: singles; 2/3: double target.
     approach_m: float = 0.43
     release_hold_s: float = 0.5
     position_tolerance_m: float = 0.005
     patrol_slow_speed_m_s: float = 0.08
     payload_slots: tuple[int, ...] = ()
+    behavior: str = "standard"
 
     @property
     def release_slots(self):
@@ -29,11 +30,17 @@ class DetourSettings:
 
     def __post_init__(self):
         if (isinstance(self.payload_slot, bool) or not isinstance(self.payload_slot, int)
-                or self.payload_slot not in range(4)):
-            raise ValueError('payload cargo slot must be 0..3')
-        if (any(isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(4)
+                or self.payload_slot not in range(5)):
+            raise ValueError('payload cargo slot must be 0..4')
+        if (any(isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(5)
                 for slot in self.release_slots) or len(set(self.release_slots)) != len(self.release_slots)):
-            raise ValueError('payload cargo slots must be unique integers in 0..3')
+            raise ValueError('payload cargo slots must be unique integers in 0..4')
+        if self.behavior not in {"standard", "right_mount"}:
+            raise ValueError("unknown payload detour behavior")
+        if self.behavior == "right_mount" and self.release_slots != (4,):
+            raise ValueError("right_mount is reserved for slot 4 only")
+        if self.behavior == "standard" and 4 in self.release_slots:
+            raise ValueError("slot 4 requires right_mount without other slots")
         for name in ("approach_m", "release_hold_s", "position_tolerance_m",
                      "patrol_slow_speed_m_s"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
@@ -44,7 +51,9 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                        check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
                        travel_drive=None, fine_align=None, simulate_release=False,
                        on_release=None):
-    """Left90 at the centred stop, approach, release, return, restore road yaw.
+    """Left90, fused approach, release, reverse, restore road yaw.
+
+    Slot 4's right_mount adds left90 before release and right90 before reverse.
 
     Without ``fine_align`` the approach uses settings.approach_m. With it, the
     callback owns a fused side-axis approach and stopped distance verification.
@@ -85,22 +94,24 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             runtime.mission.on_payload_action_done()
         getattr(runtime.motion, method)(*args, **kwargs)
         runtime.record_event("payload_detour_stage_start", stage=label, args=args, kwargs=kwargs,
-                             pose_reference="fused")
+                             pose_reference="fused", behavior=settings.behavior)
         while True:
             check()
             result = _step(runtime)
+            fused_pose(result)  # Also fail closed if loss happens before the action's first tick.
             if _usable_pose(result) and on_tick is not None and on_tick(result.estimate.pose):
                 runtime.motion.stop()
                 runtime.drive.stop()
                 settled = _step(runtime)
                 runtime.record_event("payload_detour_stage_done", stage=label,
                                      pose=settled.estimate.pose, early_stop=True,
-                                     pose_reference="fused")
+                                     pose_reference="fused", behavior=settings.behavior)
                 return fused_pose(settled)
             if runtime.motion.state is MotionActionState.SUCCEEDED:
                 runtime.drive.stop()
                 runtime.record_event("payload_detour_stage_done", stage=label,
-                                     pose=result.estimate.pose, pose_reference="fused")
+                                     pose=result.estimate.pose, pose_reference="fused",
+                                     behavior=settings.behavior)
                 return fused_pose(result)
             if runtime.motion.state not in {MotionActionState.RUNNING, MotionActionState.POSE_LOST}:
                 raise RuntimeError(f"{label}: motion failed: {runtime.motion.state.value}")
@@ -112,14 +123,14 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             deadline = clock() + duration
             while clock() < deadline:
                 check()
-                _step(runtime)  # Motion cancelled: maintain zero output and live fusion.
+                fused_pose(_step(runtime))  # Stopped hold still requires live fusion.
                 sleep(min(PERIOD_S, max(0, deadline - clock())))
             check()
         except BaseException as exc:
             hold_failure = exc
             raise
 
-    def record_drop_pose(A, B, side_yaw):
+    def record_drop_pose(A, B, side_yaw, expected_yaw=None):
         check()
         result = _step(runtime)  # Motion cancelled: maintain zero output.
         pose = fused_pose(result)
@@ -127,11 +138,12 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         span = (B[0]-A[0])*ux + (B[1]-A[1])*uy
         raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
         cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
+        target_yaw = side_yaw if expected_yaw is None else expected_yaw
         runtime.record_event("payload_drop_pose", pose_reference="fused",
                              raw_progress_m=raw,cross_track_m=cross,
                              along_track_error_m=raw-span,
-                             yaw_error_rad=normalize_angle_rad(pose.yaw_rad-side_yaw),
-                             target_yaw_rad=side_yaw)
+                             yaw_error_rad=normalize_angle_rad(pose.yaw_rad-target_yaw),
+                             target_yaw_rad=target_yaw, behavior=settings.behavior)
 
     try:
         runtime.motion.navigation = replace(original, position_tolerance_m=min(
@@ -143,7 +155,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         road_yaw = road_pose.yaw_rad
         runtime.record_event("payload_detour_road_pose", pose=road_pose, pose_reference="fused")
         runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
-        side_yaw = road_yaw + math.pi / 2
+        side_yaw = normalize_angle_rad(road_yaw + math.pi / 2)
         side_pose = motion("left_90deg", "rotate_to", side_yaw)
         on_side_line = True
         A2 = (side_pose.x_m, side_pose.y_m)
@@ -160,16 +172,21 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             B2 = (final_pose.x_m, final_pose.y_m)
         runtime.motion.stop()
         runtime.drive.stop()
-        record_drop_pose(A2, B2, side_yaw)
+        release_yaw = side_yaw
+        if settings.behavior == "right_mount":
+            on_side_line = False
+            release_yaw = normalize_angle_rad(road_yaw + math.pi)
+            motion("right_mount_left_90deg", "rotate_to", release_yaw)
+        record_drop_pose(A2, B2, side_yaw, expected_yaw=release_yaw)
         for slot in settings.release_slots:
             check()
             if simulate_release:
                 runtime.record_event("payload_release_skipped", actuator="payload_servo",
-                                     slot=slot, cargo_count=1,
+                                     slot=slot, cargo_count=1, behavior=settings.behavior,
                                      reason="explicit payload simulation; physical output disabled")
             else:
                 runtime.record_event("payload_release_start", actuator="payload_servo",
-                                     slot=slot, cargo_count=1)
+                                     slot=slot, cargo_count=1, behavior=settings.behavior)
                 released = open_payload(slot)
                 if released is False:
                     raise RuntimeError('payload PWM command failed: returned False')
@@ -179,8 +196,12 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             if not simulate_release:
                 runtime.record_event("payload_release_done",
                                      actuator="payload_servo", cargo_count=1, slot=slot,
+                                     behavior=settings.behavior,
                                      reason="PWM command written; no mechanical feedback")
-        # Use the latest fusion after the release hold, then reverse along the
+        if settings.behavior == "right_mount":
+            motion("right_mount_right_90deg", "rotate_to", side_yaw)
+            on_side_line = True
+        # Use the latest fusion after the release hold/turn, then reverse along the
         # saved side axis. Even a small cross-track residual cannot turn this
         # into a diagonal path to the historical XY pivot.
         current = fused_pose(_step(runtime))
@@ -197,10 +218,11 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         on_side_line = False
         returned = motion("right_90deg", "rotate_to", road_yaw)
         runtime.record_event("payload_detour_done", actuator="dual_servo", pose=returned,
-                             pose_reference="fused")
+                             pose_reference="fused", behavior=settings.behavior)
         return returned
     except BaseException as exc:
-        runtime.record_event("payload_detour_failed", reason=f"{type(exc).__name__}: {exc}")
+        runtime.record_event("payload_detour_failed", reason=f"{type(exc).__name__}: {exc}",
+                             behavior=settings.behavior)
         runtime.mission.request_safe_stop(str(exc))
         raise
     finally:

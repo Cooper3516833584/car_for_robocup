@@ -22,6 +22,13 @@ def estimate(point):
 
 
 class Ch3DropTestEntryTests(unittest.TestCase):
+    def test_slot4_uses_existing_entry_fixed_32cm_and_camera_90(self):
+        self.fixture()
+        self.assertEqual(self.run_entry('--payload-slot', '4', '--drop-safe-m', '.51'), 0)
+        self.assertEqual(self.detour.call_args.kwargs['payload_slot'], 4)
+        self.assertEqual(self.detour.call_args.kwargs['safe_distance_m'], .32)
+        self.servo.set_angle.assert_called_once_with(90, settle=True)
+
     def test_real_single_target_uses_sg90_slot_and_opens_on_completion(self):
         self.fixture()
         self.assertEqual(self.run_entry('--payload-slot', '1'), 0)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stationary four SG90 test: open all/0/1/2/3 or close all; holds PWM on exit."""
+"""Stationary five SG90 test: open all/0/1/2/3/4 or close all; holds PWM on exit."""
 import argparse
 import logging
 from pathlib import Path
@@ -12,10 +12,10 @@ from components.payload_servos import open_payload, close_payload
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('open', 'close'))
-    parser.add_argument('slot', choices=('0', '1', '2', '3', 'all'))
+    parser.add_argument('slot', choices=('0', '1', '2', '3', '4', 'all'))
     args = parser.parse_args(argv)
     if args.action == 'close' and args.slot != 'all':
-        parser.error('close supports all; use open 0/1/2/3 for individual release')
+        parser.error('close supports all; use open 0/1/2/3/4 for individual release')
     logging.basicConfig(level=logging.INFO)
     try:
         ok = (close_payload() if args.action == 'close' else

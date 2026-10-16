@@ -16,8 +16,9 @@ class PayloadDropLog:
         self.task_id = self.started.strftime('%Y%m%d-%H%M%S-%f')
         self.path = self.directory / ('payload_' + self.task_id + '.txt')
         double = next(color for color, count in car_counts.items() if count == 2)
-        single = next(color for color, count in car_counts.items() if count == 1)
-        self.targets = (('yellow', (0,)), (double, (2, 3)), (single, (1,)))
+        singles = [color for color in ('red', 'blue', 'green') if car_counts[color] == 1]
+        self.targets = (('yellow', (0,)), (double, (2, 3)),
+                        (singles[0], (1,)), (singles[1], (4,)))
         self.counts = counts.as_dict()
         self.drone_counts = drone_counts.as_dict()
         self.actions = {}
@@ -25,7 +26,7 @@ class PayloadDropLog:
             stream.write(self._render())
 
     def record_release(self, slot, when):
-        if slot not in (0, 1, 2, 3):
+        if isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(5):
             raise ValueError('unknown payload slot')
         self.actions.setdefault(slot, when.astimezone().isoformat(sep=' ', timespec='milliseconds'))
         temporary = self.path.with_suffix('.tmp')

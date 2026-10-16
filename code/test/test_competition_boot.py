@@ -29,6 +29,27 @@ class ClockEvent:
 
 
 class BootTests(unittest.TestCase):
+    def test_listener_run_and_cleanup_command_all_five_real_payload_axes(self):
+        from components import payload_servos as payload
+        outputs = [Mock(is_running=False) for _ in range(5)]
+        for output in outputs:
+            output.start.side_effect = lambda output=output: setattr(output, 'is_running', True)
+        self.stack.enter_context(patch.object(payload, '_axes', [None]*5))
+        self.stack.enter_context(patch.object(payload, 'LinuxSysfsPWMOutput', side_effect=outputs))
+        self.open.side_effect = payload.open_payload
+        self.close.side_effect = payload.close_payload
+        self.listener._car_only_test = True
+        self.listener.start()
+        self.run_worker()
+        self.listener._cancel_current()
+        self.listener.close()
+        for output in outputs:
+            pulses = [c.args[0] for c in output.set_pulse_us.call_args_list]
+            self.assertEqual(pulses[:2], [1000,1500])
+            self.assertTrue(pulses[2:])
+            self.assertTrue(all(p == 1000 for p in pulses[2:]))
+        self.sender.send_task_and_start.assert_not_called()
+
     def test_formal_and_car_only_worker_pass_the_real_profile_to_runtime_parser(self):
         from main_robocup import build_parser
         expected = Path(boot.__file__).resolve().parents[1] / 'configs/robocup_diffdrive.toml'

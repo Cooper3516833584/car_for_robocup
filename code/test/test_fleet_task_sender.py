@@ -16,18 +16,30 @@ from components.fleet_protocol import decode_command, encode_ack, pack_frame, un
 
 
 class HandoffTests(unittest.TestCase):
-    counts = SimpleNamespace(red=0, blue=0, green=1)
+    counts = SimpleNamespace(red=0, blue=0, green=0)
 
-    def test_v2_single_quota_roundtrip_and_old_rule_rejection(self):
-        for counts in ((1,0,0),(0,1,0),(0,0,1)):
+    def test_start_id_bounds_without_dummy_rgb_task(self):
+        for task_id in (1, 42, 0xffffffff):
+            self.assertEqual(decode_drop_start(encode_drop_start(task_id)), task_id)
+        for task_id in (True, False, 0, -1, 0x100000000, 1.0, '1'):
+            with self.subTest(task_id=task_id), self.assertRaises(ValueError):
+                encode_drop_start(task_id)
+            with self.subTest(task_id=task_id), self.assertRaises(ValueError):
+                DropTask(task_id, 0, 0, 0)
+        for quotas in ((True,0,0), (0,0,1.), (1,0,0), (0,1,0), (0,0,1)):
+            with self.subTest(quotas=quotas), self.assertRaises(ValueError):
+                DropTask(42, *quotas)
+
+    def test_v3_zero_quota_roundtrip_and_old_rule_rejection(self):
+        for counts in ((0,0,0),):
             task = DropTask(42, *counts)
             self.assertEqual(decode_drop_task(encode_drop_task(task)), task)
-        self.assertEqual(encode_drop_task(task)[0], 2)
+        self.assertEqual(encode_drop_task(task)[0], 3)
         self.assertEqual(decode_drop_start(encode_drop_start(42)), 42)
-        for body in (struct.pack('<BI3B',1,42,1,0,0), struct.pack('<BI3B',2,42,2,0,1),
+        for body in (struct.pack('<BI3B',1,42,1,0,0), struct.pack('<BI3B',3,42,2,0,1), struct.pack('<BI3B',3,42,1,0,0),
                      struct.pack('<BI3B',2,42,0,0,0)):
             with self.assertRaises(ValueError): decode_drop_task(body)
-        with self.assertRaises(ValueError): decode_drop_start(struct.pack('<BI',1,42))
+        with self.assertRaises(ValueError): decode_drop_start(struct.pack('<BI',2,42))
 
     def make_sender(self, send, retries=1, stop_event=None):
         driver = Mock()
@@ -51,7 +63,7 @@ class HandoffTests(unittest.TestCase):
         sender = self.make_sender(send)
         self.assertTrue(sender.send_task_and_start(self.counts, task_id=42))
         tasks = [decode_command(unpack_frame(raw).payload) for raw in sent]
-        self.assertEqual(decode_drop_task(tasks[0].command_body), DropTask(42, 0, 0, 1))
+        self.assertEqual(decode_drop_task(tasks[0].command_body), DropTask(42, 0, 0, 0))
         self.assertEqual(decode_drop_start(tasks[1].command_body), 42)
         self.assertEqual([t.command_id for t in tasks], [CommandId.DRONE_SET_DROP_TASK, CommandId.DRONE_START_DROP_TASK])
         self.assertTrue(all(unpack_frame(raw).dst == NodeId.DRONE and unpack_frame(raw).src == NodeId.CAR for raw in sent))
@@ -206,7 +218,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
 
     def test_bad_counts_or_task_id_never_write(self):
-        for counts, task_id in ((SimpleNamespace(red=2, blue=1, green=1), 1), (self.counts, 0),
+        for counts, task_id in ((SimpleNamespace(red=2, blue=1, green=0), 1), (self.counts, 0),
                                 (SimpleNamespace(red=True, blue=1, green=2), 1)):
             send = Mock()
             with self.assertRaises(ValueError):

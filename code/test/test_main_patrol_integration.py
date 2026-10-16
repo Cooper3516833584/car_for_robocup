@@ -26,6 +26,25 @@ from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_con
 
 
 class MainPatrolIntegrationTests(unittest.TestCase):
+    def test_four_targets_five_releases_and_right_mount_resume_original_route(self):
+        self.vision.observe_colours.side_effect = lambda now: (
+            now, tuple((color, self.boxes()[0]) for color in ('green', 'red', 'yellow', 'blue')))
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual([c.args for c in self.open.call_args_list], [(1,), (4,), (2,), (3,), (0,)])
+        drops = [v for e, v in self.events if e == 'payload_drop' and v['detour_completed']]
+        self.assertEqual(len(drops), 4)
+        special = [v['stage'] for e, v in self.events if e == 'payload_detour_stage_start'
+                   and v['behavior'] == 'right_mount']
+        self.assertEqual(special, ['left_90deg', 'safe_side_approach', 'right_mount_left_90deg',
+                                   'right_mount_right_90deg', 'return_from_drop', 'right_90deg'])
+        for endpoints in (((0., 0.), (1.05, 0.)), ((1.05, 0.), (1.05, .85)),
+                           ((1.05, .85), (0., .85))):
+            self.assertTrue(any(c.args == endpoints for c in self.runtime.motion.track_global_line.call_args_list))
+        self.assertLess(math.dist(self.pose[:2], (0., .85)), .035)
+        self.servo.set_angle.assert_called_once_with(90, settle=True)
+        self.assertEqual(self.config.servo.chip_device_match, ('febd0030.pwm',))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+
     def setUp(self):
         self.stack = ExitStack()
         self.stack.enter_context(patch.object(task,"payload_configured",return_value=True))
@@ -132,7 +151,7 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.assertEqual(self.run_main(),0)
         self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
         self.assertEqual(self.runtime.mission.task_counts,self.counts)
-        self.send.assert_called_once_with(task.DroneAllocation(0,0,1),runtime=self.runtime)
+        self.send.assert_called_once_with(task.DroneAllocation(0,0,0),runtime=self.runtime)
         self.assertEqual(self.used_config.navigation.translation_speed_scale,2)
         self.assertEqual(self.used_config.drive.max_linear_accel_m_s2,self.config.drive.max_linear_accel_m_s2)
         kwargs=self.vision_factory.call_args.kwargs

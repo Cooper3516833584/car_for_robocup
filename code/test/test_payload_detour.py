@@ -21,6 +21,103 @@ CENTER_BOX = (290, 0, 350, 40, .9, 0)  # Horizontally centred, near the image to
 
 
 class PayloadDetourTests(unittest.TestCase):
+    def test_right_mount_turn_order_absolute_headings_and_fused_32cm_return(self):
+        self.fixture((1.2, -.4, math.radians(130)))
+        road_yaw = self.pose[2]
+        settings = DetourSettings(payload_slot=4, approach_m=.32, behavior='right_mount')
+        returned = self.run_detour(settings)
+        stages = [v for e, v in self.events if e == 'payload_detour_stage_start']
+        self.assertEqual([v['stage'] for v in stages], [
+            'left_90deg', 'forward_to_drop', 'right_mount_left_90deg',
+            'right_mount_right_90deg', 'reverse_from_drop', 'right_90deg'])
+        normalize = lambda yaw: math.atan2(math.sin(yaw), math.cos(yaw))
+        for index, yaw in ((0, road_yaw+math.pi/2), (2, road_yaw+math.pi),
+                           (3, road_yaw+math.pi/2), (5, road_yaw)):
+            self.assertAlmostEqual(stages[index]['args'][0], normalize(yaw))
+            actual = self.stage_poses[stages[index]['stage']].yaw_rad
+            self.assertLess(abs(normalize(actual-yaw)), .06)
+        A, B = stages[1]['args']
+        self.assertAlmostEqual(math.dist(A, B), .32)
+        back_start, back_end = stages[4]['args']
+        side_yaw = normalize(road_yaw+math.pi/2)
+        ux, uy = math.cos(side_yaw), math.sin(side_yaw)
+        self.assertAlmostEqual((back_end[0]-A[0])*ux+(back_end[1]-A[1])*uy, 0)
+        self.assertAlmostEqual((back_start[0]-back_end[0])*uy-(back_start[1]-back_end[1])*ux, 0)
+        self.assertTrue(stages[4]['kwargs']['reverse'])
+        self.open.assert_called_once_with(4)
+        order = [(e, v.get('stage'), v.get('slot')) for e, v in self.events]
+        release = order.index(('payload_release_start', None, 4))
+        self.assertLess(order.index(('payload_detour_stage_done', 'right_mount_left_90deg', None)), release)
+        self.assertLess(release, order.index(('payload_detour_stage_start', 'right_mount_right_90deg', None)))
+        drop = next(v for e, v in self.events if e == 'payload_drop_pose')
+        self.assertAlmostEqual(drop['target_yaw_rad'], normalize(road_yaw+math.pi))
+        self.assertLess(abs(drop['yaw_error_rad']), .06)
+        self.assertLess(math.dist((returned.x_m, returned.y_m), A), .03)
+        self.assertLess(abs(normalize(returned.yaw_rad-road_yaw)), .06)
+        self.assert_safe_exit()
+
+    def test_right_mount_turn_translation_uses_latest_projection_and_logs_real_residual(self):
+        self.fixture()
+        record = self.runtime.record_event
+        def inject(event, **values):
+            record(event, **values)
+            if event == 'payload_detour_stage_done' and values['stage'] in (
+                    'right_mount_left_90deg', 'right_mount_right_90deg'):
+                self.pose[0] += .02
+                self.pose[1] += .01
+        self.runtime.record_event = inject
+        returned = self.run_detour(DetourSettings(payload_slot=4, approach_m=.32, behavior='right_mount'))
+        drop = next(v for e, v in self.events if e == 'payload_drop_pose')
+        self.assertAlmostEqual(drop['cross_track_m'], -.02, delta=.003)
+        starts = {v['stage']: v for e, v in self.events if e == 'payload_detour_stage_start'}
+        A = starts['forward_to_drop']['args'][0]
+        B, inside = starts['reverse_from_drop']['args']
+        self.assertAlmostEqual(B[0], inside[0])
+        self.assertAlmostEqual(inside[1], A[1])
+        self.assertGreater(B[1]-A[1], .33)
+        self.assertGreater(returned.x_m-A[0], .03)
+        self.assert_safe_exit()
+
+    def test_right_mount_stop_or_pose_loss_at_added_turns_never_recovers_automatically(self):
+        for stage in ('right_mount_left_90deg', 'right_mount_right_90deg'):
+            for failure in ('STOP', 'pose'):
+                with self.subTest(stage=stage, failure=failure):
+                    self.fixture()
+                    def guard():
+                        if self.stage == stage:
+                            if failure == 'STOP':
+                                raise RuntimeError('STOP at mount turn')
+                            self.runtime.fusion.estimate = lambda now: FusedPoseEstimate(
+                                None, PoseFusionState.LOST, 0., (), None, None,
+                                None, None, True)
+                    with self.assertRaises(RuntimeError):
+                        self.run_detour(DetourSettings(payload_slot=4, approach_m=.32,
+                                                       behavior='right_mount'), guard=guard)
+                    normal = [c.args for c in self.open.call_args_list if c.args]
+                    self.assertEqual(normal, [] if stage == 'right_mount_left_90deg' else [(4,)])
+                    self.assertEqual(self.open.call_args.args, ())
+                    self.assertNotIn('reverse_from_drop', self.stage_poses)
+                    self.assertNotIn('right_90deg', self.stage_poses)
+                    self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+                    self.assert_safe_exit()
+
+    def test_right_mount_pwm_failure_stops_without_return_turn_or_reverse(self):
+        self.fixture()
+        self.open.side_effect = [RuntimeError('PWM6 failed'), True]
+        with self.assertRaisesRegex(RuntimeError, 'PWM6 failed'):
+            self.run_detour(DetourSettings(payload_slot=4, approach_m=.32, behavior='right_mount'))
+        starts = [v['stage'] for e, v in self.events if e == 'payload_detour_stage_start']
+        self.assertEqual(starts, ['left_90deg', 'forward_to_drop', 'right_mount_left_90deg'])
+        self.assertEqual([c.args for c in self.open.call_args_list], [(4,), ()])
+        self.assert_safe_exit()
+
+    def test_behavior_validation_rejects_unknown_or_mixed_mechanisms(self):
+        for behavior, slots in (('unknown', (0,)), ('right_mount', (0,)),
+                                 ('right_mount', (2,3)), ('right_mount', (4,0)),
+                                 ('standard', (4,)), ('standard', (1,4))):
+            with self.subTest(behavior=behavior, slots=slots), self.assertRaises(ValueError):
+                DetourSettings(payload_slots=slots, behavior=behavior)
+
     def test_double_target_releases_two_slots_during_one_detour(self):
         self.fixture()
         run_payload_detour(self.runtime, DetourSettings(payload_slots=(2, 3)),
@@ -510,7 +607,7 @@ class PayloadDetourTests(unittest.TestCase):
 
     def test_out_of_range_slot_is_rejected(self):
         with self.assertRaises(ValueError):
-            DetourSettings(payload_slot=4)
+            DetourSettings(payload_slot=5)
 
     def test_successful_detour_opens_the_dual_servo_once(self):
         self.fixture()

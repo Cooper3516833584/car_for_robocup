@@ -1,4 +1,4 @@
-"""Four payload SG90 axes, separate from the calibrated camera axis."""
+"""Five payload SG90 axes, separate from the calibrated camera axis."""
 import threading
 import logging
 import os
@@ -15,27 +15,30 @@ SERVO_3_PWM_NODE = "febe0030.pwm"  # PWM11_IR_M1, physical pin 15.
 SERVO_3_PWM_CHANNEL = 0
 SERVO_4_PWM_NODE = "febf0020.pwm"  # PWM14_M1, physical pin 13.
 SERVO_4_PWM_CHANNEL = 0
+SERVO_5_PWM_NODE = "febd0020.pwm"  # PWM6_M0, physical pin 27; NOT camera PWM7.
+SERVO_5_PWM_CHANNEL = 0
 OPEN_ANGLE = 0
 CLOSE_ANGLE = 90
 SG90_TRAVEL = ServoTravel(half_range_deg=90, pulse_min_us=1000, pulse_max_us=2000)
-_axes = [None, None, None, None]
+PAYLOAD_COUNT = 5
+_axes = [None] * PAYLOAD_COUNT
 _lock = threading.RLock()
 LOG = logging.getLogger(__name__)
-PAYLOAD_COUNT = 4
-# 0 = yellow; 1 = single-item target; 2/3 = two cargo for the double-item target.
+# 0 = yellow; 1/4 = single targets; 2/3 = double target; 4 uses right_mount.
 
 
 def _pins():
     return ((SERVO_1_PWM_NODE, SERVO_1_PWM_CHANNEL),
             (SERVO_2_PWM_NODE, SERVO_2_PWM_CHANNEL),
             (SERVO_3_PWM_NODE, SERVO_3_PWM_CHANNEL),
-            (SERVO_4_PWM_NODE, SERVO_4_PWM_CHANNEL))
+            (SERVO_4_PWM_NODE, SERVO_4_PWM_CHANNEL),
+            (SERVO_5_PWM_NODE, SERVO_5_PWM_CHANNEL))
 
 
 def payload_configured(slot=None) -> bool:
     pins = _pins()
     if slot is not None and (isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(PAYLOAD_COUNT)):
-        raise ValueError('payload slot must be 0..3')
+        raise ValueError('payload slot must be 0..4')
     with _lock:
         for index, (node, channel) in enumerate(pins):
             if slot is not None and index != slot:
@@ -64,7 +67,7 @@ def _command(angle, slot=None):
     complete = True
     with _lock:
         if slot is not None and (isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(PAYLOAD_COUNT)):
-            raise ValueError('payload slot must be 0..3')
+            raise ValueError('payload slot must be 0..4')
         pins = _pins()
         configured = [pin for pin in pins if all(value is not None for value in pin)]
         if len(set(configured)) != len(configured):

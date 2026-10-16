@@ -84,6 +84,8 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
 DROP_SAFE_M = 0.43       # Operator revised the blind drop reach, 2026-10-11.
+RIGHT_MOUNT_DROP_M = 0.32
+RIGHT_MOUNT_SLOT = 4
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
 DROP_TERMINAL_RANGE_M = 0.06
@@ -121,16 +123,11 @@ class DroneAllocation:
 
 
 def split_task_allocation(counts):
-    """CAR takes the double and first single color; drone takes the other single."""
+    """Car takes all RGB cargo plus yellow; drone carries implicit yellow only."""
     values = counts.as_dict()
     if sorted(values.values()) != [1, 1, 2]:
         raise ValueError('task board must contain one double-item and two single-item targets (2/1/1)')
-    double_color = next(color for color in ('red', 'blue', 'green') if values[color] == 2)
-    single_color = next(color for color in ('red', 'blue', 'green') if values[color] == 1)
-    car_counts = {double_color: 2, single_color: 1}
-    for color in car_counts:
-        values[color] = 0
-    return car_counts, DroneAllocation(**values)
+    return dict(values), DroneAllocation(red=0, blue=0, green=0)
 
 
 def wait_for_fused_localization(runtime):
@@ -656,11 +653,15 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
 def perform_payload_detour(runtime, *, servo=None, camera=None,
                            color=TARGET_COLOR, safe_distance_m=None, payload_slot=0,
                            simulate_release=False, payload_slots=(), on_release=None):
-    """Turn at the centred stop, side line, reverse, one inward turn."""
+    """Shared fused detour; slot 4 adds its mounting turns at the 32 cm end."""
     from payload_detour import DetourSettings, run_payload_detour
+    slots = tuple(payload_slots) or (payload_slot,)
+    right_mount = slots == (RIGHT_MOUNT_SLOT,)
     settings = DetourSettings(
-        payload_slot=payload_slot, payload_slots=tuple(payload_slots),
-        approach_m=DROP_SAFE_M if safe_distance_m is None else safe_distance_m,
+        payload_slot=payload_slot, payload_slots=slots,
+        approach_m=(RIGHT_MOUNT_DROP_M if right_mount else
+                    DROP_SAFE_M if safe_distance_m is None else safe_distance_m),
+        behavior="right_mount" if right_mount else "standard",
         release_hold_s=PAYLOAD_RELEASE_HOLD_S,
         patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
     if not simulate_release and not all(payload_configured(slot) for slot in settings.release_slots):
@@ -881,7 +882,8 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                              route_points_local=ROUTE_POINTS)
         runtime.mission.set_task_counts(counts)
         runtime.record_event('payload_target_assignment', car_allocation=car_counts, car_mandatory_yellow=1,
-                             car_target_required=3, drone_allocation=drone_counts.as_dict(),
+                             car_target_required=4, car_payload_count=5,
+                             drone_allocation=drone_counts.as_dict(),
                              drone_mandatory_yellow=1)
         def handoff():
             if car_only_test:
@@ -901,9 +903,10 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
         from target_patrol import YoloVision, EntryLatch
-        pending_payloads = {"yellow": (0,)}
-        pending_payloads.update({name: (2, 3) if count == 2 else (1,)
-                                 for name, count in car_counts.items()})
+        double_color = next(c for c in ("red", "blue", "green") if car_counts[c] == 2)
+        single_colors = [c for c in ("red", "blue", "green") if car_counts[c] == 1]
+        pending_payloads = {"yellow": (0,), double_color: (2, 3),
+                            single_colors[0]: (1,), single_colors[1]: (RIGHT_MOUNT_SLOT,)}
         latches = {name: EntryLatch() for name in pending_payloads}
         if detector is not None:
             vision = YoloVision(YELLOW_MODEL_PATH, yellow_camera, confidence=YELLOW_MIN_CONF,
