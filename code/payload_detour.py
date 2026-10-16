@@ -27,6 +27,8 @@ from components.wall_navigation import (
     REAR_BEARING_RAD,
     RIGHT_BEARING_RAD,
     WallActionLimits,
+    can_follow_wall,
+    can_move_normal,
     drop_turn,
 )
 from components.wall_observer import WallLine
@@ -175,13 +177,15 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.mission.on_payload_action_start()
 
         left = drop_turn(reference.bearing_rad, REAR_BEARING_RAD, limits=limits,
-                         tracker=tracker, turn_direction=1, clock=clock)
+                         tracker=tracker, turn_direction=1, clock=clock,
+                         handoff=lambda wall: can_move_normal(wall, REAR_BEARING_RAD, limits))
         if not run_action(left, "left_90deg"):
             raise RuntimeError("left_90deg did not complete")
 
         approach_target = d0 + settings.approach_m
         approach = MoveNormalToWall(target_distance_m=approach_target, direction=1,
                                     reference_bearing_rad=tracker.wall.bearing_rad,
+                                    desired_bearing_rad=REAR_BEARING_RAD,
                                     limits=limits, tracker=tracker, clock=clock)
         if not run_action(approach, "forward_to_drop"):
             raise RuntimeError("forward_to_drop did not complete")
@@ -220,7 +224,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
 
         if settings.behavior == "right_mount":
             back = drop_turn(tracker.wall.bearing_rad, REAR_BEARING_RAD, limits=limits,
-                             tracker=tracker, turn_direction=-1, clock=clock)
+                             tracker=tracker, turn_direction=-1, clock=clock,
+                             handoff=lambda wall: can_move_normal(wall, REAR_BEARING_RAD, limits))
             if not run_action(back, "right_mount_right_90deg"):
                 raise RuntimeError("right_mount_right_90deg did not complete")
 
@@ -229,6 +234,7 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             raise RuntimeError("reference wall lost before the return")
         ret = MoveNormalToWall(target_distance_m=d0, direction=-1,
                                reference_bearing_rad=return_wall.bearing_rad,
+                               desired_bearing_rad=REAR_BEARING_RAD,
                                limits=limits, tracker=tracker, clock=clock)
         if not run_action(ret, "return_from_drop"):
             raise RuntimeError("return_from_drop did not complete")
@@ -237,7 +243,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         if restore_wall is None:
             raise RuntimeError("reference wall lost before restoring the road heading")
         restore = drop_turn(restore_wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits,
-                            tracker=tracker, turn_direction=-1, clock=clock)
+                            tracker=tracker, turn_direction=-1, clock=clock,
+                            handoff=lambda wall: can_follow_wall(wall, d0, limits))
         if not run_action(restore, "right_90deg"):
             raise RuntimeError("right_90deg did not complete")
         runtime.mission.on_payload_action_done()

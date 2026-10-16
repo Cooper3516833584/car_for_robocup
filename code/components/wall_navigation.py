@@ -17,7 +17,7 @@ line -- so there is no global line, no ``Pose2D`` and no localization gate.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 import math
 import time
@@ -56,12 +56,6 @@ TERMINAL_TRACK_ANGLE_RAD = math.radians(30.0)
 # A terminal wall must also be a real wall, not a stub: below the observer's own
 # minimum supported length it cannot be the end of the field.
 MIN_TERMINAL_SPAN_M = MIN_SPAN_M
-# How long a terminal wall that was already verified may stay out of view before
-# the leg gives up, rather than driving on with a distance that cannot update.
-TERMINAL_LOST_TIMEOUT_S = 5.0
-# Require continuous terminal-wall measurements only once a real distance puts
-# the car within this approach band. A far wall may be outside lidar range.
-TERMINAL_APPROACH_MARGIN_M = 0.60
 TERMINAL_DISTINCT_LINES_M = 0.10
 DROP_TERMINAL_RANGE_M = 0.06
 DROP_FINE_SPEED_M_S = 0.05
@@ -70,18 +64,7 @@ DROP_TERMINAL_SPEED_M_S = 0.012
 # is the allowed residual tilt; outside it the correction is proportional with a
 # gain that reaches the chassis angular limit at the edge of a 5 deg-plus band.
 DROP_HEADING_BAND_RAD = math.radians(5.0)
-# Success is judged slightly outside the dead band. If the two were equal, the
-# controller would stop correcting exactly at the edge and any residual just
-# beyond it would never be corrected again, so the move could sit one
-# thousandth of a degree from success forever. The extra half degree is the
-# settle margin, not a wider allowance: correction still starts at 5.0.
-DROP_HEADING_TOLERANCE_RAD = math.radians(5.5)
-# Extra room, in radians, added to a custom dead band so the tolerance always
-# sits strictly outside it.
-HEADING_SETTLE_MARGIN_RAD = math.radians(0.5)
 DROP_HEADING_GAIN = 1.5
-DROP_HEADING_SPEED_FLOOR = 0.4
-DROP_NORMAL_ANGLE_TOLERANCE_RAD = math.radians(35.0)
 TERMINAL_CREEP_SPEED_M_S = 0.008
 
 # Cruise profile derived from the field config, matching the retired patrol
@@ -177,6 +160,34 @@ def _same_line(first: WallLine, second: WallLine) -> bool:
     return abs(first.rho_base_m - second.rho_base_m) <= TERMINAL_DISTINCT_LINES_M
 
 
+def _reframe_wall(line: WallLine, road_before: WallLine, road_after: WallLine) -> WallLine:
+    rotation = wrap_to_pi(road_after.bearing_rad - road_before.bearing_rad)
+    c, s = math.cos(rotation), math.sin(rotation)
+    shift = road_after.rho_base_m - road_before.rho_base_m
+    dx, dy = (shift * v for v in road_after.normal_xy)
+    def rotate(p):
+        return c * p[0] - s * p[1], s * p[0] + c * p[1]
+    normal = rotate(line.normal_xy)
+    def point(p):
+        x, y = rotate(p)
+        return x + dx, y + dy
+    return replace(line, normal_xy=normal,
+                   rho_base_m=line.rho_base_m + normal[0] * dx + normal[1] * dy,
+                   support_start_xy=point(line.support_start_xy),
+                   support_end_xy=point(line.support_end_xy))
+
+
+def _terminal_support_gap(road: WallLine, terminal: WallLine) -> float:
+    a, b = road.normal_xy
+    c, d = terminal.normal_xy
+    determinant = a * d - b * c
+    if abs(determinant) < 1e-9:
+        return math.inf
+    corner = ((road.rho_base_m * d - b * terminal.rho_base_m) / determinant,
+              (a * terminal.rho_base_m - road.rho_base_m * c) / determinant)
+    return terminal.distance_to_segment(corner)
+
+
 def wall_pure_pursuit(right: WallLine, target_distance_m: float, signed_speed_m_s: float,
                       lookahead_m: float) -> tuple[float, float]:
     """Directed-line Pure Pursuit on the instantaneous body-frame wall line.
@@ -241,17 +252,14 @@ def follow_command(right: WallLine, target_distance_m: float, direction: int, *,
     rear wall. Only its measured perpendicular distance and target are needed
     here, so the caller may keep its own reference identity for that wall.
 
-    Braking is a ``min()`` applied last, so the cruise speed floor can never
-    lift it. Inside the stop tolerance the command is exactly zero and the
-    action is asked to finish.
+    Braking is applied last, so the cruise floor cannot lift it. A crossed
+    target reverses along the road; only an absolute error inside tolerance
+    ends the leg.
     """
     if direction not in (-1, 1) or isinstance(direction, bool):
         raise ValueError("direction must be +1 or -1")
-    # A terminal target may be supplied with no measurement: the terminal wall
-    # can vanish for a scan or two, and the caller then keeps its last measured
-    # remaining distance as a conservative cap and creeps rather than stopping
-    # dead outside tolerance. Refusing that combination would turn a momentary
-    # dropout into a mission abort.
+    # No terminal measurement means ordinary right-wall following. An old range
+    # is association evidence only, never a current control measurement.
     if terminal_target_m is None and terminal_measured_m is not None:
         raise ValueError("terminal_measured_m requires terminal_target_m")
     planned_speed = limits.follow_speed_m_s if speed_cap_m_s is None else \
@@ -264,10 +272,14 @@ def follow_command(right: WallLine, target_distance_m: float, direction: int, *,
             terminal_fields["terminal_measured_m"] = terminal_measured_m
             terminal_fields["terminal_remaining_m"] = terminal_measured_m - terminal_target_m
             remaining = terminal_measured_m - terminal_target_m
-            if remaining <= terminal_tolerance_m:
+            if abs(remaining) <= terminal_tolerance_m:
                 at_terminal = True
             else:
-                brakable = braking_cap(terminal_measured_m, terminal_target_m, planned_speed,
+                # Recover a crossed stop line along the same right-wall path.
+                # ``direction`` still denotes the nominal leg (front or rear).
+                if remaining < 0.0:
+                    direction = -direction
+                brakable = braking_cap(abs(remaining), 0.0, planned_speed,
                                        deceleration_m_s2=limits.max_linear_accel_m_s2,
                                        tolerance_m=terminal_tolerance_m)
                 # Never creep faster than the caller's cap, and never force an
@@ -276,11 +288,8 @@ def follow_command(right: WallLine, target_distance_m: float, direction: int, *,
                 planned_speed = min(max(brakable, min(terminal_creep_m_s, planned_speed)),
                                     planned_speed)
         else:
-            # Terminal wall momentarily out of view: bound the approach by the
-            # creep speed until a fresh distance is measured again.
             terminal_fields["terminal_measured_m"] = None
             terminal_fields["terminal_remaining_m"] = None
-            planned_speed = min(planned_speed, terminal_creep_m_s)
     if at_terminal:
         return Twist2D(0.0, 0.0), {"curvature": 0.0, "carrot_xy": (0.0, 0.0),
                                    "measured_base_m": right.rho_base_m,
@@ -372,7 +381,6 @@ def normal_move_command(reference: WallLine, target_distance_m: float, direction
                         max_speed_m_s: float,
                         tolerance_m: float = DROP_TOLERANCE_M,
                         gain: float = 1.0,
-                        angle_tolerance_rad: float = DROP_NORMAL_ANGLE_TOLERANCE_RAD
                         ) -> tuple[float, dict]:
     """Signed speed toward a normal-distance target on one reference wall.
 
@@ -388,8 +396,8 @@ def normal_move_command(reference: WallLine, target_distance_m: float, direction
     if not math.isfinite(max_speed_m_s) or max_speed_m_s <= 0:
         raise ValueError("max_speed_m_s must be finite and positive")
     nx = reference.normal_xy[0]
-    if abs(nx) < math.cos(angle_tolerance_rad):
-        raise ValueError("chassis must first face normal to the reference wall")
+    if abs(nx) < 1e-6:
+        raise ValueError("reference wall has no longitudinal projection")
     error = reference.rho_base_m - target_distance_m
     travel = error / nx
     remaining = direction * travel
@@ -397,6 +405,37 @@ def normal_move_command(reference: WallLine, target_distance_m: float, direction
     return speed, {"measured_base_m": reference.rho_base_m, "target_base_m": target_distance_m,
                    "distance_error_m": error, "normal_x": nx,
                    "remaining_along_direction_m": remaining}
+
+
+def normal_heading_command(error: float, limits: WallActionLimits, *,
+                           band_rad: float = DROP_HEADING_BAND_RAD,
+                           gain: float = DROP_HEADING_GAIN) -> float:
+    if abs(error) <= band_rad:
+        return 0.0
+    outside = abs(error) - band_rad
+    return math.copysign(min(gain * outside, limits.max_angular_speed_rad_s,
+                            math.sqrt(2.0 * limits.max_angular_accel_rad_s2 * outside)), error)
+
+
+def can_follow_wall(wall: WallLine, target_m: float, limits: WallActionLimits) -> bool:
+    """Hand off a coarse turn when the existing moving controller is feasible."""
+    if not is_right_wall(wall):
+        return False
+    v, omega = wall_pure_pursuit(wall, target_m, limits.follow_speed_m_s, limits.lookahead_m)
+    nx, ny = wall.normal_xy
+    carrot_x = (wall.rho_base_m - target_m) * nx - limits.lookahead_m * ny
+    return (carrot_x > 0.0 and abs(omega) <= limits.max_angular_speed_rad_s
+            and abs(omega) * limits.track_width_m <= 1.8 * abs(v))
+
+
+def can_move_normal(wall: WallLine, desired_bearing_rad: float,
+                    limits: WallActionLimits) -> bool:
+    error = wrap_to_pi(wall.bearing_rad - desired_bearing_rad)
+    if math.cos(error) <= 0.0 or abs(wall.normal_xy[0]) < 1e-6:
+        return False
+    omega = normal_heading_command(error, limits)
+    speed = min(DROP_FINE_SPEED_M_S, limits.max_linear_speed_m_s)
+    return abs(omega) * limits.track_width_m <= 1.8 * speed
 
 
 @dataclass
@@ -558,7 +597,6 @@ class FollowRightWall(WallAction):
                  terminal_tolerance_m: float = CORNER_TOLERANCE_M,
                  terminal_creep_m_s: float = TERMINAL_CREEP_SPEED_M_S,
                  terminal_track_angle_rad: float = TERMINAL_TRACK_ANGLE_RAD,
-                 terminal_lost_timeout_s: float = TERMINAL_LOST_TIMEOUT_S,
                  lost_timeout_s: float = WALL_LOST_TIMEOUT_S,
                  clock: Callable[[], float] = time.monotonic,
                  max_age_s: float = 0.40) -> None:
@@ -569,6 +607,7 @@ class FollowRightWall(WallAction):
             raise ValueError("a terminal target requires a terminal wall predicate")
         self.target_distance_m = target_distance_m
         self.direction = direction
+        self._travel_direction = direction
         self.limits = limits
         self.speed_cap_m_s = speed_cap_m_s
         self.tracker = tracker if tracker is not None else WallTracker()
@@ -577,15 +616,14 @@ class FollowRightWall(WallAction):
         self.terminal_tolerance_m = terminal_tolerance_m
         self.terminal_creep_m_s = terminal_creep_m_s
         self.terminal_track_angle_rad = terminal_track_angle_rad
-        self.terminal_lost_timeout_s = terminal_lost_timeout_s
         # The verified terminal wall is handed to the mission layer so the corner
         # turn can reference the wall that was actually measured. Never a boolean.
         self.terminal_wall: WallLine | None = None
         self.terminal_seen_at_s: float | None = None
         self._terminal_reference: WallLine | None = None
         self._terminal_visible = False
-        self._terminal_lost_since_s: float | None = None
-        self._terminal_approach_active = False
+        self._terminal_reference_s: float | None = None
+        self._terminal_right: WallLine | None = None
         self._terminal_candidates: list[dict] = []
 
     def _pick_right(self, snapshot: WallSnapshot):
@@ -605,103 +643,102 @@ class FollowRightWall(WallAction):
                                   expected_bearing_rad=self.tracker.wall.bearing_rad,
                                   expected_distance_m=self.tracker.last_rho_m)
 
-    def _pick_terminal(self, snapshot: WallSnapshot, right: WallLine | None = None):
-        """Measure a long perpendicular wall even when its corner is occluded.
+    def inherit_terminal(self, previous: FollowRightWall, right_before: WallLine | None) -> None:
+        """Carry a leg's wall identity across a payload interruption, not its outcome.
 
-        The scan must fit a real long wall in the requested sector. Requiring
-        both supports to extend to their intersection can suppress this distance
-        while a corner is occluded. The field run first accepted a distance
-        40 cm past its stop position. Once in the measured approach band, a lost
-        distance must instead hold zero.
+        Re-express the prior using the same road wall's measured rotation and
+        normal displacement. Along-road detour drift is not observable from one
+        wall; the old range remains a prior, never a fresh range for control.
         """
+        reference = previous._terminal_reference
+        right_after = self.tracker.wall
+        if reference is None or right_before is None or right_after is None:
+            return
+        self._terminal_reference = _reframe_wall(reference, right_before, right_after)
+        self._terminal_right = right_after
+        self._terminal_reference_s = float(self.clock())
+        self.terminal_seen_at_s = previous.terminal_seen_at_s
+        self._travel_direction = previous._travel_direction
+
+    def _pick_terminal(self, snapshot: WallSnapshot, right: WallLine, now_s: float):
         if self.terminal_role is None:
             return None
-        candidates = [line for line in snapshot.lines if self.terminal_role(line)]
-        self._terminal_candidates = [dict(rho_base_m=line.rho_base_m,
-                                          bearing_rad=line.bearing_rad, span_m=line.span_m)
-                                     for line in candidates]
-        right = self.tracker.wall if right is None else right
-        if right is not None:
-            def usable_distance(line):
-                # Retain the measured length, sector and perpendicularity gates;
-                # a short pillar or the road wall cannot end the leg.
-                if line.span_m < MIN_TERMINAL_SPAN_M:
-                    return False
-                if _same_line(line, right):
-                    return False
-                if abs(line.normal_xy[0] * right.normal_xy[0]
-                       + line.normal_xy[1] * right.normal_xy[1]) > \
-                        math.sin(TERMINAL_ORTHOGONAL_TOLERANCE_RAD):
-                    return False
-                return True
-            candidates = [line for line in candidates if usable_distance(line)]
+        reference = self._terminal_reference
+        if reference is not None and self._terminal_right is not None:
+            reference = _reframe_wall(reference, self._terminal_right, right)
+            self._terminal_reference = reference
+        self._terminal_right = right
+        self._terminal_candidates = []
+        candidates = []
+        # The speed limit only bounds possible association displacement during a
+        # dropout. It does not integrate drive commands or invent a measurement.
+        elapsed = max(0.0, now_s - self._terminal_reference_s) \
+            if self._terminal_reference_s is not None else 0.0
+        distance_gate = self.tracker.distance_gate_m + self.limits.max_linear_speed_m_s * elapsed
+        for line in snapshot.lines:
+            if not self.terminal_role(line):
+                continue
+            reason = None
+            if line.span_m < MIN_TERMINAL_SPAN_M:
+                reason = "short_support"
+            elif _same_line(line, right):
+                reason = "road_wall"
+            elif abs(sum(a * b for a, b in zip(line.normal_xy, right.normal_xy))) > \
+                    math.sin(TERMINAL_ORTHOGONAL_TOLERANCE_RAD):
+                reason = "not_perpendicular_to_road"
+            elif reference is not None and abs(wrap_to_pi(line.bearing_rad - reference.bearing_rad)) > \
+                    self.terminal_track_angle_rad:
+                reason = "different_wall_direction"
+            elif reference is not None and abs(line.rho_base_m - reference.rho_base_m) > distance_gate:
+                reason = "different_wall_distance"
+            gap = _terminal_support_gap(right, line)
+            detail = dict(rho_base_m=line.rho_base_m, bearing_rad=line.bearing_rad,
+                          span_m=line.span_m, inlier_count=line.inlier_count, rms_m=line.rms_m,
+                          support_start_xy=line.support_start_xy, support_end_xy=line.support_end_xy,
+                          corner_support_gap_m=gap if math.isfinite(gap) else None,
+                          rejection_reason=reason, selected=False)
+            self._terminal_candidates.append(detail)
+            if reason is None:
+                # Continuity is the primary choice once a perimeter wall is
+                # known. Initial selection favours supported enclosure geometry
+                # and long walls, never simply the closest front-facing object.
+                score = ((abs(line.rho_base_m - reference.rho_base_m),
+                          abs(wrap_to_pi(line.bearing_rad - reference.bearing_rad)))
+                         if reference is not None else (gap / line.span_m, -line.span_m))
+                candidates.append((score, line, detail))
         if not candidates:
             return None
-        if self._terminal_reference is not None:
-            reference = self._terminal_reference
-            continuous = [line for line in candidates
-                          if abs(wrap_to_pi(line.bearing_rad - reference.bearing_rad))
-                          <= self.terminal_track_angle_rad
-                          and abs(line.rho_base_m - reference.rho_base_m)
-                          <= self.tracker.distance_gate_m]
-            if not continuous:
-                return None
-            chosen = min(continuous, key=lambda line: abs(line.rho_base_m - reference.rho_base_m))
-        else:
-            chosen = min(candidates, key=lambda line: line.rho_base_m)
+        _, chosen, detail = min(candidates, key=lambda item: item[0])
+        detail["selected"] = True
         self._terminal_reference = chosen
+        self._terminal_reference_s = now_s
         return chosen
 
     def _tick(self, snapshot: WallSnapshot, now_s: float) -> ActionOutcome:
         right = self._pick_right(snapshot)
         if right is None:
             return self._wait(now_s, "right_wall_not_visible")
-        terminal = self._pick_terminal(snapshot) if self.terminal_role is not None else None
+        terminal = self._pick_terminal(snapshot, right, now_s) if self.terminal_role is not None else None
         self._terminal_visible = terminal is not None
-        fields: dict = {"terminal_candidates": self._terminal_candidates}
-        if self.terminal_role is None:
-            # No terminal for this leg: plain wall following.
-            terminal_target = None
-            terminal_measured = None
-        elif terminal is not None:
-            # A fresh measurement of the specified terminal wall.
+        fields: dict = {"terminal_candidates": self._terminal_candidates,
+                        "scan_seq": snapshot.scan_seq, "scan_point_count": snapshot.point_count,
+                        "terminal_selection_reason": ("selected" if terminal is not None else
+                            "no_compatible_terminal" if self._terminal_candidates else "no_terminal_model")}
+        terminal_target = self.terminal_target_m
+        terminal_measured = None
+        if terminal is not None:
             self.terminal_wall = terminal
             self.terminal_seen_at_s = now_s
-            self._terminal_lost_since_s = None
-            terminal_target = self.terminal_target_m
             terminal_measured = terminal.rho_base_m
-            if terminal_measured <= terminal_target + TERMINAL_APPROACH_MARGIN_M:
-                self._terminal_approach_active = True
-            if terminal_measured < terminal_target - self.terminal_tolerance_m:
-                self._record_zero(now_s)
-                return self._finish(False, "terminal_distance_overshot",
-                                    terminal_measured_m=terminal_measured,
-                                    terminal_target_m=terminal_target)
-        elif not self._terminal_approach_active:
-            # Cruise while the distant wall is outside range. No timeout or
-            # stored distance is used to invent proximity to the corner.
-            terminal_target = None
-            terminal_measured = None
-            self._terminal_reference = None
-            self._terminal_lost_since_s = None
-        else:
-            # A real distance has established the near-corner approach. From
-            # here a lost wall must hold zero, never continue on a stale range.
-            reason = "terminal_wall_lost"
-            if self._terminal_lost_since_s is None:
-                self._terminal_lost_since_s = now_s
-            lost_for = now_s - self._terminal_lost_since_s
-            if lost_for > self.terminal_lost_timeout_s:
-                return self._finish(False, reason)
-            self._record_zero(now_s)
-            fields["terminal_visible"] = False
-            fields["terminal_seen"] = self.terminal_seen_at_s is not None
-            fields["terminal_approach_active"] = True
-            fields["terminal_lost_for_s"] = lost_for
-            return ActionOutcome(self.name, False, reason,
-                                 dict(fields, command=Twist2D(0.0, 0.0)), waiting=True)
+            self._travel_direction = (-self.direction if terminal_measured <
+                                     terminal_target - self.terminal_tolerance_m else self.direction)
+        # A missing terminal never holds zero or starts an abort timer. Continue
+        # the current road-wall direction, including an ongoing recovery; only
+        # fresh terminal ranges can brake or reverse it. The prior is retained
+        # for association, never used as a current control range.
         command, control = follow_command(
-            right, self.target_distance_m, self.direction, limits=self.limits,
+            right, self.target_distance_m,
+            self.direction if terminal is not None else self._travel_direction, limits=self.limits,
             speed_cap_m_s=self.speed_cap_m_s,
             terminal_measured_m=terminal_measured,
             terminal_target_m=terminal_target,
@@ -710,7 +747,6 @@ class FollowRightWall(WallAction):
         fields.update(control)
         fields["terminal_visible"] = self._terminal_visible
         fields["terminal_seen"] = self.terminal_seen_at_s is not None
-        fields["terminal_approach_active"] = self._terminal_approach_active
         fields["right_wall_rho_base_m"] = right.rho_base_m
         fields["right_wall_normal"] = right.normal_xy
         fields["right_wall_span_m"] = right.span_m
@@ -728,9 +764,10 @@ class FollowRightWall(WallAction):
 class TurnToWallBearing(WallAction):
     """``turn_to_wall_bearing(reference_wall, desired_bearing, direction)``.
 
-    Only the measured wall angle ends the turn: two fresh scans, acquired after
-    zero output, inside the angle tolerance. There is no fallback that
-    integrates the commanded rate to 90 degrees.
+    Route turns hand off when the next moving controller can take over from
+    the measured geometry. Standalone turns without a handoff still use two
+    fresh stopped scans inside tolerance. No command rate is integrated into
+    a virtual angle.
     """
 
     name = "turn_to_wall_bearing"
@@ -742,6 +779,7 @@ class TurnToWallBearing(WallAction):
                  max_omega_rad_s: float = TURN_MAX_OMEGA_RAD_S,
                  tolerance_rad: float = TURN_TOLERANCE_RAD,
                  required_frames: int = TURN_STABLE_FRAMES,
+                 handoff: Callable[[WallLine], bool] | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  max_age_s: float = 0.40,
                  lost_timeout_s: float = TURN_LOST_TIMEOUT_S) -> None:
@@ -758,6 +796,7 @@ class TurnToWallBearing(WallAction):
         self.gain = gain
         self.max_omega_rad_s = max_omega_rad_s
         self.tolerance_rad = tolerance_rad
+        self.handoff = handoff
         self.gate = FreshStopGate(required=required_frames, max_age_s=max_age_s,
                                   tolerance_rad=tolerance_rad)
         self._continuous_bearing_rad: float | None = reference_bearing_rad
@@ -807,6 +846,9 @@ class TurnToWallBearing(WallAction):
         fields["reference_rho_base_m"] = wall.rho_base_m
         fields["tracked_bearing_rad"] = self._continuous_bearing_rad
         fields["scan_seq"] = snapshot.scan_seq
+        if self.handoff is not None and self.handoff(wall):
+            self._record_zero(now_s)
+            return self._finish(True, "dynamic_handoff", **fields)
         if abs(omega) < 1e-9:
             if not self._holding:
                 # Entering the hold: record the instant zero output was first
@@ -860,8 +902,6 @@ class MoveNormalToWall(WallAction):
                  tolerance_m: float = DROP_TOLERANCE_M,
                  heading_gain: float = DROP_HEADING_GAIN,
                  heading_band_rad: float = DROP_HEADING_BAND_RAD,
-                 heading_tolerance_rad: float | None = None,
-                 settle_margin_rad: float = HEADING_SETTLE_MARGIN_RAD,
                  desired_bearing_rad: float | None = None,
                  lost_timeout_s: float = WALL_LOST_TIMEOUT_S,
                  clock: Callable[[], float] = time.monotonic,
@@ -886,16 +926,6 @@ class MoveNormalToWall(WallAction):
         self.tolerance_m = tolerance_m
         self.heading_gain = heading_gain
         self.heading_band_rad = heading_band_rad
-        # Success is judged a little outside the dead band. The two must not be
-        # equal: the controller stops correcting exactly at the band edge, so a
-        # residual that settles a nanoradian beyond it would never be corrected
-        # again and the move would wait forever just short of success.
-        self.heading_tolerance_rad = (max(heading_band_rad + settle_margin_rad,
-                                          DROP_HEADING_TOLERANCE_RAD)
-                                      if heading_tolerance_rad is None
-                                      else heading_tolerance_rad)
-        if self.heading_tolerance_rad < heading_band_rad:
-            raise ValueError("heading_tolerance_rad must not be below the dead band")
         # The heading this move holds: the reference wall keeps its bearing while
         # the chassis translates square to it.
         self.desired_bearing_rad = (reference_bearing_rad if desired_bearing_rad is None
@@ -907,7 +937,7 @@ class MoveNormalToWall(WallAction):
             return None
         wall = self.tracker.track(snapshot.lines,
                                   expected_bearing_rad=self._continuous_bearing_rad,
-                                  expected_distance_m=self.target_distance_m)
+                                  expected_distance_m=self.tracker.last_rho_m)
         if wall is None:
             # Drop the cached line. Leaving it in place would let a stale wall
             # keep answering "the reference is visible", so the lost-wall
@@ -924,13 +954,18 @@ class MoveNormalToWall(WallAction):
         if wall is None:
             return self._wait(now_s, "reference_wall_not_visible")
         try:
-            probe_speed, probe_info = normal_move_command(
+            _, probe_info = normal_move_command(
                 wall, self.target_distance_m, self.direction,
                 max_speed_m_s=self.max_speed_m_s, tolerance_m=self.tolerance_m)
-        except ValueError as exc:
-            # Not yet normal to the reference wall. Hold zero and let the shared
-            # outage timeout bound it, instead of retrying forever.
-            return self._wait(now_s, f"heading_not_normal ({exc})")
+        except ValueError:
+            # A wall exactly alongside has no longitudinal distance component.
+            # Actively turn toward the move axis; do not hold zero waiting for an
+            # angle-validity gate that no command is trying to satisfy.
+            error = self._axis_error(wall)
+            omega = self.heading_command(error)
+            self._record_nonzero(now_s)
+            return ActionOutcome(self.name, False, "aligning_move_axis",
+                                 {"command": Twist2D(0.0, omega), "heading_error_rad": error})
         # The remaining distance in METRES comes from the command's own report.
         # Comparing the returned speed (m/s) against terminal_range_m (m) would
         # put the whole 43/32 cm approach into the final 6 cm slow zone.
@@ -955,31 +990,13 @@ class MoveNormalToWall(WallAction):
         fields["heading_error_rad"] = heading_error
         fields["heading_error_deg"] = math.degrees(heading_error)
         fields["heading_band_deg"] = math.degrees(self.heading_band_rad)
-        square = abs(heading_error) <= self.heading_tolerance_rad
-        fields["heading_within_band"] = square
-        if reaching and square:
+        fields["heading_within_band"] = abs(heading_error) <= self.heading_band_rad
+        if reaching:
+            # The distance ends this move. Residual heading is handled by the
+            # next coarse turn or the road controller, never by an in-place
+            # precision-angle loop at the end of a translation.
             self._record_zero(now_s)
             return self._finish(True, "distance_reached", **fields)
-        # Reaching the distance is not success on its own. A chassis that arrives
-        # 40 degrees off has the right perpendicular distance and the wrong
-        # orientation, and calling that done would abandon the correction the
-        # operator asked for. So the move keeps working the heading, in place,
-        # until it is square; the shared outage timeout bounds it if it cannot.
-        if reaching and not square:
-            omega = self.heading_command(heading_error)
-            fields["corrected_omega_rad_s"] = omega
-            fields["speed_cap_m_s"] = self.max_speed_m_s
-            fields["squaring_in_place"] = True
-            self._record_zero(now_s)
-            if self.last_error_s is None:
-                self.last_error_s = now_s
-            if now_s - self.last_error_s > self.lost_timeout_s:
-                return self._finish(False, "squaring_heading", **fields)
-            # Rotate in place: the distance is already met, so the only thing
-            # left is the orientation the operator asked for.
-            return ActionOutcome(self.name, False, "squaring_heading",
-                                 dict(fields, command=Twist2D(0.0, omega)),
-                                 waiting=True)
         omega = self.heading_command(heading_error)
         fields["corrected_omega_rad_s"] = omega
         self._record_nonzero(now_s)
@@ -1011,14 +1028,9 @@ class MoveNormalToWall(WallAction):
         limit, whereas an angular offset on a forward or reverse move is a plain
         differential and needs no special case.
         """
-        if abs(heading_error_rad) <= self.heading_band_rad:
-            return 0.0
-        bias = math.copysign(self.heading_band_rad, heading_error_rad)
-        magnitude = min(self.heading_gain * abs(heading_error_rad - bias),
-                        self.limits.max_angular_speed_rad_s,
-                        math.sqrt(2.0 * self.limits.max_angular_accel_rad_s2
-                                  * abs(heading_error_rad - bias)))
-        return math.copysign(magnitude, heading_error_rad)
+        return normal_heading_command(heading_error_rad, self.limits,
+                                      band_rad=self.heading_band_rad, gain=self.heading_gain)
+
 
 
 class HoldStopped(WallAction):

@@ -196,6 +196,24 @@ class LineFittingTests(unittest.TestCase):
                 self.assertEqual(len(front), 1)
                 self.assertAlmostEqual(front[0].rho_base_m, 5.0, places=5)
 
+    def test_dense_short_fragment_cannot_discard_sparse_long_front_wall(self):
+        points = ([(5, i * .3 / 39) for i in range(40)]
+                  + [(5, 3 + i * 2 / 19) for i in range(20)])
+        lines = extract_lines(points, rng=random.Random(1))
+        self.assertEqual(len(lines), 1)
+        self.assertAlmostEqual(lines[0].span_m, 2.0)
+        self.assertEqual(lines[0].inlier_count, 20)
+
+    def test_previous_wall_proposes_a_sparse_fit_from_current_points(self):
+        front = extract_lines(front_wall_points(5, count=12, span_m=1.5), rng=random.Random(1))[0]
+        # With only one random proposal, a sparse 12-point wall among 400
+        # unrelated points must still be measurable from its previous direction.
+        rng = random.Random(8)
+        clutter = [(rng.uniform(-4, 4), rng.uniform(-4, 4)) for _ in range(400)]
+        points = clutter + [(5.02, -0.75 + i * 1.5 / 11) for i in range(12)]
+        lines = extract_lines(points, rng=random.Random(3), prior_lines=(front,), max_trials=1)
+        self.assertTrue(any(abs(w.rho_base_m - 5.02) < .03 and w.normal_xy[0] > .99 for w in lines))
+
     def test_w12_one_wall_only_is_still_a_usable_straight_section(self):
         lines = extract_lines(right_wall_points(1.9), rng=random.Random(23))
         self.assertEqual(len(lines), 1)

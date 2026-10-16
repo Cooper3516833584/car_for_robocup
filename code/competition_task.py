@@ -20,6 +20,7 @@ from components.wall_navigation import (
     REAR_BEARING_RAD,
     WallActionLimits,
     WallTracker,
+    can_follow_wall,
     drop_turn,
     is_front_wall,
     is_rear_wall,
@@ -1172,6 +1173,7 @@ def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches, limits,
                 color, box, slots = triggered
                 triggered = None
                 follow.speed_cap_m_s = None
+                right_before_detour = tracker.wall
                 runtime.action = None
                 runtime.drive.stop()
                 runtime.record_event("competition_target_centered", color=color,
@@ -1201,7 +1203,9 @@ def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches, limits,
                     # already-done outcome into the next corner decision, so the
                     # leg continues with a fresh action that must re-measure the
                     # corner from new scans.
+                    previous_follow = follow
                     follow = _make_leg_follow(leg, tracker, limits, runtime)
+                    follow.inherit_terminal(previous_follow, right_before_detour)
                     runtime.action = follow
                     not_before = float(runtime.clock())
                     last_stamp = None
@@ -1346,7 +1350,8 @@ def turn_left_at_corner(runtime, tracker, leg, limits, terminal_wall):
     # right wall, and the tracker must follow that same physical line.
     tracker.set_reference(terminal_wall)
     turn = drop_turn(terminal_wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits,
-                     tracker=tracker, turn_direction=+1, clock=runtime.clock)
+                     tracker=tracker, turn_direction=+1, clock=runtime.clock,
+                     handoff=lambda wall: can_follow_wall(wall, leg.terminal_target_m, limits))
     outcome = _run_wall_action(runtime, turn, runtime.mission.phase)
     if not outcome.done:
         raise RuntimeError(f"leg {leg.index + 1}: corner turn failed ({outcome.reason})")
@@ -1381,7 +1386,8 @@ def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
     runtime.mission.phase = "finish_turn"
     tracker.set_reference(rear_wall)
     turn = drop_turn(rear_wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits,
-                     tracker=tracker, turn_direction=-1, clock=runtime.clock)
+                     tracker=tracker, turn_direction=-1, clock=runtime.clock,
+                     handoff=lambda wall: can_follow_wall(wall, target_right, limits))
     outcome = _run_wall_action(runtime, turn, "finish_turn")
     if not outcome.done:
         raise RuntimeError(f"final right turn failed ({outcome.reason})")

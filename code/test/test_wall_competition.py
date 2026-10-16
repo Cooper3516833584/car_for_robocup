@@ -420,6 +420,66 @@ class CentredTargetTests(unittest.TestCase):
 # Detour integration
 # ---------------------------------------------------------------------------
 
+class PatrolResumeTests(unittest.TestCase):
+    def test_red_release_resumes_same_far_wall_with_near_parallel_intruder(self):
+        from components.wall_navigation import WallTracker
+        from target_patrol import EntryLatch
+        from types import SimpleNamespace
+
+        h = MissionHarness()
+        h.runtime.start()
+        tracker = WallTracker()
+        pending = {'red': (1,)}
+        world = {'x': 0.0, 'y': 0.0, 'yaw': 0.0}
+        drops = []
+        ticks = []
+        original_step = h.runtime.step
+
+        def step():
+            self.assertLess(len(ticks), 1000, 'patrol did not converge')
+            h.clock[0] += .1
+            yaw = world['yaw']
+            h.observer.publish(make_wall(-math.pi / 2 - yaw, 1.6 + world['y']),
+                               make_wall(-yaw, 5.058 - world['x'], span=3.7),
+                               make_wall(-yaw, 1.618, span=1.8))
+            result = original_step()
+            command = result.limited_command or result.command
+            world['x'] += command.linear_x_m_s * math.cos(yaw) * .1
+            world['y'] += command.linear_x_m_s * math.sin(yaw) * .1
+            world['yaw'] += command.angular_z_rad_s * .1
+            if drops:
+                ticks.append(result)
+            return result
+
+        def detour(*args, **kwargs):
+            drops.append(kwargs['payload_slots'])
+            h.clock[0] += 50.0
+            world.update(x=.03, y=.01, yaw=.12)
+            tracker.set_reference(make_wall(-math.pi / 2 - world['yaw'], 1.61))
+            return kwargs['payload_slots']
+
+        vision = SimpleNamespace(frame_size=(640, 480), observe_colours=lambda _clock:
+                                 (h.clock[0], (('red', (305, 0, 335, 50, .95, 0)),)))
+        leg = build_wall_route(0.0, 0.0)[0][0]
+        h.runtime.step = step
+        try:
+            with patch.object(task, 'perform_payload_detour', side_effect=detour), \
+                    patch.object(task.time, 'sleep', return_value=None):
+                completed, _, terminal = task.patrol_wall_leg(
+                    h.runtime, leg, tracker, pending=pending, vision=vision,
+                    latches={'red': EntryLatch()}, limits=_limits(), command_ledger=task.PayloadLedger())
+        finally:
+            h.runtime.close()
+        self.assertTrue(completed)
+        self.assertEqual(drops, [(1,)])
+        self.assertFalse(pending)
+        self.assertGreater(ticks[0].command.linear_x_m_s, 0)
+        measurements = [e['terminal_measured_m'] for e in h.events
+                        if e['type'] == 'wall_control' and e.get('terminal_visible')]
+        self.assertTrue(all(d > 1.87 for d in measurements))
+        self.assertAlmostEqual(terminal.rho_base_m, 1.895, delta=.02)
+
+
 class WallDetourTests(unittest.TestCase):
     """The detour against a simulated wall that reacts to the emitted twist.
 

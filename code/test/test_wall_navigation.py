@@ -25,6 +25,8 @@ from components.wall_navigation import (
     WallActionLimits,
     WallTracker,
     braking_cap,
+    can_follow_wall,
+    can_move_normal,
     follow_command,
     is_front_wall,
     is_rear_wall,
@@ -182,14 +184,13 @@ class FollowCommandTests(unittest.TestCase):
         self.assertEqual(command.angular_z_rad_s, 0.0)
         self.assertTrue(fields["at_terminal"])
 
-    def test_c10_a_crossed_threshold_stops_and_never_backs_up(self):
-        # Already past the target: distance below target must still be zero, not
-        # a reverse command chasing the threshold back.
+    def test_c10_a_crossed_threshold_recovers_in_the_opposite_direction(self):
         wall = make_wall(-math.pi / 2, 1.6)
-        command, fields = follow_command(wall, 1.6, +1, limits=LIMITS,
-                                        terminal_measured_m=1.55, terminal_target_m=1.6)
-        self.assertEqual(command.linear_x_m_s, 0.0)
-        self.assertEqual(command.angular_z_rad_s, 0.0)
+        for nominal in (+1, -1):
+            command, fields = follow_command(wall, 1.6, nominal, limits=LIMITS,
+                                            terminal_measured_m=1.55, terminal_target_m=1.6)
+            self.assertLess(command.linear_x_m_s * nominal, 0.0)
+            self.assertFalse(fields["at_terminal"])
 
     def test_the_terminal_creep_never_lets_the_chassis_stall_outside_tolerance(self):
         wall = make_wall(-math.pi / 2, 1.6)
@@ -219,14 +220,11 @@ class FollowCommandTests(unittest.TestCase):
         self.assertEqual(math.copysign(1, forward.angular_z_rad_s),
                          -math.copysign(1, reverse.angular_z_rad_s))
 
-    def test_a_terminal_target_without_a_measurement_creeps_instead_of_failing(self):
-        # The terminal wall can drop out of view for a scan or two. That must
-        # bound the approach, not abort the leg: the caller keeps its last
-        # measured remaining as a conservative cap.
+    def test_a_terminal_target_without_a_measurement_keeps_road_following(self):
         wall = make_wall(-math.pi / 2, 1.6)
         command, fields = follow_command(wall, 1.6, +1, limits=LIMITS,
                                         terminal_target_m=1.9)
-        self.assertLessEqual(abs(command.linear_x_m_s), 0.008 + 1e-12)
+        self.assertAlmostEqual(command.linear_x_m_s, LIMITS.follow_speed_m_s)
         self.assertIsNone(fields["terminal_measured_m"])
         self.assertFalse(fields["at_terminal"])
 
@@ -483,20 +481,14 @@ class DropHeadingBandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.action(band_deg=-1.0)
 
-    def test_reaching_the_distance_while_off_axis_is_not_success(self):
-        # The whole point of the band: arriving at the right perpendicular
-        # distance while badly rotated is not the finished move. The generous
-        # tolerance makes "the distance is already met" explicit rather than
-        # depending on the exact float comparison at the tolerance edge.
+    def test_reaching_the_distance_does_not_start_an_in_place_angle_loop(self):
         action = self.action(target=1.62, tolerance_m=0.05)
-        wall = make_wall(REAR_BEARING_RAD + math.radians(30.0), 1.6)
+        wall = make_wall(REAR_BEARING_RAD + math.radians(30), 1.6)
         out = action.step(snapshot_of(wall, observed=1.0), now_s=1.05)
-        self.assertFalse(out.done)
-        self.assertTrue(out.waiting)
-        self.assertEqual(out.reason, "squaring_heading")
-        # It corrects in place rather than translating further.
+        self.assertTrue(out.done)
+        self.assertEqual(out.reason, "distance_reached")
         self.assertEqual(out.command.linear_x_m_s, 0.0)
-        self.assertNotEqual(out.command.angular_z_rad_s, 0.0)
+        self.assertEqual(out.command.angular_z_rad_s, 0.0)
 
     def test_success_needs_the_distance_and_a_square_chassis(self):
         # Same distance, square chassis: now it is done.
@@ -506,32 +498,22 @@ class DropHeadingBandTests(unittest.TestCase):
         self.assertTrue(out.done)
         self.assertEqual(out.reason, "distance_reached")
 
-    def test_the_tolerance_sits_outside_the_dead_band(self):
-        # If they were equal, the controller would stop correcting exactly at
-        # the edge and a residual just beyond it could never be resolved.
-        action = self.action(target=1.62, tolerance_m=0.05)
-        self.assertGreater(action.heading_tolerance_rad, action.heading_band_rad)
-        # A residual of exactly the band is accepted at the target distance...
-        within = action.step(snapshot_of(make_wall(REAR_BEARING_RAD + action.heading_band_rad,
-                                                   1.6), observed=1.0), now_s=1.05)
-        self.assertTrue(within.done)
-        # ...while the same residual away from the target keeps being corrected.
-        action2 = self.action()
-        just_out = action2.step(snapshot_of(
-            make_wall(REAR_BEARING_RAD + math.radians(5.2), 1.6), observed=1.0), now_s=1.05)
-        self.assertFalse(just_out.done)
-        self.assertGreater(abs(just_out.command.angular_z_rad_s), 0.0)
+    def test_the_heading_band_only_controls_moving_correction(self):
+        action = self.action(bearing=REAR_BEARING_RAD + math.radians(40), desired=REAR_BEARING_RAD)
+        out = action.step(snapshot_of(make_wall(REAR_BEARING_RAD + math.radians(40),
+                                                1.6), observed=1.0), now_s=1.05)
+        self.assertFalse(out.done)
+        self.assertGreater(out.command.linear_x_m_s, 0.0)
+        self.assertGreater(out.command.angular_z_rad_s, 0.0)
+        self.assertFalse(out.waiting)
 
-    def test_squaring_in_place_is_bounded_by_the_outage_timeout(self):
-        # A chassis that cannot rotate must fail, not wait forever.
+    def test_a_distance_completed_move_stays_done_without_waiting_for_angle(self):
         action = self.action(target=1.62, tolerance_m=0.05, lost_timeout=1.0)
-        wall = make_wall(REAR_BEARING_RAD + math.radians(30.0), 1.6)
+        wall = make_wall(REAR_BEARING_RAD + math.radians(30), 1.6)
         first = action.step(snapshot_of(wall, observed=1.0), now_s=1.0)
-        self.assertEqual(first.reason, "squaring_heading")
         final = action.step(snapshot_of(wall, seq=9, observed=3.0), now_s=3.0)
-        self.assertTrue(action.finished)
-        self.assertFalse(final.done)
-        self.assertEqual(final.reason, "squaring_heading")
+        self.assertTrue(first.done)
+        self.assertIs(final, first)
 
     def test_the_axis_unwrap_survives_a_stored_bearing_flip(self):
         # rho and the normal are invariant under n -> -n, so the stored bearing
@@ -634,7 +616,6 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertFalse(outcome.fields.get("terminal_visible"))
         # A stub does not establish approach to the perimeter wall.
         self.assertGreater(outcome.command.linear_x_m_s, 0.0)
-        self.assertFalse(outcome.fields["terminal_approach_active"])
 
     def test_the_right_wall_is_never_its_own_terminal(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
@@ -665,59 +646,49 @@ class ActionStateMachineTests(unittest.TestCase):
         action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.9)
         right = make_wall(-math.pi / 2, 1.6)
-        far = action.step(snapshot_of(right, make_wall(0.0, 7.0), observed=1.0), now_s=1.05)
-        self.assertFalse(far.fields["terminal_approach_active"])
+        action.step(snapshot_of(right, make_wall(0.0, 7.0), observed=1.0), now_s=1.05)
         lost = action.step(snapshot_of(right, seq=2, observed=1.1), now_s=1.15)
         self.assertGreater(lost.command.linear_x_m_s, 0.0)
-        near = action.step(snapshot_of(right, make_wall(0.0, 2.3), seq=3, observed=7.0), now_s=7.05)
-        self.assertTrue(near.fields["terminal_approach_active"])
-        missing = action.step(snapshot_of(right, seq=4, observed=7.1), now_s=7.15)
-        self.assertEqual(missing.command.linear_x_m_s, 0.0)
-        self.assertEqual(missing.reason, "terminal_wall_lost")
+        # At most 0.2 m/s over 40 s allows this displacement; old range is not
+        # used for control while the wall is absent.
+        near = action.step(snapshot_of(right, make_wall(0.0, 2.3), seq=3, observed=41.0), now_s=41.05)
+        self.assertTrue(near.fields["terminal_visible"])
+        missing = action.step(snapshot_of(right, seq=4, observed=41.1), now_s=41.15)
+        self.assertGreater(missing.command.linear_x_m_s, 0.0)
+        self.assertEqual(missing.reason, "")
 
-    def test_first_front_measurement_40cm_past_target_is_failure_not_a_corner(self):
-        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+    def test_first_front_measurement_40cm_past_target_starts_recovery(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.895)
-        right = make_wall(-math.pi / 2, 1.6)
-        front = make_wall(0.0, 1.496)
-        result = action.step(snapshot_of(right, front, observed=1.0), now_s=1.05)
-        self.assertTrue(action.finished)
+        result = action.step(snapshot_of(make_wall(-math.pi / 2, 1.6),
+                                         make_wall(0.0, 1.496), observed=1.0), now_s=1.05)
+        self.assertFalse(action.finished)
         self.assertFalse(result.done)
-        self.assertEqual(result.reason, "terminal_distance_overshot")
-        self.assertEqual(result.command.linear_x_m_s, 0.0)
+        self.assertEqual(result.reason, "")
+        self.assertLess(result.command.linear_x_m_s, 0.0)
 
-    def test_terminal_tracking_does_not_switch_to_a_different_parallel_wall(self):
-        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+    def test_terminal_tracking_rejects_a_different_parallel_wall_but_keeps_cruising(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.895)
         right = make_wall(-math.pi / 2, 1.6)
-        first = action.step(snapshot_of(right, make_wall(0.0, 2.4), observed=1.0), now_s=1.05)
-        self.assertGreater(first.command.linear_x_m_s, 0.0)
+        action.step(snapshot_of(right, make_wall(0.0, 2.4), observed=1.0), now_s=1.05)
         lost = action.step(snapshot_of(right, make_wall(0.0, 1.9), seq=2, observed=1.1), now_s=1.15)
-        self.assertEqual(lost.reason, "terminal_wall_lost")
-        self.assertEqual(lost.command.linear_x_m_s, 0.0)
+        self.assertFalse(lost.fields["terminal_visible"])
+        self.assertEqual(lost.fields["terminal_candidates"][0]["rejection_reason"], "different_wall_distance")
+        self.assertGreater(lost.command.linear_x_m_s, 0.0)
+        self.assertFalse(action.finished)
 
-    def test_a_terminal_seen_then_lost_holds_zero_and_then_fails_bounded(self):
-        # Once the terminal has been verified, losing it must not keep driving on
-        # the last distance -- that distance cannot shrink as the chassis moves.
-        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
-                                 terminal_role=is_front_wall, terminal_target_m=1.5,
-                                 tracker=WallTracker(), lost_timeout_s=5.0)
-        right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
-        front = wall((1.0, 0.0), 1.9, (1.9, 0.0), (-1.1, 0.0))
-        first = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
-        self.assertFalse(first.done)
-        self.assertTrue(first.fields["terminal_seen"])
-        self.assertAlmostEqual(first.fields["terminal_measured_m"], 1.9, places=6)
-        # The terminal is gone but the right wall is still perfectly visible.
-        lost = action.step(snapshot_of(right, observed=1.05), now_s=1.1)
-        self.assertEqual(lost.command.linear_x_m_s, 0.0)
-        self.assertEqual(lost.command.angular_z_rad_s, 0.0)
-        self.assertEqual(lost.reason, "terminal_wall_lost")
-        # Bounded: it eventually gives up instead of waiting forever.
-        final = action.step(snapshot_of(right, seq=99, observed=7.0), now_s=7.0)
-        self.assertTrue(action.finished)
-        self.assertFalse(final.done)
-        self.assertEqual(final.reason, "terminal_wall_lost")
+    def test_a_near_terminal_lost_for_over_five_seconds_does_not_stop_or_abort(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.895)
+        right = make_wall(-math.pi / 2, 1.6)
+        action.step(snapshot_of(right, make_wall(0.0, 2.0), observed=1.0), now_s=1.05)
+        for seq, now in enumerate((1.2, 3.0, 8.0, 20.0), 2):
+            lost = action.step(snapshot_of(right, seq=seq, observed=now), now_s=now + .05)
+            self.assertGreater(lost.command.linear_x_m_s, 0.0)
+            self.assertIsNone(lost.fields["terminal_measured_m"])
+            self.assertFalse(lost.waiting)
+            self.assertFalse(action.finished)
 
     def test_a_follow_action_waits_without_inventing_a_path_when_the_wall_is_gone(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
@@ -871,6 +842,143 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertFalse(action.step(snapshot_of(outside, seq=2, observed=1.15),
                                      now_s=1.21).done)
         self.assertEqual(action.gate.stable, 0)
+
+
+class RecoveryAndHandoffTests(unittest.TestCase):
+    def test_front_dropout_during_pullback_keeps_recovery_direction(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                 terminal_target_m=1.895, terminal_role=is_front_wall)
+        right = make_wall(RIGHT_BEARING_RAD, 1.6)
+        first = action.step(snapshot_of(right, make_wall(0, 1.5), observed=1), now_s=1.05)
+        self.assertLess(first.command.linear_x_m_s, 0)
+        for seq, now in enumerate((1.1, 2, 8), 2):
+            lost = action.step(snapshot_of(right, seq=seq, observed=now), now_s=now + .05)
+            self.assertLess(lost.command.linear_x_m_s, 0)
+            self.assertIsNone(lost.fields['terminal_measured_m'])
+            self.assertFalse(action.finished)
+        done = action.step(snapshot_of(right, make_wall(0, 1.895), seq=9, observed=9), now_s=9.05)
+        self.assertTrue(done.done)
+
+    def test_late_terminal_measurement_recovers_both_forward_and_reverse_legs(self):
+        for nominal in (1, -1):
+            for yaw in (-.12, .12):
+                with self.subTest(nominal=nominal, yaw=yaw):
+                    chassis = SimulatedChassis(y=0.10, yaw=yaw)
+                    action = FollowRightWall(target_distance_m=1.6, direction=nominal,
+                                             limits=LIMITS, terminal_target_m=1.895,
+                                             terminal_role=is_front_wall if nominal == 1 else is_rear_wall)
+                    commands = []
+                    for seq in range(1, 3001):
+                        # The real terminal is initially 40 cm past its target.
+                        rho = 1.495 - nominal * chassis.x
+                        terminal = make_wall((0 if nominal == 1 else math.pi) - chassis.yaw, rho)
+                        now = seq * chassis.dt
+                        out = action.step(snapshot_of(chassis.right_wall_line(), terminal,
+                                                      seq=seq, observed=now), now_s=now)
+                        if out.done:
+                            break
+                        commands.append(out.command)
+                        chassis.step(out.command)
+                    self.assertTrue(out.done, out.reason)
+                    self.assertLessEqual(abs(rho - 1.895), .02)
+                    self.assertLess(commands[0].linear_x_m_s * nominal, 0)
+                    self.assertLess(abs(chassis.y), .10)
+                    self.assertTrue(all(c.linear_x_m_s != 0 for c in commands))
+
+    def test_terminal_dropout_does_not_stop_then_reacquisition_pulls_back(self):
+        chassis = SimulatedChassis()
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                 terminal_target_m=1.895, terminal_role=is_front_wall)
+        reversed_after_dropout = False
+        for seq in range(1, 2001):
+            now = seq * chassis.dt
+            rho = 2.3 - chassis.x
+            lines = [chassis.right_wall_line()]
+            if seq == 1 or now >= 8.0:
+                lines.append(make_wall(-chassis.yaw, rho))
+            out = action.step(snapshot_of(*lines, seq=seq, observed=now), now_s=now)
+            if 1 < seq < 400:
+                self.assertGreater(out.command.linear_x_m_s, 0)
+            if out.done:
+                break
+            reversed_after_dropout |= out.command.linear_x_m_s < 0
+            chassis.step(out.command)
+        self.assertTrue(reversed_after_dropout)
+        self.assertTrue(out.done)
+        self.assertAlmostEqual(rho, 1.895, delta=.02)
+
+    def test_payload_resume_preserves_far_terminal_with_residual_heading(self):
+        tracker = WallTracker()
+        before = make_wall(RIGHT_BEARING_RAD, 1.61)
+        previous = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                   tracker=tracker, terminal_target_m=1.895, terminal_role=is_front_wall)
+        previous.step(snapshot_of(before, make_wall(0, 5.058, span=3.7), observed=1), now_s=1.05)
+        yaw = math.radians(30)
+        after = make_wall(RIGHT_BEARING_RAD - yaw, 1.62)
+        tracker.set_reference(after)
+        resumed = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                  tracker=tracker, terminal_target_m=1.895, terminal_role=is_front_wall,
+                                  clock=lambda: 60.0)
+        resumed.inherit_terminal(previous, before)
+        # Only the near intruder is visible on the first scan: retain identity,
+        # keep moving, and do not use the old 5.058 m for control.
+        intruder = make_wall(-yaw, 1.618, span=1.8)
+        lost = resumed.step(snapshot_of(after, intruder, seq=2, observed=60), now_s=60.05)
+        self.assertFalse(lost.fields['terminal_visible'])
+        self.assertIsNone(lost.fields['terminal_measured_m'])
+        self.assertGreater(lost.command.linear_x_m_s, 0)
+        out = resumed.step(snapshot_of(after, intruder, make_wall(-yaw, 5.03, span=3.7),
+                                       seq=3, observed=60.1), now_s=60.15)
+        self.assertFalse(out.done)
+        self.assertAlmostEqual(out.fields['terminal_measured_m'], 5.03)
+        self.assertGreater(out.command.linear_x_m_s, 0)
+
+    def test_initial_terminal_uses_enclosure_support_instead_of_nearest_distance(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=1, limits=LIMITS,
+                                 terminal_target_m=1.895, terminal_role=is_front_wall)
+        out = action.step(snapshot_of(make_wall(RIGHT_BEARING_RAD, 1.6),
+                                       make_wall(0, 1.618, span=1.8),
+                                       make_wall(0, 5.058, span=3.7), observed=1), now_s=1.05)
+        self.assertAlmostEqual(out.fields['terminal_measured_m'], 5.058)
+        self.assertGreater(out.command.linear_x_m_s, 0)
+
+    def test_corner_hands_off_once_then_converges_while_moving(self):
+        chassis = SimulatedChassis()
+        turn = TurnToWallBearing(reference_bearing_rad=0, desired_bearing_rad=RIGHT_BEARING_RAD,
+                                 turn_direction=1, limits=LIMITS,
+                                 handoff=lambda w: can_follow_wall(w, 1.895, LIMITS))
+        follow = None
+        reversal_count = 0
+        for seq in range(1, 1801):
+            now = seq * chassis.dt
+            wall = make_wall(-chassis.yaw, 1.895 - chassis.x)
+            snapshot = snapshot_of(wall, seq=seq, observed=now)
+            if follow is None:
+                out = turn.step(snapshot, now_s=now)
+                reversal_count += out.command.angular_z_rad_s < 0
+                if out.done:
+                    self.assertEqual(out.reason, 'dynamic_handoff')
+                    self.assertGreater(abs(out.fields['error_rad']), math.radians(2))
+                    follow = FollowRightWall(target_distance_m=1.895, direction=1,
+                                             limits=LIMITS, tracker=turn.tracker)
+            else:
+                out = follow.step(snapshot, now_s=now)
+                self.assertGreater(out.command.linear_x_m_s, 0)
+            chassis.step(out.command)
+        self.assertIsNotNone(follow)
+        self.assertEqual(reversal_count, 0)
+        self.assertAlmostEqual(chassis.yaw, math.pi / 2, delta=math.radians(2))
+        self.assertAlmostEqual(1.895 - chassis.x, 1.895, delta=.04)
+
+    def test_a_normal_move_can_take_over_with_residual_angle(self):
+        wall = make_wall(REAR_BEARING_RAD + math.radians(15), 1.6)
+        self.assertTrue(can_move_normal(wall, REAR_BEARING_RAD, LIMITS))
+        move = MoveNormalToWall(target_distance_m=2.03, direction=1,
+                                reference_bearing_rad=wall.bearing_rad,
+                                desired_bearing_rad=REAR_BEARING_RAD, limits=LIMITS)
+        out = move.step(snapshot_of(wall, observed=1), now_s=1.05)
+        self.assertGreater(out.command.linear_x_m_s, 0)
+        self.assertGreater(out.command.angular_z_rad_s, 0)
 
 
 class HoldTests(unittest.TestCase):

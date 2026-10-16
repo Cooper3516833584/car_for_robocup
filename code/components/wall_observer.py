@@ -230,9 +230,9 @@ def fit_line_tls(points: Sequence[tuple[float, float]]):
     return normal, rho, start, end, math.sqrt(residual_sq / count)
 
 
-def _largest_span_group(points: Sequence[tuple[float, float]],
+def _support_groups(points: Sequence[tuple[float, float]],
                         normal: tuple[float, float], *, max_gap_m: float):
-    """Split inliers at real gaps; return the longest observed support segment."""
+    """Split inliers at real gaps; retain every segment for its own quality test."""
     tangent = (-normal[1], normal[0])
     ordered = sorted(points, key=lambda point: point[0] * tangent[0] + point[1] * tangent[1])
     groups, current = [], [ordered[0]]
@@ -243,7 +243,7 @@ def _largest_span_group(points: Sequence[tuple[float, float]],
             current = []
         current.append(point)
     groups.append(current)
-    return max(groups, key=len)
+    return groups
 
 
 def extract_lines(points: Sequence[tuple[float, float]], *, rng: random.Random,
@@ -251,7 +251,8 @@ def extract_lines(points: Sequence[tuple[float, float]], *, rng: random.Random,
                   max_trials: int = MAX_TRIALS, max_models: int = MAX_MODELS,
                   min_points: int = MIN_POINTS, min_span_m: float = MIN_SPAN_M,
                   max_rms_m: float = MAX_RMS_M,
-                  max_support_gap_m: float = MAX_SUPPORT_GAP_M) -> tuple[WallLine, ...]:
+                  max_support_gap_m: float = MAX_SUPPORT_GAP_M,
+                  prior_lines: Sequence[WallLine] = ()) -> tuple[WallLine, ...]:
     """Multi-model RANSAC + TLS with real support segments.
 
     The caller owns ``rng`` and reuses it across scans. This function never
@@ -274,16 +275,30 @@ def extract_lines(points: Sequence[tuple[float, float]], *, rng: random.Random,
             break
         best_indices = None
         best_score = None
-        for _ in range(max_trials):
-            first, second = rng.sample(range(len(remaining)), 2)
-            ax, ay = remaining[first]
-            bx, by = remaining[second]
-            dx, dy = bx - ax, by - ay
-            length = math.hypot(dx, dy)
-            if length < MIN_MODEL_BASELINE_M:
-                continue
-            nx, ny = -dy / length, dx / length
-            offset = nx * ax + ny * ay
+        # Seed proposals from previous measured walls, refitting CURRENT points.
+        # Sparse far walls then need not win a random pair lottery on every scan.
+        # These are proposals only: all ordinary support/RMS gates still apply.
+        proposals = []
+        for prior in prior_lines:
+            nx, ny = prior.normal_xy
+            nearby = [(x, y) for x, y in remaining
+                      if abs(x * nx + y * ny - prior.rho_base_m) <= 0.20]
+            hint = fit_line_tls(nearby) if len(nearby) >= min_points else None
+            if hint is not None:
+                proposals.append((*hint[0], hint[1]))
+        for trial in range(len(proposals) + max_trials):
+            if trial < len(proposals):
+                nx, ny, offset = proposals[trial]
+            else:
+                first, second = rng.sample(range(len(remaining)), 2)
+                ax, ay = remaining[first]
+                bx, by = remaining[second]
+                dx, dy = bx - ax, by - ay
+                length = math.hypot(dx, dy)
+                if length < MIN_MODEL_BASELINE_M:
+                    continue
+                nx, ny = -dy / length, dx / length
+                offset = nx * ax + ny * ay
             indices, residual_sq = [], 0.0
             for index, (x, y) in enumerate(remaining):
                 residual = x * nx + y * ny - offset
@@ -324,19 +339,19 @@ def extract_lines(points: Sequence[tuple[float, float]], *, rng: random.Random,
                    <= residual_threshold_m]
         if len(inliers) < min_points:
             continue
-        group = _largest_span_group(inliers, normal, max_gap_m=max_support_gap_m)
-        if len(group) < min_points:
-            continue
-        fitted = fit_line_tls(group)
-        if fitted is None:
-            continue
-        normal, rho, start, end, rms = fitted
-        span = math.dist(start, end)
-        if span < min_span_m or rms > max_rms_m:
-            continue
-        output.append(WallLine(normal_xy=(normal[0], normal[1]), rho_base_m=rho,
-                               support_start_xy=start, support_end_xy=end,
-                               inlier_count=len(group), span_m=span, rms_m=rms))
+        for group in _support_groups(inliers, normal, max_gap_m=max_support_gap_m):
+            if len(group) < min_points:
+                continue
+            fitted = fit_line_tls(group)
+            if fitted is None:
+                continue
+            group_normal, rho, start, end, rms = fitted
+            span = math.dist(start, end)
+            if span < min_span_m or rms > max_rms_m:
+                continue
+            output.append(WallLine(normal_xy=group_normal, rho_base_m=rho,
+                                   support_start_xy=start, support_end_xy=end,
+                                   inlier_count=len(group), span_m=span, rms_m=rms))
     return tuple(output)
 
 
@@ -729,7 +744,9 @@ class WallObserver:
         try:
             if self._seed_source is not None:
                 self._rng = random.Random(self._seed_source())
-            lines = extract_lines(sampled, rng=self._rng)
+            previous = self.latest()
+            priors = previous.lines if previous is not None and previous.is_fresh(measured_s) else ()
+            lines = extract_lines(sampled, rng=self._rng, prior_lines=priors)
         except Exception as exc:
             error = f"extraction failed: {exc}"
             LOG.exception("wall extraction failed")
