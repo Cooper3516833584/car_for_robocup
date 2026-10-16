@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
 
 from competition_task import (perform_payload_detour, wait_for_fused_localization,
-                              fine_center_on_road, DROP_SAFE_M, _open_yellow_camera)
+                              DROP_SAFE_M, _open_yellow_camera)
 from components.diagnostics_log import JsonlEventLogger
 from components.payload_servos import close_payload, open_payload
 from components.servo_positioning import park_servo
@@ -215,8 +215,6 @@ def main(argv=None):
                                        slow_speed_m_s=slow_speed_m_s, abort=stop_requested,
                                        max_seconds=args.max_seconds, clock=runtime.clock,
                                        sleep=time.sleep)
-            if box is not None:
-                box = fine_center_on_road(runtime, vision, box)
             # Blind drop needs no camera frames after horizontal centring.
             vision.close()
             if box is None:

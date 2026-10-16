@@ -172,7 +172,18 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.vision.frame_size=(1280,720)
         with patch.object(task,"_detect_stopped",side_effect=AssertionError("already centered")):
             self.assertEqual(self.run_main(),0)
-        self.assertTrue(any(e=="yellow_align" and v.get("source")=="continuous_search" for e,v in self.events))
+        centered=[v for e,v in self.events if e=='competition_target_centered']
+        self.assertTrue(centered)
+        self.assertTrue(all(v['cx_px']==320 and v['tolerance_px']==32 for v in centered))
+        for index,(event,values) in enumerate(self.events):
+            if event=='competition_target_centered':
+                self.assertEqual(self.events[index+1][0],'competition_stage_start')
+                self.assertEqual(self.events[index+2][0],'payload_detour_road_pose')
+                first=next(v for e,v in self.events[index+1:] if e=='payload_detour_stage_start')
+                self.assertEqual(first['stage'],'left_90deg')
+        forbidden={'search_gain_probe','search_road_gain','search_road_adjust',
+                   'competition_target_blind_drop'}
+        self.assertFalse(forbidden.intersection(e for e,v in self.events))
 
     def test_standalone_search_uses_the_same_continuous_field_search(self):
         self.assertEqual(main(["--mode","hardware-mission","--competition-stage","yellow-search",

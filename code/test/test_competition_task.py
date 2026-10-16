@@ -118,18 +118,37 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertEqual(len(self.route_events('payload_drop')), 3)
         self.assertTrue(all(d['skipped'] and not d['detour_completed'] for d in self.route_events('payload_drop')))
 
-    def test_failed_alignment_drops_blind_without_retriggering_same_target(self):
+    def assert_no_road_refinement(self):
+        forbidden = {'search_gain_probe', 'search_road_gain', 'search_road_adjust',
+                     'competition_target_blind_drop'}
+        self.assertFalse(forbidden.intersection(c.args[0] for c in self.runtime.record_event.call_args_list))
+
+    def test_one_centered_frame_enters_detour_without_resampling_or_retriggering(self):
         self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
-        self.fake_vision(lambda now: (now, (('yellow',(300,100,340,140,.95,7)),)))
-        with patch.object(task, 'fine_center_on_road', return_value=None) as align:
+        reads = []
+        def observe(now):
+            reads.append(now)
+            self.runtime.record_event('test_vision_read')
+            return now, (('yellow',(300,100,340,140,.95,7)),)
+        self.fake_vision(observe)
+        original = task.perform_payload_detour
+        def detour(*args, **kwargs):
+            # No camera call or motion may intervene after the triggering event.
+            events = self.runtime.record_event.call_args_list
+            self.assertEqual(events[-2].args, ('competition_target_centered',))
+            self.assertEqual(events[-1].args, ('competition_stage_start',))
+            read_count = len(reads)
+            self.assertEqual(reads[-1], self.now)
+            result = original(*args, **kwargs)
+            self.assertEqual(len(reads), read_count)
+            return result
+        with patch.object(task, 'perform_payload_detour', side_effect=detour):
             task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
-        align.assert_called_once()
         self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
-        # Operator instruction 2026-10-16: a failed road centring releases blind
-        # instead of skipping, and the consumed target must not retrigger.
-        blind = self.route_events('competition_target_blind_drop')
-        self.assertEqual([d['color'] for d in blind], ['yellow'])
-        self.assertTrue(self.open.called)
+        self.assertEqual([v['color'] for v in self.route_events('competition_target_centered')], ['yellow'])
+        self.assertEqual(self.route_events('payload_detour_stage_start')[0]['stage'], 'left_90deg')
+        self.assertEqual([c.args for c in self.open.call_args_list], [(0,)])
+        self.assert_no_road_refinement()
 
     def test_two_simultaneous_colours_choose_nearest_center_then_name(self):
         self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
@@ -144,18 +163,12 @@ class CompetitionTaskTests(unittest.TestCase):
         task.run_full_mission(self.runtime,detector=Mock(),car_only_test=True)
         self.assertEqual([d['color'] for d in self.route_events('payload_drop') if d['detour_completed']],['blue','red','yellow'])
 
-    def test_failed_alignment_drops_blind_then_continues_with_next_colour(self):
-        original = task.fine_center_on_road
-        calls = []
-        def align(runtime,vision,box,**kwargs):
-            calls.append(kwargs['color'])
-            return None if len(calls)==1 else original(runtime,vision,box,**kwargs)
-        with patch.object(task,'fine_center_on_road',side_effect=align):
-            self.run_visual_route([(1,'yellow',.04),(1,'yellow',.18),(3,'blue',.08)])
-        # The first, failed yellow centring still drops that payload, so yellow is
-        # consumed and never re-triggered; yellow and blue both leave the car.
-        self.assertEqual(calls,['yellow','blue'])
-        self.assertEqual(len([d for d in self.route_events('payload_drop') if d['detour_completed']]),2)
+    def test_consumed_yellow_does_not_retrigger_and_later_colour_still_drops(self):
+        self.run_visual_route([(1,'yellow',.04),(1,'yellow',.18),(3,'blue',.08)])
+        drops = [d for d in self.route_events('payload_drop') if d['detour_completed']]
+        self.assertEqual([d['color'] for d in drops], ['yellow','blue'])
+        self.assertEqual([c.args for c in self.open.call_args_list], [(0,), (1,)])
+        self.assert_no_road_refinement()
 
     def test_car_only_ocr_fallback_runs_real_servos_without_drone(self):
         self.fake_vision()
@@ -175,17 +188,53 @@ class CompetitionTaskTests(unittest.TestCase):
         cleanup_open.assert_called_once()
         send.assert_not_called()
 
-    def test_fine_center_feedback_cannot_switch_to_other_colour(self):
+    def test_unassigned_colour_cannot_slow_or_trigger_the_car(self):
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
+        self.fake_vision(lambda now: (now, (('green',(300,0,340,40,.99,7)),)))
+        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
+        self.assertFalse(self.route_events('competition_target_centered'))
+        self.assertFalse(any(v['slowing'] for v in self.route_events('target_search_speed')))
+        self.open.assert_not_called()
+        self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
+
+    def test_visible_but_never_centered_finishes_three_legs_without_drop(self):
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
+        self.fake_vision(lambda now: (now, (('yellow',(230,0,270,40,.95,7)),)))
+        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
+        self.assertTrue(any(v['slowing'] for v in self.route_events('target_search_speed')))
+        self.assertFalse(self.route_events('target_search_centered'))
+        self.assertFalse(self.route_events('payload_detour_stage_start'))
+        self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
+        self.assertTrue(all(d['skipped'] for d in self.route_events('payload_drop')))
+        self.open.assert_not_called()
+        self.assert_no_road_refinement()
+
+    def test_offcenter_disappears_then_one_centered_frame_triggers(self):
+        self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
+        samples = [250, None, 320]
         def observe(now):
-            cx = 328.-400*self.xy_yaw[0]
-            return now, (('blue',(cx-20,0,cx+20,40,.95,99)),
-                         ('yellow',(300,0,340,40,.99,7)))
-        vision = self.fake_vision(observe)
-        result = task.fine_center_on_road(self.runtime,vision,(308,0,348,40,.95,99),color='blue')
-        self.assertIsNotNone(result)
-        self.assertEqual(result[5],99)
-        self.assertGreater(self.xy_yaw[0],.015)
-        self.assertTrue(self.route_events('search_road_gain'))
+            if not self.route_events('competition_route_leg_start'):
+                return now, ()
+            if not self.sample_stamps or now != self.sample_stamps[-1]:
+                self.sample_stamps.append(now)
+                self.samples_seen.append(samples[min(len(self.samples_seen), len(samples)-1)])
+            cx = self.samples_seen[-1]
+            if cx != 320:
+                self.assertFalse(self.route_events('payload_detour_stage_start'))
+            boxes = () if cx is None else (('yellow',(cx-20,0,cx+20,40,.95,7)),)
+            return now, boxes
+        self.samples_seen, self.sample_stamps = [], []
+        self.fake_vision(observe)
+        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
+        self.assertEqual([v['slowing'] for v in self.route_events('target_search_speed')][:3],
+                         [True, False, True])
+        events = [c.args[0] for c in self.runtime.record_event.call_args_list]
+        order = [events.index(name) for name in ('target_search_centered',
+                 'competition_target_centered', 'payload_detour_stage_start')]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(self.route_events('payload_detour_stage_start')[0]['stage'], 'left_90deg')
+        self.assertEqual([c.args for c in self.open.call_args_list], [(0,)])
+        self.assert_no_road_refinement()
 
     def test_origin_and_mount_remain_fixed_after_detours_and_turns(self):
         self.xy_yaw[:] = [1.2,-.4,math.radians(30)]

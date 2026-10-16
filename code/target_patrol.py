@@ -385,7 +385,7 @@ def route_from_pose(pose):
 def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
               clock=time.monotonic, sleep=time.sleep, detour=None, payload_slots=None,
               trigger_anywhere=False):
-    """Acquire new targets, share exact X centring/blind drop, resume endpoints.
+    """Acquire targets, stop at the horizontal centre window, resume endpoints.
 
     A payload detour releases its selected SG90 slot once.
     Optional legacy mode retains the one-second stop/alarm behavior.
@@ -467,7 +467,7 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                 initial_entry = None
                 if detour is not None and entry is not None:
                     runtime.record_event("test_route_payload_target", label=action.label, box=entry)
-                    from competition_task import fine_center_on_road, align_drop_position
+                    from competition_task import align_drop_position
                     settings = detour
                     def blind_align(pivot, road_yaw, side_yaw, motion):
                         return align_drop_position(runtime, None, pivot, road_yaw, side_yaw,
@@ -475,21 +475,20 @@ def run_route(runtime, vision, alarm, *, abort=lambda: False, max_seconds=300,
                     with task_scope(guard):
                         candidate = entry
                         if trigger_anywhere:
-                            # Any visible target starts alignment along the remaining
-                            # patrol line. Drop still requires the shared exact X centre.
+                            # Continue the original line until the centre window.
                             candidate = find_centered_target(runtime, vision, *action.args,
                                 slow_speed_m_s=settings.patrol_slow_speed_m_s, abort=abort,
                                 max_seconds=max(.01, deadline-clock()), clock=clock, sleep=sleep)
-                        aligned = (fine_center_on_road(runtime, vision, candidate)
-                                   if candidate is not None else None)
-                        if aligned is not None:
+                        if candidate is not None:
+                            runtime.motion.stop()
+                            runtime.drive.stop()
                             print("[route] DUAL SERVO PAYLOAD DETOUR", flush=True)
                             run_payload_detour(runtime, settings, guard=guard, clock=clock,
                                                sleep=sleep, travel_drive=original_drive,
                                                fine_align=blind_align)
                             drop_count += 1
                         else:
-                            runtime.record_event("test_route_payload_skipped", reason="horizontal alignment failed",
+                            runtime.record_event("test_route_payload_skipped", reason="search segment exhausted before horizontal centre",
                                                  actuator="dual_servo")
                     # Frames seen while turning/dropping cannot re-arm a target.
                     drop_latch.require_clear()

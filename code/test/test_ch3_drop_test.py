@@ -62,7 +62,6 @@ class Ch3DropTestEntryTests(unittest.TestCase):
         self.resolve = Mock(side_effect=lambda runtime: estimate(self.pose))
         self.prepare = Mock(return_value=servo_ok)
         self.search = Mock(return_value=box, side_effect=search_error)
-        self.fine = Mock(return_value=box)
         self.detour = Mock(return_value=SimpleNamespace(x_m=1.0, y_m=2.0, yaw_rad=0.0))
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -75,8 +74,7 @@ class Ch3DropTestEntryTests(unittest.TestCase):
                             ("close_payload", self.prepare),
                             ("open_payload", Mock(return_value=True)),
                             ("find_centered_target", self.search),
-                            ("perform_payload_detour", self.detour),
-                            ("fine_center_on_road", self.fine)):
+                            ("perform_payload_detour", self.detour)):
             self.stack.enter_context(patch.object(entry, name, new=value))
         self.stack.enter_context(patch.object(entry.signal, "signal"))
 

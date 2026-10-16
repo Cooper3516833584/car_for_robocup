@@ -453,7 +453,7 @@ class PayloadDetourTests(unittest.TestCase):
             route.run_route(self.runtime,Mock(),None,detour=DetourSettings(),payload_slots=(1,2,3))
         self.close.assert_not_called()
 
-    def test_full_frame_visibility_starts_alignment_before_center_band(self):
+    def test_full_frame_visibility_continues_original_line_until_center_band(self):
         self.fixture(started=False)
         vision=self.vision(lambda:BOX if .5<self.pose[0]<1. else None)
         vision.observe_drop.side_effect=lambda _: (math.floor(self.now/.08),
@@ -466,7 +466,23 @@ class PayloadDetourTests(unittest.TestCase):
         self.assertEqual(count,1)
         self.assertTrue(any(e=='test_route_payload_target' and v['box']==BOX
                             for e,v in self.events))
-        self.assertTrue(any(e=='search_road_align_done' and v['success'] for e,v in self.events))
+        self.assertTrue(any(e=='target_search_centered' for e,v in self.events))
+        stages=[v['stage'] for e,v in self.events if e=='payload_detour_stage_start']
+        self.assertEqual(stages[0],'left_90deg')
+        self.assertFalse(any(e in {'search_gain_probe','search_road_gain','search_road_adjust',
+                                  'competition_target_blind_drop'} for e,v in self.events))
+
+    def test_visible_uncentered_demo_target_exhausts_line_without_release(self):
+        self.fixture(started=False)
+        vision=self.vision(lambda:BOX)
+        vision.observe_drop.side_effect=lambda _: (math.floor(self.now/.08),BOX,None)
+        count=route.run_route(self.runtime,vision,None,detour=DetourSettings(),
+                             trigger_anywhere=True,clock=lambda:self.now,sleep=self.advance)
+        self.assertEqual(count,0)
+        self.assertFalse(self.releases)
+        self.assertFalse(any(e=='payload_detour_stage_start' for e,v in self.events))
+        self.assertTrue(any(e=='test_route_payload_skipped' for e,v in self.events))
+        self.assertEqual(self.runtime.mission.state,RobocupMissionState.FINISHED)
 
     def test_targets_seen_only_during_patrol_turns_do_not_drop(self):
         self.fixture(started=False)

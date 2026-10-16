@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 import math
-from statistics import median
 from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
@@ -81,19 +80,9 @@ ALIGN_MAX_STEPS = 20
 # Relative short moves now construct endpoints in the fused frame.
 SHORT_MOVE_TOLERANCE_M = 0.005
 
-# ---- CH3 road visual centring, then blind fused drop ------------------------
+# ---- Central 10% trigger, then fixed fused side-drop ------------------------
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
-SEARCH_REFERENCE_CX = 320.0  # Horizontal camera centre at +90 deg.
-# Lateral alignment tolerance at the road target, in metres.  The pixel gate is
-# derived from the measured gain: 2 cm at the 133 px/m measured on 2026-10-16 is
-# 2.7 px, so the historical fixed 4 px gate let a ~3 cm error pass.  The gate is
-# never looser than 2 cm at that design gain; a smaller gain only tightens it.
-SEARCH_ALIGN_TOL_M = 0.02
-SEARCH_ALIGN_GAIN_REF_PX_PER_M = 133.0
-SEARCH_ALIGN_TOL_PX = SEARCH_ALIGN_TOL_M * SEARCH_ALIGN_GAIN_REF_PX_PER_M
-SEARCH_ALIGN_TOL_MIN_PX = 1.0
-SEARCH_ALIGN_MAX_STEPS = 12
 DROP_SAFE_M = 0.43       # Operator revised the blind drop reach, 2026-10-11.
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
@@ -484,9 +473,6 @@ def search_centered_yellow_on_line(runtime, camera, detector, *, servo=None,
         if box is None:
             runtime.record_event("yellow_not_found", reason="search segment exhausted")
             return None
-        box = fine_center_on_road(runtime, vision, box)
-        if box is None:
-            return None
         from components.yellow_yolo_adapter import YellowDetection
         x1,y1,x2,y2,confidence,_ = box
         width,height = vision.frame_size
@@ -507,158 +493,6 @@ def search_centered_yellow_on_line(runtime, camera, detector, *, servo=None,
                 runtime.record_event("competition_cleanup_failed", resource=name, reason=str(exc))
         if cleanup_error is not None and not primary_error:
             raise cleanup_error
-
-
-def _observe_road_target(vision, now, color=None):
-    if color is None:
-        return vision.observe_drop(now)
-    from target_patrol import visible_target, horizontal_target
-    stamp, colored = vision.observe_colours(now)
-    width, height = vision.frame_size
-    boxes = sorted((box for name, box in colored if name == color),
-                   key=lambda b: abs((b[0]+b[2])/2-width/2))
-    return (stamp, visible_target(boxes, width, height, YELLOW_MIN_CONF),
-            horizontal_target(boxes, width, YELLOW_MIN_CONF,
-                              center_width_ratio=2*YELLOW_CX_TOL_PX/CAMERA_WIDTH))
-
-
-def fine_center_on_road(runtime, vision, initial_box, *, color=None):
-    """Three fresh +90 YOLO centres, one gain probe, then straight fused moves.
-
-    Pixel direction is measured once in this search and never flipped from a
-    noisy error. An unusable observation skips the drop; it is not centred.
-    The worker owns the camera throughout; this never opens a second capture.
-    """
-    runtime.motion.stop()
-    runtime.drive.stop()
-    origin = wait_for_fused_localization(runtime).estimate.pose
-    try:
-        last_frame = _observe_road_target(vision, runtime.clock(), color)[0]
-    except RuntimeError as exc:
-        runtime.record_event("search_road_align_done", success=False, reason=str(exc))
-        return None
-    logger_path = getattr(getattr(runtime, "event_logger", None), "path", None)
-    evidence_dir = (Path(logger_path).parent / "search_frames"
-                    if isinstance(logger_path, (str, Path)) else None)
-    saved = 0
-    sample_uncertainty = 0.
-
-    def sample():
-        nonlocal last_frame, saved, sample_uncertainty
-        centres, boxes = [], []
-        not_before = runtime.clock()
-        deadline = not_before + 3.0
-        while runtime.clock() < deadline and len(centres) < 3:
-            _step(runtime)  # Includes task STOP/deadline and localization safety.
-            try:
-                stamp, box, _ = _observe_road_target(vision, runtime.clock(), color)
-            except RuntimeError as exc:
-                runtime.record_event("search_road_observation_failed", reason=str(exc))
-                return None
-            if stamp != last_frame and stamp >= not_before:
-                last_frame = stamp
-                if box is None:
-                    return None
-                width, _ = vision.frame_size
-                cx = (box[0] + box[2]) / 2 * CAMERA_WIDTH / width
-                if not math.isfinite(cx):
-                    return None
-                centres.append(cx)
-                boxes.append(box)
-                if evidence_dir is not None:
-                    try:
-                        vision.save_latest_frame(evidence_dir / f"road_{saved:04d}")
-                    except Exception as exc:
-                        runtime.record_event("drop_evidence_failed", reason=str(exc))
-                    saved += 1
-            time.sleep(CONTROL_DT_S)
-        if len(centres) != 3 or max(centres) - min(centres) > 12:
-            return None
-        sample_uncertainty = max(centres)-min(centres)
-        pose = wait_for_fused_localization(runtime).estimate.pose
-        dx, dy = pose.x_m-origin.x_m, pose.y_m-origin.y_m
-        _, height = vision.frame_size
-        runtime.record_event("search_road_observation", yaw=pose.yaw_rad,
-                             fused_x=pose.x_m, fused_y=pose.y_m,
-                             road_projection=dx*math.cos(origin.yaw_rad)+dy*math.sin(origin.yaw_rad),
-                             side_projection=-dx*math.sin(origin.yaw_rad)+dy*math.cos(origin.yaw_rad),
-                             observed_x=median(centres),
-                             observed_y=median((b[1]+b[3])/2*CAMERA_HEIGHT/height for b in boxes),
-                             reference_x=SEARCH_REFERENCE_CX, reference_y=None,
-                             chosen_action="road_observe", frame_timestamp=last_frame)
-        return median(centres), boxes[centres.index(median(centres))]
-
-    original_nav = runtime.motion.navigation
-    original_drive = runtime.motion.drive
-    runtime.motion.navigation = replace(original_nav, position_tolerance_m=min(
-        original_nav.position_tolerance_m, SHORT_MOVE_TOLERANCE_M))
-    runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
-        original_drive.max_linear_speed_m_s, DROP_FINE_SPEED_M_S))
-    motion = _fused_motion(runtime)
-
-    def fallback(reason):
-        runtime.drive.stop()
-        runtime.record_event("search_road_align_done", success=False, reason=reason)
-        return None
-
-    try:
-        before = sample()
-        if before is None:
-            return fallback("fresh centres unavailable")
-        if abs(before[0] - SEARCH_REFERENCE_CX) <= SEARCH_ALIGN_TOL_PX:
-            runtime.record_event("search_road_align_done", success=True, observed_x=before[0],
-                                 reference_x=SEARCH_REFERENCE_CX,
-                                 tolerance_px=SEARCH_ALIGN_TOL_PX)
-            return before[1]
-        before_uncertainty = sample_uncertainty
-        # Sampling takes time: search braking/coast must not consume the probe.
-        # The probe must move the centre by at least the 2 cm tolerance, so the
-        # significance gate uses that gate instead of the old fixed 4 px.
-        probe_origin = wait_for_fused_localization(runtime).estimate.pose
-        _fused_translation(motion, probe_origin, origin.yaw_rad, ALIGN_STEP_M, "search_gain_probe")
-        after = sample()
-        probe = wait_for_fused_localization(runtime).estimate.pose
-        actual_m = ((probe.x_m-probe_origin.x_m)*math.cos(origin.yaw_rad)
-                    + (probe.y_m-probe_origin.y_m)*math.sin(origin.yaw_rad))
-        if (after is None or actual_m <= .005 or
-                abs(after[0]-before[0]) < max(SEARCH_ALIGN_TOL_PX,
-                                              before_uncertainty+sample_uncertainty)):
-            return fallback("pixel gain unidentifiable")
-        raw_gain = (after[0]-before[0]) / actual_m
-        gain = raw_gain
-        # Never looser than 2 cm at the measured design gain: a tighter pixel gate
-        # is safe, a looser one would release further off the road centre.
-        tolerance_px = min(SEARCH_ALIGN_TOL_PX,
-                           max(SEARCH_ALIGN_TOL_MIN_PX, SEARCH_ALIGN_TOL_M * abs(raw_gain)))
-        runtime.record_event("search_road_gain", gain_px_per_m=gain, probe_m=actual_m,
-                             cx_before=before[0], cx_after=after[0],
-                             raw_gain_px_per_m=raw_gain, tolerance_px=tolerance_px)
-        observation, pose = after, probe
-        for index in range(SEARCH_ALIGN_MAX_STEPS):
-            cx, box = observation
-            error = cx - SEARCH_REFERENCE_CX
-            runtime.record_event("search_road_align_step", step=index, observed_x=cx,
-                                 reference_x=SEARCH_REFERENCE_CX, gain_px_per_m=gain,
-                                 tolerance_px=tolerance_px,
-                                 yaw=pose.yaw_rad, fused_x=pose.x_m, fused_y=pose.y_m,
-                                 chosen_action="hold" if abs(error) <= tolerance_px else "road_straight")
-            if abs(error) <= tolerance_px:
-                runtime.record_event("search_road_align_done", success=True, observed_x=cx,
-                                     reference_x=SEARCH_REFERENCE_CX,
-                                     tolerance_px=tolerance_px)
-                return box
-            distance = max(-ALIGN_STEP_M, min(ALIGN_STEP_M, -error / gain))
-            pose = wait_for_fused_localization(runtime).estimate.pose
-            pose = _fused_translation(motion, pose, origin.yaw_rad, distance, "search_road_adjust")
-            observation = sample()
-            pose = wait_for_fused_localization(runtime).estimate.pose
-            if observation is None:
-                return fallback("target unstable during road correction")
-        return fallback("bounded road correction exhausted")
-    finally:
-        runtime.motion.navigation = original_nav
-        runtime.motion.drive = original_drive
-        runtime.drive.stop()
 
 
 def align_yellow_drop_zone(runtime, camera, detector, initial_detection=None):
@@ -974,17 +808,11 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
         if box is None:
             return wait_for_fused_localization(runtime)
         color = selected_color
-        centered = None  # Never retrigger the consumed frame after failed alignment.
-        aligned = fine_center_on_road(runtime, vision, box, color=color)
-        if aligned is None:
-            # Operator instruction 2026-10-16: never skip the drop.  The payload
-            # detour is a blind fused approach, so an un-centred road target still
-            # releases at the fixed reach instead of driving on with the payload.
-            runtime.record_event("competition_target_blind_drop", color=color,
-                                 reason="road alignment failed; blind fused drop")
-        else:
-            runtime.record_event("yellow_align", source="continuous_search", color=color,
-                                 cx_px=(aligned[0]+aligned[2])/2, cy_px=(aligned[1]+aligned[3])/2)
+        centered = None  # The triggering frame has been consumed.
+        frame_width, _ = vision.frame_size
+        runtime.record_event("competition_target_centered", color=color,
+                             cx_px=((box[0]+box[2])/2)*CAMERA_WIDTH/frame_width,
+                             tolerance_px=YELLOW_CX_TOL_PX, confidence=box[4])
         slots = pending_payloads[color]
         slot = slots[0]
         dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(

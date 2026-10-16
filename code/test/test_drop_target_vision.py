@@ -11,6 +11,8 @@ from unittest.mock import Mock, PropertyMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
 import payload_detour
+import target_patrol as patrol
+from components.basic_motion_controller import MotionActionState
 from components import drop_target_vision as dvision
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
 from config.v2_runtime import RuntimeMode
@@ -232,87 +234,70 @@ class ReferencePhotoTests(unittest.TestCase):
         self.assertIsNone(dvision.stable_feature([(300.,300.,450.),None,(300.,300.,450.)]))
 
 
-class RoadAlignmentTests(unittest.TestCase):
-    def fixture(self, gain=-800., *, fail_after_moves=None, same_timestamp=False):
-        self.now, self.x = 10., 0.
-        self.moves, self.events = [], []
+class RoadTriggerTests(unittest.TestCase):
+    def test_native_width_inclusive_boundaries_and_no_vertical_gate(self):
+        for width, low, high in ((640,288,352),(1280,576,704)):
+            for cx, expected in ((low-1,False),(low,True),(width/2,True),
+                                 (high,True),(high+1,False)):
+                for y in (0, 680):
+                    with self.subTest(width=width,cx=cx,y=y):
+                        box=(cx-10,y,cx+10,y+20,.8,3)
+                        result=patrol.horizontal_target([box],width,min_conf=.8)
+                        self.assertEqual(result is not None,expected)
+                        if expected:
+                            self.assertEqual(result,box)
+
+    def test_invalid_or_low_confidence_boxes_never_trigger(self):
+        for box in ((300,0,340,40,.79,3),(340,0,300,40,.95,3),
+                    (300,40,340,0,.95,3),(300,0,math.nan,40,.95,3)):
+            self.assertIsNone(patrol.horizontal_target([box],640,min_conf=.8))
+
+    def fixture(self, centres):
+        self.tick=0
+        self.events=[]
         config=load_runtime_config()
-        self.runtime=SimpleNamespace(motion=SimpleNamespace(navigation=config.navigation,
-            drive=config.drive, stop=Mock()), drive=Mock(), clock=lambda:self.now,
-            record_event=lambda e,**v:self.events.append((e,v)))
-        self.initial=(330.,0.,370.,40.,.95,3)
-        self.vision=SimpleNamespace(frame_size=(640,480))
+        self.runtime=SimpleNamespace(motion=SimpleNamespace(drive=config.drive,
+            state=MotionActionState.RUNNING,stop=Mock(),track_global_line=Mock()),
+            drive=Mock(),mission=Mock(),record_event=lambda e,**v:self.events.append((e,v)))
+        self.original_drive=config.drive
+        def observe(now):
+            cx=centres[min(self.tick,len(centres)-1)]
+            box=None if cx is None else (cx-20,0,cx+20,40,.95,3)
+            centered=patrol.horizontal_target([box] if box else [],640,min_conf=.8)
+            return now,box,centered
+        self.vision=SimpleNamespace(ready=True,observe_drop=observe)
+        def step(_):
+            self.tick+=1
+            if self.tick>=len(centres):
+                self.runtime.motion.state=MotionActionState.SUCCEEDED
+        self.step=step
 
-        def observation(_):
-            cx=350.+gain*self.x
-            box=(cx-20,0,cx+20,40,.95,3)
-            if fail_after_moves is not None and len(self.moves)>=fail_after_moves:
-                box=None
-            return (10. if same_timestamp else self.now),box,box
+    def test_visibility_disappearance_restores_speed_then_first_center_stops(self):
+        self.fixture([250,None,320])
+        with patch.object(patrol,'_step',side_effect=self.step):
+            box=patrol.find_centered_target(self.runtime,self.vision,(0,0),(1,0),
+                clock=lambda:10.+self.tick*.05,sleep=lambda _:None)
+        self.assertEqual((box[0]+box[2])/2,320)
+        speeds=[v for e,v in self.events if e=='target_search_speed']
+        self.assertEqual([v['slowing'] for v in speeds],[True,False,True])
+        self.assertEqual([v['max_speed_m_s'] for v in speeds],
+                         [.08,self.original_drive.max_linear_speed_m_s,.08])
+        self.assertEqual(self.tick,2)  # A single central frame; no confirmation step.
+        self.runtime.motion.track_global_line.assert_called_once_with((0,0),(1,0))
+        self.runtime.motion.stop.assert_called()
+        self.runtime.drive.stop.assert_called()
+        self.assertIs(self.runtime.motion.drive,self.original_drive)
 
-        self.vision.observe_drop=observation
-        self.stack=ExitStack()
-        self.addCleanup(self.stack.close)
-        self.stack.enter_context(patch.object(task,'_step',return_value=Mock()))
-        self.stack.enter_context(patch.object(task,'wait_for_fused_localization',
-            side_effect=lambda _:SimpleNamespace(estimate=SimpleNamespace(pose=SimpleNamespace(
-                x_m=self.x,y_m=0.,yaw_rad=0.)))))
-        self.stack.enter_context(patch.object(task.time,'sleep',side_effect=self.advance))
-        self.stack.enter_context(patch.object(task,'_fused_motion',return_value=self.motion))
-
-    def advance(self,dt):
-        self.now+=dt
-
-    def motion(self,label,method,start,end,**kwargs):
-        self.assertEqual(method,'track_global_line')
-        self.assertAlmostEqual(start[1],end[1])
-        if label != 'search_restore_stop':
-            self.assertLessEqual(math.dist(start,end),.021)
-        self.moves.append((label,start,end,kwargs))
-        self.x=end[0]
-        self.now+=.5
-        return SimpleNamespace(x_m=self.x,y_m=0.,yaw_rad=0.)
-
-    def test_one_probe_fixes_gain_sign_and_centres_before_any_turn(self):
-        for gain in (-800.,800.):
-            with self.subTest(gain=gain):
-                self.fixture(gain)
-                box=task.fine_center_on_road(self.runtime,self.vision,self.initial)
-                self.assertAlmostEqual((box[0]+box[2])/2,task.SEARCH_REFERENCE_CX,delta=4)
-                gains=[v for e,v in self.events if e=='search_road_gain']
-                self.assertEqual(len(gains),1)
-                self.assertAlmostEqual(gains[0]['gain_px_per_m'],gain)
-                self.assertEqual(self.moves[0][0],'search_gain_probe')
-                self.assertFalse(any('flip' in e for e,_ in self.events))
-
-    def test_unidentifiable_gain_and_lost_new_frames_skip_uncentred_drop(self):
-        for gain,fail in ((0.,None),(-800.,1),(-800.,2)):
-            with self.subTest(gain=gain,fail=fail):
-                self.fixture(gain,fail_after_moves=fail)
-                box=task.fine_center_on_road(self.runtime,self.vision,self.initial)
-                self.assertIsNone(box)
-                self.assertTrue(any(e=='search_road_align_done' and not v['success']
-                                    for e,v in self.events))
-
-    def test_repeated_timestamp_is_not_three_fresh_frames(self):
-        self.fixture(same_timestamp=True)
-        self.assertIsNone(task.fine_center_on_road(self.runtime,self.vision,self.initial))
-        self.assertFalse(self.moves)
-
-    def test_search_coast_does_not_consume_gain_probe(self):
-        self.fixture()
-        initial_observation=self.vision.observe_drop
-        def observation(now):
-            if not self.moves:
-                self.x=.018  # Search has coasted while fresh images arrive.
-            return initial_observation(now)
-        self.vision.observe_drop=observation
-        box=task.fine_center_on_road(self.runtime,self.vision,self.initial)
-        self.assertIsNotNone(box)
-        probe=self.moves[0]
-        self.assertAlmostEqual(probe[1][0], .018)
-        self.assertAlmostEqual(probe[2][0]-probe[1][0], .02)
-        self.assertAlmostEqual((box[0]+box[2])/2, 320, delta=4)
+    def test_visible_uncentered_target_only_slowly_finishes_original_line(self):
+        self.fixture([250,250,250])
+        with patch.object(patrol,'_step',side_effect=self.step):
+            result=patrol.find_centered_target(self.runtime,self.vision,(0,0),(1,0),
+                clock=lambda:10.+self.tick*.05,sleep=lambda _:None)
+        self.assertIsNone(result)
+        self.runtime.motion.track_global_line.assert_called_once_with((0,0),(1,0))
+        self.assertFalse(any(e=='target_search_centered' for e,v in self.events))
+        self.assertTrue(any(e=='target_search_exhausted' for e,v in self.events))
+        self.assertIs(self.runtime.motion.drive,self.original_drive)
 
 
 class DetourFineAlignTests(unittest.TestCase):
