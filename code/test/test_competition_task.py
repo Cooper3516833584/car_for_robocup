@@ -118,14 +118,18 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertEqual(len(self.route_events('payload_drop')), 3)
         self.assertTrue(all(d['skipped'] and not d['detour_completed'] for d in self.route_events('payload_drop')))
 
-    def test_failed_alignment_does_not_retrigger_same_visible_target(self):
+    def test_failed_alignment_drops_blind_without_retriggering_same_target(self):
         self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
         self.fake_vision(lambda now: (now, (('yellow',(300,100,340,140,.95,7)),)))
         with patch.object(task, 'fine_center_on_road', return_value=None) as align:
             task.run_full_mission(self.runtime, detector=Mock(), car_only_test=True)
         align.assert_called_once()
         self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
-        self.open.assert_not_called()
+        # Operator instruction 2026-10-16: a failed road centring releases blind
+        # instead of skipping, and the consumed target must not retrigger.
+        blind = self.route_events('competition_target_blind_drop')
+        self.assertEqual([d['color'] for d in blind], ['yellow'])
+        self.assertTrue(self.open.called)
 
     def test_two_simultaneous_colours_choose_nearest_center_then_name(self):
         self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
@@ -140,7 +144,7 @@ class CompetitionTaskTests(unittest.TestCase):
         task.run_full_mission(self.runtime,detector=Mock(),car_only_test=True)
         self.assertEqual([d['color'] for d in self.route_events('payload_drop') if d['detour_completed']],['blue','red','yellow'])
 
-    def test_failed_target_can_reenter_after_new_clear_frames(self):
+    def test_failed_alignment_drops_blind_then_continues_with_next_colour(self):
         original = task.fine_center_on_road
         calls = []
         def align(runtime,vision,box,**kwargs):
@@ -148,7 +152,9 @@ class CompetitionTaskTests(unittest.TestCase):
             return None if len(calls)==1 else original(runtime,vision,box,**kwargs)
         with patch.object(task,'fine_center_on_road',side_effect=align):
             self.run_visual_route([(1,'yellow',.04),(1,'yellow',.18),(3,'blue',.08)])
-        self.assertEqual(calls,['yellow','yellow','blue'])
+        # The first, failed yellow centring still drops that payload, so yellow is
+        # consumed and never re-triggered; yellow and blue both leave the car.
+        self.assertEqual(calls,['yellow','blue'])
         self.assertEqual(len([d for d in self.route_events('payload_drop') if d['detour_completed']]),2)
 
     def test_car_only_ocr_fallback_runs_real_servos_without_drone(self):

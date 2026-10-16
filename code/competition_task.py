@@ -85,6 +85,15 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
 SEARCH_REFERENCE_CX = 320.0  # Horizontal camera centre at +90 deg.
+# Lateral alignment tolerance at the road target, in metres.  The pixel gate is
+# derived from the measured gain: 2 cm at the 133 px/m measured on 2026-10-16 is
+# 2.7 px, so the historical fixed 4 px gate let a ~3 cm error pass.  The gate is
+# never looser than 2 cm at that design gain; a smaller gain only tightens it.
+SEARCH_ALIGN_TOL_M = 0.02
+SEARCH_ALIGN_GAIN_REF_PX_PER_M = 133.0
+SEARCH_ALIGN_TOL_PX = SEARCH_ALIGN_TOL_M * SEARCH_ALIGN_GAIN_REF_PX_PER_M
+SEARCH_ALIGN_TOL_MIN_PX = 1.0
+SEARCH_ALIGN_MAX_STEPS = 12
 DROP_SAFE_M = 0.43       # Operator revised the blind drop reach, 2026-10-11.
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
@@ -596,37 +605,49 @@ def fine_center_on_road(runtime, vision, initial_box, *, color=None):
         before = sample()
         if before is None:
             return fallback("fresh centres unavailable")
-        if abs(before[0] - SEARCH_REFERENCE_CX) <= 4:
+        if abs(before[0] - SEARCH_REFERENCE_CX) <= SEARCH_ALIGN_TOL_PX:
             runtime.record_event("search_road_align_done", success=True, observed_x=before[0],
-                                 reference_x=SEARCH_REFERENCE_CX)
+                                 reference_x=SEARCH_REFERENCE_CX,
+                                 tolerance_px=SEARCH_ALIGN_TOL_PX)
             return before[1]
         before_uncertainty = sample_uncertainty
         # Sampling takes time: search braking/coast must not consume the probe.
+        # The probe must move the centre by at least the 2 cm tolerance, so the
+        # significance gate uses that gate instead of the old fixed 4 px.
         probe_origin = wait_for_fused_localization(runtime).estimate.pose
-        _fused_translation(motion, probe_origin, origin.yaw_rad, .02, "search_gain_probe")
+        _fused_translation(motion, probe_origin, origin.yaw_rad, ALIGN_STEP_M, "search_gain_probe")
         after = sample()
         probe = wait_for_fused_localization(runtime).estimate.pose
         actual_m = ((probe.x_m-probe_origin.x_m)*math.cos(origin.yaw_rad)
                     + (probe.y_m-probe_origin.y_m)*math.sin(origin.yaw_rad))
         if (after is None or actual_m <= .005 or
-                abs(after[0]-before[0]) < max(4,before_uncertainty+sample_uncertainty)):
+                abs(after[0]-before[0]) < max(SEARCH_ALIGN_TOL_PX,
+                                              before_uncertainty+sample_uncertainty)):
             return fallback("pixel gain unidentifiable")
-        gain = (after[0]-before[0]) / actual_m
+        raw_gain = (after[0]-before[0]) / actual_m
+        gain = raw_gain
+        # Never looser than 2 cm at the measured design gain: a tighter pixel gate
+        # is safe, a looser one would release further off the road centre.
+        tolerance_px = min(SEARCH_ALIGN_TOL_PX,
+                           max(SEARCH_ALIGN_TOL_MIN_PX, SEARCH_ALIGN_TOL_M * abs(raw_gain)))
         runtime.record_event("search_road_gain", gain_px_per_m=gain, probe_m=actual_m,
-                             cx_before=before[0], cx_after=after[0])
+                             cx_before=before[0], cx_after=after[0],
+                             raw_gain_px_per_m=raw_gain, tolerance_px=tolerance_px)
         observation, pose = after, probe
-        for index in range(8):
+        for index in range(SEARCH_ALIGN_MAX_STEPS):
             cx, box = observation
             error = cx - SEARCH_REFERENCE_CX
             runtime.record_event("search_road_align_step", step=index, observed_x=cx,
                                  reference_x=SEARCH_REFERENCE_CX, gain_px_per_m=gain,
+                                 tolerance_px=tolerance_px,
                                  yaw=pose.yaw_rad, fused_x=pose.x_m, fused_y=pose.y_m,
-                                 chosen_action="hold" if abs(error) <= 4 else "road_straight")
-            if abs(error) <= 4:
+                                 chosen_action="hold" if abs(error) <= tolerance_px else "road_straight")
+            if abs(error) <= tolerance_px:
                 runtime.record_event("search_road_align_done", success=True, observed_x=cx,
-                                     reference_x=SEARCH_REFERENCE_CX)
+                                     reference_x=SEARCH_REFERENCE_CX,
+                                     tolerance_px=tolerance_px)
                 return box
-            distance = max(-.02, min(.02, -error / gain))
+            distance = max(-ALIGN_STEP_M, min(ALIGN_STEP_M, -error / gain))
             pose = wait_for_fused_localization(runtime).estimate.pose
             pose = _fused_translation(motion, pose, origin.yaw_rad, distance, "search_road_adjust")
             observation = sample()
@@ -956,11 +977,14 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
         centered = None  # Never retrigger the consumed frame after failed alignment.
         aligned = fine_center_on_road(runtime, vision, box, color=color)
         if aligned is None:
-            runtime.record_event("competition_target_skipped", color=color,
-                                 reason="road alignment failed; await new clear frames")
-            continue
-        runtime.record_event("yellow_align", source="continuous_search", color=color,
-                             cx_px=(aligned[0]+aligned[2])/2, cy_px=(aligned[1]+aligned[3])/2)
+            # Operator instruction 2026-10-16: never skip the drop.  The payload
+            # detour is a blind fused approach, so an un-centred road target still
+            # releases at the fixed reach instead of driving on with the payload.
+            runtime.record_event("competition_target_blind_drop", color=color,
+                                 reason="road alignment failed; blind fused drop")
+        else:
+            runtime.record_event("yellow_align", source="continuous_search", color=color,
+                                 cx_px=(aligned[0]+aligned[2])/2, cy_px=(aligned[1]+aligned[3])/2)
         slots = pending_payloads[color]
         slot = slots[0]
         dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
