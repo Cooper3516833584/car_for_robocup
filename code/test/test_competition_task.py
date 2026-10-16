@@ -469,6 +469,39 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertIn("using fallback task", "\n".join(logs.output))
         self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
+    def test_invalid_ocr_shapes_retry_then_fallback_without_safe_stop(self):
+        for source in ((3, 1, 0), (4, 0, 0), (0, 2, 2)):
+            with self.subTest(source=source):
+                reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+                reader.recognize_camera.return_value = TaskBoardResult(
+                    TaskCounts(*source), 0.95, votes=3)
+                with patch.object(task.time, 'sleep') as retry, \
+                     self.assertLogs(task.LOG, level='WARNING') as logs:
+                    counts = task.read_task_board(reader=reader, runtime=self.runtime)
+                self.assertEqual(counts.key, (1, 2, 1))
+                self.assertEqual(reader.recognize_camera.call_count, 3)
+                self.assertEqual(retry.call_count, 2)
+                reason = f'invalid task-board quota shape: {source}, expected 2/1/1'
+                self.runtime.record_event.assert_called_with(
+                    'task_board_counts', red=1, blue=2, green=1, fallback=True, reason=reason)
+                self.assertIn('task-board attempt 3: ' + reason, '\n'.join(logs.output))
+                self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
+    def test_invalid_ocr_shape_then_valid_counts_returns_second_result(self):
+        reader = Mock(config=SimpleNamespace(required_consensus_votes=3))
+        reader.recognize_camera.side_effect = [
+            TaskBoardResult(TaskCounts(4, 0, 0), 0.95, votes=3),
+            TaskBoardResult(TaskCounts(1, 1, 2), 0.95, votes=3)]
+        with patch.object(task.time, 'sleep') as retry:
+            counts = task.read_task_board(reader=reader, runtime=self.runtime)
+        self.assertEqual(counts.key, (1, 1, 2))
+        self.assertEqual(reader.recognize_camera.call_count, 2)
+        retry.assert_called_once_with(task.TASK_BOARD_RETRY_DELAY_S)
+        self.runtime.record_event.assert_called_with(
+            'task_board_counts', red=1, blue=1, green=2, fallback=False,
+            votes=3, confidence=0.95)
+        self.assertNotEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+
     def test_recognized_task_counts_keep_real_values_and_allocation(self):
         expected = (((2, 1, 1), {"red": 2, "blue": 1}, (0, 0, 1)),
                     ((1, 2, 1), {"blue": 2, "red": 1}, (0, 0, 1)),

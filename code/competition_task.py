@@ -270,12 +270,17 @@ def read_task_board(camera=None, *, reader=None, runtime=None, allow_fallback=Tr
             result = reader.recognize_camera(camera)
             if result.valid and result.votes >= reader.config.required_consensus_votes:
                 counts = result.counts
-                LOG.info("task board: %s", counts.as_dict())
-                if runtime is not None:
-                    runtime.record_event("task_board_counts", **counts.as_dict(), fallback=False,
-                                         votes=result.votes, confidence=result.confidence)
-                return counts
-            reason = result.reason or "task-board consensus not reached"
+                if sorted(counts.key) != [1, 1, 2]:
+                    reason = f"invalid task-board quota shape: {counts.key}, expected 2/1/1"
+                    LOG.warning("task-board attempt %d: %s", attempt + 1, reason)
+                else:
+                    LOG.info("task board: %s", counts.as_dict())
+                    if runtime is not None:
+                        runtime.record_event("task_board_counts", **counts.as_dict(), fallback=False,
+                                             votes=result.votes, confidence=result.confidence)
+                    return counts
+            else:
+                reason = result.reason or "task-board consensus not reached"
         except Exception as exc:
             reason = str(exc)
             LOG.warning("task-board attempt %d: %s", attempt + 1, reason)
