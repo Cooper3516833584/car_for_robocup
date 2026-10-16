@@ -123,6 +123,28 @@ python3 code/main_robocup.py --competition-stage drop
 close 仅支持 all；正常退出保持最后 PWM。直接 drop 默认 OPEN 五只，False 非零退出。
 相机/融合运动测试见 `CENTER_TARGET_ROUTE_TEST.md`，不再提供旧继电器选项。
 
+## 右侧抛投开环测试（不依赖定位与巡线）
+
+`tools/run_right_drop_test.py` 只验证 slot 4 的右侧抛投动作本身：不构造融合位姿、
+不读 D500 墙面、不做巡线，整套动作由“指令量 + 时间”开环驱动，几何顺序与正式
+`payload_detour.py` 的 `right_mount` 一致——前进 2 s → 停车 → 左转 90° → 侧向约
+32 cm → 左转 90° → 停车释放 slot 4 并保持 0.5 s → 右转 90° → 侧向倒回 → 右转 90°
+回到巡线航向 → 再前进 2 s。
+
+```sh
+python3 tools/run_right_drop_test.py --confirm-motor-test                 # 真实释放
+python3 tools/run_right_drop_test.py --confirm-motor-test --simulate-release  # 只验证动作
+python3 tools/run_right_drop_test.py --confirm-motor-test --detour-direction -1  # 先右转
+```
+
+必须显式 `--confirm-motor-test`；`--simulate-release` 只跳过物资 PWM，动作仍会执行。
+Ctrl+C、SIGTERM 或日志目录中的 `STOP` 文件都会立即停车；正常或异常退出都先停车，
+再把五只物资全部 OPEN（模拟模式不改动 PWM）。开始前若 CLOSE 五只失败则拒绝动车。
+
+转角与侧向距离没有反馈，默认值来自实测记录的换算（`WHEEL_TRACKING=0.889`、
+`TURN_RATE_RAD_S=0.50`、`TURN_TIME_S=3.6`），属于**未在现场复测的假设**：首跑必须
+实测核对实际转角与侧移，并按需修改脚本顶部的“快速调整区”或对应命令行参数。
+
 资料：[Radxa ROCK 5A 引脚表](https://docs.radxa.com/en/rock5/rock5a/hardware-design/hardware-interface)、
 [40-PIN 功能测试](https://docs.radxa.com/en/rock5/rock5a/getting-started/interface-usage/pin-40-test)、
 [Radxa overlays](https://github.com/radxa-pkg/radxa-overlays)。
