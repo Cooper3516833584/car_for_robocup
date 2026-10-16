@@ -385,6 +385,108 @@ class NormalMoveTests(unittest.TestCase):
         self.assertLess(speed, 0.0)
 
 
+class DropHeadingBandTests(unittest.TestCase):
+    """The 43/32 cm move holds the reference wall square, with a +/-5 deg band.
+
+    With the chassis facing the wall its normal is parallel to the nose, so
+    ``90 deg - heading_error`` is exactly the angle between that wall and the
+    radar's forward axis.
+    """
+
+    def action(self, *, direction=+1, target=2.03, bearing=REAR_BEARING_RAD,
+               band_deg=5.0, gain=1.5):
+        tracker = WallTracker()
+        wall = make_wall(bearing, 1.6)
+        tracker.set_reference(wall)
+        return MoveNormalToWall(target_distance_m=target, direction=direction,
+                                reference_bearing_rad=bearing, limits=LIMITS,
+                                tracker=tracker,
+                                desired_bearing_rad=REAR_BEARING_RAD,
+                                heading_gain=gain,
+                                heading_band_rad=math.radians(band_deg),
+                                clock=lambda: 0.0)
+
+    def command_at_tilt(self, tilt_deg, **kwargs):
+        action = self.action(**kwargs)
+        bearing = REAR_BEARING_RAD + math.radians(tilt_deg)
+        wall = make_wall(bearing, 1.6)
+        snapshot = snapshot_of(wall, observed=1.0)
+        out = action.step(snapshot, now_s=1.05)
+        return out.command, out.fields
+
+    def test_inside_five_degrees_the_heading_is_left_alone(self):
+        for tilt in (0.0, 1.0, -2.0, 4.9, -4.9, 5.0):
+            with self.subTest(tilt=tilt):
+                command, fields = self.command_at_tilt(tilt)
+                self.assertEqual(command.angular_z_rad_s, 0.0)
+                self.assertTrue(fields["heading_within_band"])
+                self.assertAlmostEqual(fields["heading_error_deg"], tilt, places=6)
+                # The move still happens: a small tilt is not a reason to stall.
+                self.assertGreater(abs(command.linear_x_m_s), 0.0)
+
+    def test_outside_the_band_the_error_is_corrected_toward_the_band(self):
+        for tilt in (6.0, 10.0, 20.0):
+            with self.subTest(tilt=tilt):
+                command, fields = self.command_at_tilt(tilt)
+                self.assertFalse(fields["heading_within_band"])
+                # The wall is to the left of where it should be, so the chassis
+                # has to turn the other way to bring it back.
+                self.assertGreater(command.angular_z_rad_s, 0.0)
+                self.assertLessEqual(abs(command.angular_z_rad_s),
+                                     LIMITS.max_angular_speed_rad_s)
+        negative, _ = self.command_at_tilt(-10.0)
+        self.assertLess(negative.angular_z_rad_s, 0.0)
+
+    def test_the_correction_is_continuous_at_the_band_edge(self):
+        # Infinitesimally outside the band the command leaves zero smoothly, so
+        # crossing the edge cannot produce a jump.
+        just_outside, _ = self.command_at_tilt(5.001)
+        self.assertLess(abs(just_outside.angular_z_rad_s), 0.001)
+        far_out, _ = self.command_at_tilt(30.0)
+        self.assertGreater(abs(far_out.angular_z_rad_s), 0.0)
+
+    def test_the_correction_saturates_instead_of_growing_without_bound(self):
+        command, _ = self.command_at_tilt(80.0)
+        self.assertLessEqual(abs(command.angular_z_rad_s),
+                             LIMITS.max_angular_speed_rad_s)
+
+    def test_the_band_is_configurable(self):
+        command, fields = self.command_at_tilt(6.0, band_deg=10.0)
+        self.assertEqual(command.angular_z_rad_s, 0.0)
+        self.assertTrue(fields["heading_within_band"])
+        # Nothing is corrected inside the wider band...
+        tight, tight_fields = self.command_at_tilt(6.0, band_deg=1.0)
+        # ...while the same tilt is corrected when the band is tight.
+        self.assertGreater(abs(tight.angular_z_rad_s), 0.0)
+        self.assertFalse(tight_fields["heading_within_band"])
+
+    def test_a_negative_gain_or_band_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.action(gain=-1.0)
+        with self.assertRaises(ValueError):
+            self.action(band_deg=-1.0)
+
+    def test_both_move_directions_keep_the_same_heading_behaviour(self):
+        # ``rho_dot = -n_x * v``: for a wall astern (n_x = -1) a forward move
+        # increases the distance and a reverse move decreases it. Each direction
+        # therefore needs a target the right side of the current 1.6 m for there
+        # to be anything to do, and the heading band must behave identically.
+        for direction, target in ((+1, 2.03), (-1, 1.2)):
+            for tilt in (0.0, 10.0, -10.0):
+                with self.subTest(direction=direction, tilt=tilt):
+                    command, _ = self.command_at_tilt(tilt, direction=direction,
+                                                      target=target)
+                    expected = normal_move_command(
+                        make_wall(REAR_BEARING_RAD + math.radians(tilt), 1.6),
+                        target, direction, max_speed_m_s=0.05)[0]
+                    self.assertEqual(math.copysign(1.0, command.linear_x_m_s),
+                                     math.copysign(1.0, expected))
+                    if abs(tilt) > 5.0:
+                        self.assertNotEqual(command.angular_z_rad_s, 0.0)
+                    else:
+                        self.assertEqual(command.angular_z_rad_s, 0.0)
+
+
 class ActionStateMachineTests(unittest.TestCase):
     def limits(self):
         return LIMITS

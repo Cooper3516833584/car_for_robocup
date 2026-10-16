@@ -67,8 +67,12 @@ TERMINAL_DISTINCT_LINES_M = 0.10
 DROP_TERMINAL_RANGE_M = 0.06
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
-# Heading hold while translating squarely toward or away from one wall.
-DROP_HEADING_GAIN = 1.0
+# Heading hold while translating squarely toward or away from one wall. The band
+# is the allowed residual tilt; outside it the correction is proportional with a
+# gain that reaches the chassis angular limit at the edge of a 5 deg-plus band.
+DROP_HEADING_BAND_RAD = math.radians(5.0)
+DROP_HEADING_GAIN = 1.5
+DROP_HEADING_SPEED_FLOOR = 0.4
 DROP_NORMAL_ANGLE_TOLERANCE_RAD = math.radians(35.0)
 TERMINAL_CREEP_SPEED_M_S = 0.008
 
@@ -812,6 +816,7 @@ class MoveNormalToWall(WallAction):
                  terminal_range_m: float = DROP_TERMINAL_RANGE_M,
                  tolerance_m: float = DROP_TOLERANCE_M,
                  heading_gain: float = DROP_HEADING_GAIN,
+                 heading_band_rad: float = DROP_HEADING_BAND_RAD,
                  desired_bearing_rad: float | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  max_age_s: float = 0.40) -> None:
@@ -822,6 +827,8 @@ class MoveNormalToWall(WallAction):
             raise ValueError("target_distance_m must be finite and positive")
         if not math.isfinite(heading_gain) or heading_gain < 0:
             raise ValueError("heading_gain must be finite and non-negative")
+        if not math.isfinite(heading_band_rad) or heading_band_rad < 0:
+            raise ValueError("heading_band_rad must be finite and non-negative")
         self.target_distance_m = target_distance_m
         self.direction = direction
         self.reference_bearing_rad = reference_bearing_rad
@@ -832,6 +839,7 @@ class MoveNormalToWall(WallAction):
         self.terminal_range_m = terminal_range_m
         self.tolerance_m = tolerance_m
         self.heading_gain = heading_gain
+        self.heading_band_rad = heading_band_rad
         # The heading this move holds: the reference wall keeps its bearing while
         # the chassis translates square to it.
         self.desired_bearing_rad = (reference_bearing_rad if desired_bearing_rad is None
@@ -886,22 +894,46 @@ class MoveNormalToWall(WallAction):
         if abs(speed) < 1e-9:
             self._record_zero(now_s)
             return self._finish(True, "distance_reached", **fields)
-        # Keep the chassis square to the same wall while translating. A single
-        # wall cannot observe along-wall slip, but its normal does observe
-        # heading, and an uncorrected 10 deg tilt would carry roughly 7.6 cm of
-        # lateral error across 43 cm. This is applied on both legs of the move;
-        # the C10B reverse compensation stays in the backend and is not repeated.
+        # Hold the chassis square to the same wall while it translates. With the
+        # chassis facing the reference wall, the wall normal is parallel to the
+        # nose, so the angle between that wall and the radar's forward axis is
+        # exactly ``90 deg - heading_error``. Inside the band the heading is good
+        # enough and the command is an exact zero; outside it the error is
+        # corrected while the move continues, which is what makes the 43/32 cm
+        # reach land squarely instead of carrying a tilt sideways.
         desired = (self.desired_bearing_rad if self.desired_bearing_rad is not None
                    else wall.bearing_rad)
         heading_error = wrap_to_pi(wall.bearing_rad - desired)
-        omega_limit = min(self.limits.max_angular_speed_rad_s,
-                          1.8 * abs(speed) / self.limits.track_width_m)
-        omega = clamp(self.heading_gain * heading_error, -omega_limit, omega_limit)
+        omega = self.heading_command(heading_error)
         fields["desired_bearing_rad"] = desired
         fields["heading_error_rad"] = heading_error
+        fields["heading_error_deg"] = math.degrees(heading_error)
+        fields["heading_within_band"] = abs(heading_error) <= self.heading_band_rad
         fields["corrected_omega_rad_s"] = omega
         self._record_nonzero(now_s)
         return ActionOutcome(self.name, False, "", dict(fields, command=Twist2D(speed, omega)))
+
+    def heading_command(self, heading_error_rad: float) -> float:
+        """Angular command that holds the wall square, with a dead band.
+
+        Zero inside ``heading_band_rad`` so a small residual tilt does not make
+        the chassis fidget; outside it, a proportional correction bounded by the
+        chassis angular limit and by a braking-shaped limit (``sqrt(2*a*error)``)
+        so it decelerates into the band instead of overshooting through it.
+
+        In-place rotation is deliberately NOT used here: reversing one wheel
+        mid-approach would fight the C10B reverse handling and the wheel-speed
+        limit, whereas an angular offset on a forward or reverse move is a plain
+        differential and needs no special case.
+        """
+        if abs(heading_error_rad) <= self.heading_band_rad:
+            return 0.0
+        bias = math.copysign(self.heading_band_rad, heading_error_rad)
+        magnitude = min(self.heading_gain * abs(heading_error_rad - bias),
+                        self.limits.max_angular_speed_rad_s,
+                        math.sqrt(2.0 * self.limits.max_angular_accel_rad_s2
+                                  * abs(heading_error_rad - bias)))
+        return math.copysign(magnitude, heading_error_rad)
 
 
 class HoldStopped(WallAction):
