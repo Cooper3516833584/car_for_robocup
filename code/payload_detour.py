@@ -123,17 +123,25 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         try:
             while True:
                 check()
-                _step(runtime)
-                outcome = action.outcome
-                if outcome is not None:
+                # Use the tick's own report. Reading ``action.outcome`` after the
+                # tick would conflate the outcome this tick produced with one
+                # left over from an earlier call, and a single transient
+                # "waiting for a fresh wall" result would look like a failure.
+                step = _step(runtime)
+                if step.action_state == "done":
                     runtime.action = None
-                    if outcome.done:
-                        runtime.record_event("payload_detour_stage_done", stage=stage,
-                                             action=action.name, reason=outcome.reason,
-                                             behavior=settings.behavior)
-                        return True
-                    if action.finished:
-                        raise RuntimeError(f"{stage}: {action.name} failed: {outcome.reason}")
+                    outcome = action.outcome
+                    runtime.record_event("payload_detour_stage_done", stage=stage,
+                                         action=action.name,
+                                         reason=None if outcome is None else outcome.reason,
+                                         behavior=settings.behavior)
+                    return True
+                if step.action_state == "error":
+                    runtime.action = None
+                    raise RuntimeError(f"{stage}: {action.name} failed: {step.error}")
+                if action.finished and action.outcome is not None and not action.outcome.done:
+                    runtime.action = None
+                    raise RuntimeError(f"{stage}: {action.name} failed: {action.outcome.reason}")
                 sleep(PERIOD_S)
         except BaseException:
             runtime.action = None

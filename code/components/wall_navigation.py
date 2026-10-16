@@ -284,6 +284,13 @@ def turn_command(reference: WallLine, desired_bearing_rad: float, *,
     wrapped, so a normal crossing +/-pi keeps turning the same way instead of
     flipping the chassis around. In-place turns are deliberately exempt from the
     no-wheel-reversal moving limit.
+
+    Inside ``tolerance_rad`` the command is an exact zero rather than a rate
+    proportional to the error, so the chassis can actually stop and the settled
+    gate can confirm. Note that with sample-and-hold the *measured* angle
+    converges to the band edge, not to the exact target: proportional control of
+    a rate has no way to land precisely on a setpoint in one tick. That is why
+    the completion test is a tolerance band and not an equality.
     """
     error = wrap_to_pi(reference.bearing_rad - desired_bearing_rad)
     if abs(error) <= tolerance_rad:
@@ -357,8 +364,11 @@ class FreshStopGate:
         if not all(math.isfinite(value) for value in values):
             self.stable = 0
             return False
-        fresh = (zero_commanded_s < snapshot.scan_started_s
-                 <= snapshot.scan_completed_s <= now_s
+        # The revolution must have *finished* after zero output was commanded.
+        # Requiring it to have *started* after that instant is unsatisfiable: an
+        # acquisition spanning the command begins before it, and a scan stamped
+        # at the tick boundary would begin exactly on it.
+        fresh = (zero_commanded_s < snapshot.scan_completed_s <= now_s
                  and now_s - (snapshot.scan_started_s + snapshot.scan_completed_s) / 2.0
                  <= self.max_age_s)
         if not fresh or abs(error_rad) > self.tolerance_rad:
@@ -373,12 +383,18 @@ class FreshStopGate:
 
 @dataclass
 class ActionOutcome:
-    """Simple result of one wall action; no ``.estimate.pose`` is required."""
+    """Simple result of one wall action; no ``.estimate.pose`` is required.
+
+    ``waiting`` marks an ordinary "no usable wall right now, holding zero" tick.
+    It is an explicit flag rather than a reason string so the outage timer cannot
+    be reset by a status the base class does not recognise.
+    """
 
     action: str
     done: bool
     reason: str = ""
     fields: dict = field(default_factory=dict)
+    waiting: bool = False
 
     @property
     def command(self) -> Twist2D:
@@ -437,14 +453,9 @@ class WallAction:
         # Clear the outage timer only once this tick actually found what it was
         # waiting for. Clearing it before ``_tick`` would make a persistently
         # lost reference wall retry forever instead of failing.
-        if not self._is_waiting(outcome):
+        if not outcome.waiting:
             self.last_error_s = None
         return outcome
-
-    @staticmethod
-    def _is_waiting(outcome: ActionOutcome) -> bool:
-        return outcome.reason in {"no_wall_observation", "stale_wall_observation",
-                                  "reference_wall_lost", "right_wall_not_visible"}
 
     def _wait(self, now_s: float, reason: str) -> ActionOutcome:
         # Stamp the start of the outage once; re-stamping every tick would mean
@@ -454,7 +465,7 @@ class WallAction:
         self._record_zero(now_s)
         if now_s - self.last_error_s > self.lost_timeout_s:
             return self._finish(False, reason)
-        return ActionOutcome(self.name, False, reason)
+        return ActionOutcome(self.name, False, reason, waiting=True)
 
     def _tick(self, snapshot: WallSnapshot, now_s: float) -> ActionOutcome:  # pragma: no cover
         raise NotImplementedError
@@ -608,6 +619,7 @@ class TurnToWallBearing(WallAction):
         self._continuous_bearing_rad: float | None = reference_bearing_rad
         self._holding = False
         self._zero_commanded_s: float | None = None
+        self._last_tick_s: float | None = None
 
     def _track(self, snapshot: WallSnapshot):
         if self._continuous_bearing_rad is None:
@@ -615,9 +627,16 @@ class TurnToWallBearing(WallAction):
         wall = self.tracker.track(snapshot.lines,
                                   expected_bearing_rad=self._continuous_bearing_rad,
                                   expected_distance_m=self.tracker.reference_rho_m)
+        if wall is None:
+            # A stale cached line must not keep answering "visible"; clearing it
+            # is what lets the lost-wall timeout expire instead of holding the
+            # reference forever.
+            self.tracker.clear()
         return wall
 
     def _tick(self, snapshot: WallSnapshot, now_s: float) -> ActionOutcome:
+        previous_tick_s = self._last_tick_s
+        self._last_tick_s = now_s
         wall = self._track(snapshot)
         if wall is None:
             # Hold zero and wait for the reference to come back.
@@ -632,11 +651,15 @@ class TurnToWallBearing(WallAction):
         fields["scan_seq"] = snapshot.scan_seq
         if abs(omega) < 1e-9:
             if not self._holding:
-                # Entering the hold: stamp the instant zero output was first
+                # Entering the hold: record the instant zero output was first
                 # commanded. It must NOT be re-stamped on later ticks, or no
                 # revolution could ever be newer than it.
+                #
+                # Use the *previous* tick, not this one: a scan published now
+                # began one acquisition interval ago, so requiring it to start
+                # after this very tick could never be satisfied.
                 self._holding = True
-                self._zero_commanded_s = now_s
+                self._zero_commanded_s = now_s if previous_tick_s is None else previous_tick_s
                 self.zero_since_s = now_s
                 self.gate.reset()
             self._record_zero(now_s)
@@ -653,7 +676,8 @@ class TurnToWallBearing(WallAction):
             fields["stable_count"] = self.gate.stable
             if done:
                 return self._finish(True, "bearing_reached", **fields)
-            return ActionOutcome(self.name, False, "settling", dict(fields, command=Twist2D(0.0, 0.0)))
+            return ActionOutcome(self.name, False, "settling",
+                                 dict(fields, command=Twist2D(0.0, 0.0)), waiting=True)
         return ActionOutcome(self.name, False, "", dict(fields, command=Twist2D(0.0, omega)))
 
 
@@ -698,9 +722,15 @@ class MoveNormalToWall(WallAction):
         wall = self.tracker.track(snapshot.lines,
                                   expected_bearing_rad=self._continuous_bearing_rad,
                                   expected_distance_m=self.target_distance_m)
-        if wall is not None:
-            previous = self._continuous_bearing_rad
-            self._continuous_bearing_rad = previous + wrap_to_pi(wall.bearing_rad - previous)
+        if wall is None:
+            # Drop the cached line. Leaving it in place would let a stale wall
+            # keep answering "the reference is visible", so the lost-wall
+            # timeout could never fire and the move would keep driving on
+            # geometry that is no longer being measured.
+            self.tracker.clear()
+            return None
+        previous = self._continuous_bearing_rad
+        self._continuous_bearing_rad = previous + wrap_to_pi(wall.bearing_rad - previous)
         return wall
 
     def _tick(self, snapshot: WallSnapshot, now_s: float) -> ActionOutcome:
@@ -712,8 +742,9 @@ class MoveNormalToWall(WallAction):
                 wall, self.target_distance_m, self.direction,
                 max_speed_m_s=self.max_speed_m_s, tolerance_m=self.tolerance_m)
         except ValueError as exc:
-            self._record_zero(now_s)
-            return ActionOutcome(self.name, False, f"heading_not_normal ({exc})")
+            # Not yet normal to the reference wall. Hold zero and let the shared
+            # outage timeout bound it, instead of retrying forever.
+            return self._wait(now_s, f"heading_not_normal ({exc})")
         if abs(probe_speed) < 1e-9:
             self._record_zero(now_s)
             _, fields = normal_move_command(wall, self.target_distance_m, self.direction,

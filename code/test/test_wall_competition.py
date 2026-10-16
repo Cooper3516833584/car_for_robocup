@@ -141,7 +141,14 @@ def make_wall(bearing_rad, rho, span=3.0):
 
 
 class ScriptedObserver:
-    """A snapshot source whose wall geometry the test drives directly."""
+    """A snapshot source whose wall geometry the test drives directly.
+
+    A published scan is stamped as a finished acquisition that *ended just
+    before* ``now``, exactly like the real observer: a revolution is only
+    available to the controller after it completes.
+    """
+
+    HALF_WIDTH_S = 0.02
 
     def __init__(self, clock):
         self.clock = clock
@@ -150,12 +157,17 @@ class ScriptedObserver:
 
     def publish(self, *lines, observed_at_s=None):
         self.published += 1
-        observed = float(self.clock()) if observed_at_s is None else float(observed_at_s)
+        now = float(self.clock()) if observed_at_s is None else float(observed_at_s)
+        return self.publish_window(*lines, now_s=now)
+
+    def publish_window(self, *lines, now_s):
+        """Publish a completed revolution that ended at ``now_s``."""
+        self.published += 1
         self.snapshot = WallSnapshot(scan_seq=self.published,
-                                     scan_started_s=observed - 0.02,
-                                     scan_completed_s=observed + 0.02,
-                                     observed_at_s=observed, lines=tuple(lines),
-                                     point_count=40)
+                                     scan_started_s=now_s - 2 * self.HALF_WIDTH_S,
+                                     scan_completed_s=now_s - self.HALF_WIDTH_S,
+                                     observed_at_s=now_s - self.HALF_WIDTH_S,
+                                     lines=tuple(lines), point_count=40)
         return self.snapshot
 
     def latest(self):
@@ -390,13 +402,14 @@ class CentredTargetTests(unittest.TestCase):
 class WallDetourTests(unittest.TestCase):
     """The detour against a simulated wall that reacts to the emitted twist.
 
-    The world is integrated with a small timestep: the action gates are sized for
-    a real scan interval, so rotating the wall by a whole control period per call
-    would look like a teleport rather than a measurement.
+    One call is one real control period, so the wall rotates by exactly the
+    angular distance the chassis would cover in a tick. That keeps successive
+    measurements continuous -- a larger step would look like a teleport rather
+    than a measurement to the tracker's continuity gate.
     """
 
-    DT_S = 0.002
-    MAX_STEPS = 40000
+    DT_S = 0.05
+    MAX_STEPS = 4000
 
     def build(self, *, behavior, slots):
         from payload_detour import DetourSettings
@@ -421,8 +434,13 @@ class WallDetourTests(unittest.TestCase):
         return runtime, observer, clock, tracker, settings, events, drive
 
     def run_detour(self, *, behavior, slots, d0=1.60, simulate=False,
-                   release_response=True, on_release=None, wall_vanishes_after=None):
-        """Drive the detour against a reacting wall; return the complete record."""
+                   release_response=True, on_release=None, vanish_from_stage=None):
+        """Drive the detour against a reacting wall; return the complete record.
+
+        ``vanish_from_stage`` drops the reference wall as soon as that stage
+        begins, so a failure test depends on the action sequence rather than on
+        an absolute step count.
+        """
         from payload_detour import WallDropReference, run_payload_detour
 
         runtime, observer, clock, tracker, settings, events, drive = self.build(
@@ -430,6 +448,11 @@ class WallDetourTests(unittest.TestCase):
         limits = _limits()
         world = {'bearing': -math.pi / 2, 'rho': d0}
         steps = [0]
+        vanished = [False]
+
+        def stage_started(name):
+            return any(event['type'] == 'payload_detour_stage_start'
+                       and event.get('stage') == name for event in events)
 
         def acquire(_runtime, _tracker):
             wall = make_wall(world['bearing'], world['rho'])
@@ -446,7 +469,10 @@ class WallDetourTests(unittest.TestCase):
             if steps[0] > self.MAX_STEPS:
                 raise AssertionError("detour did not converge")
             clock[0] += self.DT_S
-            if wall_vanishes_after is not None and steps[0] > wall_vanishes_after:
+            if vanish_from_stage is not None and not vanished[0] \
+                    and stage_started(vanish_from_stage):
+                vanished[0] = True
+            if vanished[0]:
                 observer.publish()
             else:
                 observer.publish(make_wall(world['bearing'], max(0.15, world['rho'])))
@@ -598,13 +624,72 @@ class WallDetourTests(unittest.TestCase):
         self.assertEqual(seen, [2])
 
     def test_p15_a_return_failure_is_reported_separately_from_the_release(self):
-        record = self.run_detour(behavior="standard", slots=(1,),
-                                 wall_vanishes_after=200)
-        self.assertIsNotNone(record['error'])
-        events = record['events']
+        from payload_detour import run_payload_detour
+
+        runtime, observer, clock, tracker, settings, events, drive = self.build(
+            behavior="standard", slots=(1,))
+        limits = _limits()
+        world = {'bearing': -math.pi / 2, 'rho': 1.60}
+        steps = [0]
+        vanished = [False]
+        calls = []
+
+        def opener(slot=None):
+            calls.append(slot)
+            return True
+
+        def stage_started(name):
+            return any(event['type'] == 'payload_detour_stage_start'
+                       and event.get('stage') == name for event in events)
+
+        def acquire(_runtime, _tracker):
+            from payload_detour import WallDropReference
+            wall = make_wall(world['bearing'], world['rho'])
+            _tracker.set_reference(wall)
+            return WallDropReference(reference_id="road_right_wall", d0_base_m=world['rho'],
+                                     bearing_rad=world['bearing'],
+                                     normal_xy=wall.normal_xy)
+
+        original_step = runtime.step
+
+        def step():
+            steps[0] += 1
+            if steps[0] > self.MAX_STEPS:
+                raise AssertionError("detour did not converge")
+            clock[0] += self.DT_S
+            if not vanished[0] and stage_started("return_from_drop"):
+                vanished[0] = True
+            if vanished[0]:
+                observer.publish()  # the reference wall is gone for good
+            else:
+                observer.publish(make_wall(world['bearing'], max(0.15, world['rho'])))
+            result = original_step()
+            command = result.limited_command or result.command
+            world['rho'] = max(0.05, world['rho']
+                               - math.cos(world['bearing']) * command.linear_x_m_s * self.DT_S)
+            world['bearing'] = wrap(world['bearing'] - command.angular_z_rad_s * self.DT_S)
+            return result
+
+        runtime.step = step
+        try:
+            with patch("payload_detour.open_payload", side_effect=opener):
+                with self.assertRaises(RuntimeError):
+                    run_payload_detour(runtime, settings, clock=lambda: clock[0],
+                                       sleep=lambda _s: None, tracker=tracker,
+                                       acquire_reference=acquire, limits=limits)
+        finally:
+            runtime.step = original_step
+
+        # The release really happened, before the return failed...
+        self.assertEqual(calls[0], 1, "the assigned slot was never opened")
+        self.assertIn("return_from_drop",
+                      [event['stage'] for event in events
+                       if event['type'] == 'payload_detour_stage_start'])
         self.assertTrue(any(event['type'] == 'payload_release_done' for event in events))
+        # ...the failure is recorded separately...
         self.assertTrue(any(event['type'] == 'payload_detour_failed' for event in events))
-        self.assertTrue(any(event['type'] == 'cleanup_open' for event in events))
+        # ...and cleanup opened every axis (None = all slots), logged as cleanup.
+        self.assertIn(None, calls)
 
     def test_p17_cleanup_is_logged_as_cleanup_not_as_five_successful_drops(self):
         import inspect

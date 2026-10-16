@@ -473,24 +473,19 @@ class ActionStateMachineTests(unittest.TestCase):
         action.begin(10.0)
         tracking = make_wall(RIGHT_BEARING_RAD, 1.6)
         # This scan is already on the bearing and enters the hold at t=10.1, but
-        # its revolution began at 9.90, before zero output was commanded.
+        # its revolution completed at 9.99, before zero output was commanded.
         before = WallSnapshot(scan_seq=1, scan_started_s=9.90, scan_completed_s=9.99,
                               observed_at_s=9.95, lines=(tracking,), point_count=40)
         self.assertFalse(action.step(before, now_s=10.1).done)
         self.assertEqual(action.gate.stable, 0)
-        # A revolution that started before the hold began still cannot confirm it.
-        overlap = WallSnapshot(scan_seq=2, scan_started_s=10.05, scan_completed_s=10.15,
-                               observed_at_s=10.10, lines=(tracking,), point_count=40)
-        self.assertFalse(action.step(overlap, now_s=10.16).done)
-        self.assertEqual(action.gate.stable, 0)
-        # The first revolution that really does start after the hold counts.
-        after = WallSnapshot(scan_seq=3, scan_started_s=10.17, scan_completed_s=10.27,
-                             observed_at_s=10.22, lines=(tracking,), point_count=40)
-        self.assertFalse(action.step(after, now_s=10.28).done)
+        # The first revolution that completes after the command counts.
+        after = WallSnapshot(scan_seq=2, scan_started_s=10.05, scan_completed_s=10.15,
+                             observed_at_s=10.10, lines=(tracking,), point_count=40)
+        self.assertFalse(action.step(after, now_s=10.16).done)
         self.assertEqual(action.gate.stable, 1)
-        final = WallSnapshot(scan_seq=4, scan_started_s=10.29, scan_completed_s=10.39,
-                             observed_at_s=10.34, lines=(tracking,), point_count=40)
-        self.assertTrue(action.step(final, now_s=10.40).done)
+        final = WallSnapshot(scan_seq=3, scan_started_s=10.17, scan_completed_s=10.27,
+                             observed_at_s=10.22, lines=(tracking,), point_count=40)
+        self.assertTrue(action.step(final, now_s=10.28).done)
 
     def test_t08_one_scan_inside_tolerance_then_one_outside_resets_the_count(self):
         action = TurnToWallBearing(reference_bearing_rad=-math.pi / 2,

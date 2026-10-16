@@ -1492,9 +1492,17 @@ class WallRuntime:
         self.record_event("wall_control", action=action.name, phase=self.mission.phase,
                           done=outcome.done, reason=outcome.reason, **fields)
         limited = self._send(command, now_s)
-        state = "done" if outcome.done else ("waiting" if outcome.reason else "running")
+        # ``error`` is for a real failure only. An ordinary "waiting for a fresh
+        # wall" outcome belongs in the action state: reporting it as an error
+        # would abort exactly the action that is supposed to keep running.
+        if outcome.done:
+            state = "done"
+        elif outcome.reason:
+            state = "waiting"
+        else:
+            state = "running"
         return WallStep(now_s, snapshot, self.mission.phase, command, state,
-                        limited_command=limited, error=None if not outcome.reason else outcome.reason)
+                        limited_command=limited, error=None)
 
     def _send(self, command: Twist2D, now_s: float) -> Twist2D | None:
         """Single output gate. Re-checks the stop latch inside the lock."""
