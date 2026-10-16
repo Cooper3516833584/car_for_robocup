@@ -305,6 +305,17 @@ class TurnCommandTests(unittest.TestCase):
         omega, _ = turn_command(wall, RIGHT_BEARING_RAD, limits=LIMITS)
         self.assertEqual(omega, 0.0)
 
+    def test_measured_rotation_brakes_before_crossing_the_target(self):
+        wall = make_wall(RIGHT_BEARING_RAD + math.radians(5), 1.6)
+        omega, fields = turn_command(wall, RIGHT_BEARING_RAD, limits=LIMITS,
+                                     measured_omega_rad_s=0.30)
+        self.assertEqual(omega, 0.0)
+        self.assertGreater(fields["error_rad"], math.radians(2))
+        # At rest outside the band the turn resumes, rather than stalling at
+        # the edge of the prediction horizon.
+        omega, _ = turn_command(wall, RIGHT_BEARING_RAD, limits=LIMITS)
+        self.assertGreater(omega, 0.0)
+
     def test_a_turn_in_place_is_exempt_from_the_no_wheel_reversal_limit(self):
         wall = make_wall(0.0, 1.9)
         omega, _ = turn_command(wall, REAR_BEARING_RAD, limits=LIMITS)
@@ -596,20 +607,18 @@ class ActionStateMachineTests(unittest.TestCase):
         outcome = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
         self.assertTrue(outcome.done)
 
-    def test_a_crossing_wall_far_outside_both_supports_is_not_a_terminal(self):
-        # The two infinite lines cross, but the crossing is a metre outside both
-        # observed supports. A small bounded extrapolation is tolerated because a
-        # real wall may stop just short of the corner; a metre is not.
+    def test_a_long_front_wall_stops_the_car_even_when_the_corner_is_occluded(self):
+        # The observed long spans do not reach their intersection. The front
+        # wall still provides a measured stop distance before that corner.
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.9,
                                  tracker=WallTracker())
-        right = wall((0.0, -1.0), 1.6, (0.0, -0.3), (0.0, 0.3))
-        front = wall((1.0, 0.0), 1.9, (-0.3, 0.0), (0.3, 0.0))
+        right = wall((0.0, -1.0), 1.6, (0.0, -0.5), (0.0, 0.5))
+        front = wall((1.0, 0.0), 1.9, (-0.5, 0.0), (0.5, 0.0))
         outcome = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
-        self.assertFalse(outcome.done)
-        self.assertFalse(outcome.fields.get("terminal_visible"))
-        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
-        self.assertIsNone(action.terminal_wall)
+        self.assertTrue(outcome.done)
+        self.assertEqual(outcome.command.linear_x_m_s, 0.0)
+        self.assertAlmostEqual(outcome.fields["terminal_measured_m"], 1.9)
 
     def test_a_short_obstacle_ahead_is_not_a_terminal_wall(self):
         # A short pillar ahead of the chassis looks like a front wall, but its
@@ -623,8 +632,9 @@ class ActionStateMachineTests(unittest.TestCase):
         outcome = action.step(snapshot_of(right, pillar, observed=0.98), now_s=1.0)
         self.assertFalse(outcome.done)
         self.assertFalse(outcome.fields.get("terminal_visible"))
-        # The leg keeps following the right wall rather than stopping on it.
-        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+        # No valid front distance: hold, never drive blind past the stop point.
+        self.assertEqual(outcome.command.linear_x_m_s, 0.0)
+        self.assertEqual(outcome.reason, "terminal_wall_unconfirmed")
 
     def test_the_right_wall_is_never_its_own_terminal(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
@@ -635,18 +645,41 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertFalse(outcome.done)
         self.assertFalse(outcome.fields.get("terminal_visible"))
 
-    def test_only_the_right_wall_is_a_normal_cruise(self):
-        # The far terminal wall is simply not in view yet: that is ordinary
-        # following, never a parameter error or a stop.
+    def test_an_unconfirmed_front_wall_holds_zero_and_times_out(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.9,
                                  tracker=WallTracker())
         right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
         outcome = action.step(snapshot_of(right, observed=0.98), now_s=1.0)
         self.assertFalse(outcome.done)
-        self.assertEqual(outcome.reason, "")
+        self.assertEqual(outcome.reason, "terminal_wall_unconfirmed")
         self.assertFalse(outcome.fields["terminal_seen"])
-        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+        self.assertEqual(outcome.command.linear_x_m_s, 0.0)
+        failed = action.step(snapshot_of(right, seq=99, observed=7.0), now_s=7.0)
+        self.assertTrue(action.finished)
+        self.assertFalse(failed.done)
+        self.assertEqual(failed.reason, "terminal_wall_unconfirmed")
+
+    def test_first_front_measurement_40cm_past_target_is_failure_not_a_corner(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.895)
+        right = make_wall(-math.pi / 2, 1.6)
+        front = make_wall(0.0, 1.496)
+        result = action.step(snapshot_of(right, front, observed=1.0), now_s=1.05)
+        self.assertTrue(action.finished)
+        self.assertFalse(result.done)
+        self.assertEqual(result.reason, "terminal_distance_overshot")
+        self.assertEqual(result.command.linear_x_m_s, 0.0)
+
+    def test_terminal_tracking_does_not_switch_to_a_different_parallel_wall(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.895)
+        right = make_wall(-math.pi / 2, 1.6)
+        first = action.step(snapshot_of(right, make_wall(0.0, 3.0), observed=1.0), now_s=1.05)
+        self.assertGreater(first.command.linear_x_m_s, 0.0)
+        lost = action.step(snapshot_of(right, make_wall(0.0, 1.9), seq=2, observed=1.1), now_s=1.15)
+        self.assertEqual(lost.reason, "terminal_wall_lost")
+        self.assertEqual(lost.command.linear_x_m_s, 0.0)
 
     def test_a_terminal_seen_then_lost_holds_zero_and_then_fails_bounded(self):
         # Once the terminal has been verified, losing it must not keep driving on
@@ -718,6 +751,37 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertTrue(second.done)
         self.assertEqual(second.reason, "bearing_reached")
         self.assertEqual(second.command.linear_x_m_s, 0.0)
+
+    def test_a_turn_settles_with_scan_delay_and_motor_response_lag(self):
+        from collections import deque
+        action = TurnToWallBearing(reference_bearing_rad=0.0,
+                                   desired_bearing_rad=RIGHT_BEARING_RAD,
+                                   turn_direction=1, limits=LIMITS)
+        dt = 0.05
+        yaw = rate = 0.0
+        yaw_history = deque([0.0, 0.0], maxlen=2)
+        commands = deque([0.0] * 3)
+        peak_yaw = 0.0
+        for seq in range(1, 501):
+            now = 1.0 + seq * dt
+            measured = yaw_history[0]
+            snapshot = WallSnapshot(scan_seq=seq, scan_started_s=now - 0.15,
+                                    scan_completed_s=now - 0.05, observed_at_s=now - 0.1,
+                                    lines=(make_wall(-measured, 1.9),), point_count=40)
+            outcome = action.step(snapshot, now_s=now)
+            commands.append(outcome.command.angular_z_rad_s)
+            delayed = commands.popleft()
+            rate += (delayed - rate) * dt / 0.15
+            yaw += rate * dt
+            yaw_history.append(yaw)
+            peak_yaw = max(peak_yaw, yaw)
+            if action.finished:
+                break
+        self.assertTrue(action.finished)
+        self.assertTrue(outcome.done, outcome.reason)
+        self.assertLess(abs(yaw - math.pi / 2), math.radians(2.5))
+        self.assertLess(peak_yaw - math.pi / 2, math.radians(3.0))
+        self.assertLess(abs(rate), math.radians(5))
 
     def test_t06_a_turn_holds_zero_and_does_not_finish_on_a_timer(self):
         action = TurnToWallBearing(reference_bearing_rad=-math.pi / 2,

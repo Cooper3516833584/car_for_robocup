@@ -28,7 +28,6 @@ from components.wall_observer import (
     WallLine,
     WallSnapshot,
     WallTracker,
-    supported_corner,
     wrap_to_pi,
 )
 from core.types import Twist2D
@@ -40,23 +39,20 @@ LOG = logging.getLogger("wall-navigation")
 CORNER_TOLERANCE_M = 0.02
 DROP_TOLERANCE_M = 0.01
 TURN_TOLERANCE_RAD = math.radians(2.0)
-TURN_GAIN = 1.8
-TURN_MAX_OMEGA_RAD_S = 0.45
+TURN_GAIN = 1.0
+TURN_MAX_OMEGA_RAD_S = 0.30
+# Brake ahead of the measured target to allow for scan/actuator response.
+# This prediction never replaces the measured-angle completion gate.
+TURN_RESPONSE_S = 0.25
+TURN_SETTLED_RATE_RAD_S = math.radians(5.0)
 TURN_STABLE_FRAMES = 2
 TURN_LOST_TIMEOUT_S = 5.0
 WALL_LOST_TIMEOUT_S = 5.0
 HOLD_TICK_S = 0.02
-# A terminal wall must be roughly orthogonal to the current right wall, and its
-# real observed support must be able to reach the corner. Tolerance is looser
-# than the observer's own corner gate because the leg's terminal is judged while
-# the chassis is still some distance away.
+# A long wall approximately perpendicular to the right wall supplies the stop
+# distance even when an occlusion prevents observing their corner.
 TERMINAL_ORTHOGONAL_TOLERANCE_RAD = math.radians(20.0)
 TERMINAL_TRACK_ANGLE_RAD = math.radians(30.0)
-# How far past its own observed support a terminal wall's corner may lie. This
-# decides whether the leg ends, so it is tighter than the observer's generic
-# corner gate: a wall stopping half a metre short is still plausible, a pillar
-# two metres short is not.
-TERMINAL_SUPPORT_EXTENSION_M = 0.35
 # A terminal wall must also be a real wall, not a stub: below the observer's own
 # minimum supported length it cannot be the end of the field.
 MIN_TERMINAL_SPAN_M = MIN_SPAN_M
@@ -336,7 +332,8 @@ def turn_command(reference: WallLine, desired_bearing_rad: float, *,
                  limits: WallActionLimits,
                  tolerance_rad: float = TURN_TOLERANCE_RAD,
                  gain: float = TURN_GAIN,
-                 max_omega_rad_s: float = TURN_MAX_OMEGA_RAD_S) -> tuple[float, dict]:
+                 max_omega_rad_s: float = TURN_MAX_OMEGA_RAD_S,
+                 measured_omega_rad_s: float = 0.0) -> tuple[float, dict]:
     """In-place turn command from the measured wall bearing.
 
     ``beta = atan2(n_y, n_x)`` decreases as the chassis turns left; the error is
@@ -355,12 +352,15 @@ def turn_command(reference: WallLine, desired_bearing_rad: float, *,
     if abs(error) <= tolerance_rad:
         omega = 0.0
     else:
-        omega = math.copysign(min(gain * abs(error),
+        closing_rate = max(0.0, math.copysign(1.0, error) * measured_omega_rad_s)
+        remaining = max(0.0, abs(error) - closing_rate * TURN_RESPONSE_S)
+        omega = 0.0 if remaining <= tolerance_rad else math.copysign(min(gain * remaining,
                                   max_omega_rad_s,
                                   limits.max_angular_speed_rad_s,
-                                  math.sqrt(2.0 * limits.max_angular_accel_rad_s2 * abs(error))),
+                                  math.sqrt(2.0 * limits.max_angular_accel_rad_s2 * remaining)),
                               error)
     return omega, {"measured_bearing_rad": reference.bearing_rad,
+                   "measured_omega_rad_s": measured_omega_rad_s,
                    "desired_bearing_rad": desired_bearing_rad,
                    "error_rad": error}
 
@@ -556,7 +556,6 @@ class FollowRightWall(WallAction):
                  terminal_creep_m_s: float = TERMINAL_CREEP_SPEED_M_S,
                  terminal_track_angle_rad: float = TERMINAL_TRACK_ANGLE_RAD,
                  terminal_lost_timeout_s: float = TERMINAL_LOST_TIMEOUT_S,
-                 terminal_extension_m: float = TERMINAL_SUPPORT_EXTENSION_M,
                  lost_timeout_s: float = WALL_LOST_TIMEOUT_S,
                  clock: Callable[[], float] = time.monotonic,
                  max_age_s: float = 0.40) -> None:
@@ -576,7 +575,6 @@ class FollowRightWall(WallAction):
         self.terminal_creep_m_s = terminal_creep_m_s
         self.terminal_track_angle_rad = terminal_track_angle_rad
         self.terminal_lost_timeout_s = terminal_lost_timeout_s
-        self.terminal_extension_m = terminal_extension_m
         # The verified terminal wall is handed to the mission layer so the corner
         # turn can reference the wall that was actually measured. Never a boolean.
         self.terminal_wall: WallLine | None = None
@@ -584,6 +582,7 @@ class FollowRightWall(WallAction):
         self._terminal_reference: WallLine | None = None
         self._terminal_visible = False
         self._terminal_lost_since_s: float | None = None
+        self._terminal_candidates: list[dict] = []
 
     def _pick_right(self, snapshot: WallSnapshot):
         if self.tracker.wall is None:
@@ -603,27 +602,24 @@ class FollowRightWall(WallAction):
                                   expected_distance_m=self.tracker.last_rho_m)
 
     def _pick_terminal(self, snapshot: WallSnapshot, right: WallLine | None = None):
-        """Choose the terminal wall with its geometry, not only its bearing.
+        """Measure a long perpendicular wall even when its corner is occluded.
 
-        A terminal wall has to be a different line from the current right wall,
-        roughly orthogonal to it, and its real support must plausibly reach the
-        observed corner. Taking the nearest candidate by distance alone would
-        accept a short obstacle ahead -- or the right wall itself -- as the end of
-        the leg.
-
-        The extrapolation allowed here is deliberately tighter than the
-        observer's own corner gate: this decision ends a whole leg, so a support
-        that stops far short of the corner is a pillar, not the end of the field.
+        The scan must fit a real long wall in the requested sector. Requiring
+        both supports to extend to their intersection can suppress this distance
+        while a corner is occluded. The field run first accepted a distance
+        40 cm past its stop position; missing distances must instead hold zero.
         """
         if self.terminal_role is None:
             return None
         candidates = [line for line in snapshot.lines if self.terminal_role(line)]
+        self._terminal_candidates = [dict(rho_base_m=line.rho_base_m,
+                                          bearing_rad=line.bearing_rad, span_m=line.span_m)
+                                     for line in candidates]
         right = self.tracker.wall if right is None else right
         if right is not None:
-            def reaches_corner(line):
-                # A terminal wall must be a real wall: a short stub has no
-                # plausible corner with the right wall no matter where its
-                # support happens to sit.
+            def usable_distance(line):
+                # Retain the measured length, sector and perpendicularity gates;
+                # a short pillar or the road wall cannot end the leg.
                 if line.span_m < MIN_TERMINAL_SPAN_M:
                     return False
                 if _same_line(line, right):
@@ -632,20 +628,22 @@ class FollowRightWall(WallAction):
                        + line.normal_xy[1] * right.normal_xy[1]) > \
                         math.sin(TERMINAL_ORTHOGONAL_TOLERANCE_RAD):
                     return False
-                corner = supported_corner(right, line, rear=is_rear_wall(line),
-                                          max_support_extension_m=self.terminal_extension_m)
-                return corner is not None
-            candidates = [line for line in candidates if reaches_corner(line)]
+                return True
+            candidates = [line for line in candidates if usable_distance(line)]
         if not candidates:
             return None
         if self._terminal_reference is not None:
             reference = self._terminal_reference
             continuous = [line for line in candidates
                           if abs(wrap_to_pi(line.bearing_rad - reference.bearing_rad))
-                          <= self.terminal_track_angle_rad]
-            if continuous:
-                candidates = continuous
-        chosen = min(candidates, key=lambda line: line.rho_base_m)
+                          <= self.terminal_track_angle_rad
+                          and abs(line.rho_base_m - reference.rho_base_m)
+                          <= self.tracker.distance_gate_m]
+            if not continuous:
+                return None
+            chosen = min(continuous, key=lambda line: abs(line.rho_base_m - reference.rho_base_m))
+        else:
+            chosen = min(candidates, key=lambda line: line.rho_base_m)
         self._terminal_reference = chosen
         return chosen
 
@@ -655,7 +653,7 @@ class FollowRightWall(WallAction):
             return self._wait(now_s, "right_wall_not_visible")
         terminal = self._pick_terminal(snapshot) if self.terminal_role is not None else None
         self._terminal_visible = terminal is not None
-        fields: dict = {}
+        fields: dict = {"terminal_candidates": self._terminal_candidates}
         if self.terminal_role is None:
             # No terminal for this leg: plain wall following.
             terminal_target = None
@@ -667,25 +665,26 @@ class FollowRightWall(WallAction):
             self._terminal_lost_since_s = None
             terminal_target = self.terminal_target_m
             terminal_measured = terminal.rho_base_m
-        elif self.terminal_seen_at_s is None:
-            # Never seen yet: keep cruising on the right wall. Passing a
-            # half-empty measured/target pair here is what used to turn "the far
-            # wall is not in view yet" into a parameter error.
-            terminal_target = None
-            terminal_measured = None
+            if terminal_measured < terminal_target - self.terminal_tolerance_m:
+                self._record_zero(now_s)
+                return self._finish(False, "terminal_distance_overshot",
+                                    terminal_measured_m=terminal_measured,
+                                    terminal_target_m=terminal_target)
         else:
-            # Seen before and now missing: hold zero and wait, with a bounded
-            # timeout. The last measured distance is NOT reused as if it were a
-            # current one -- it cannot shrink as the chassis advances.
+            # A missing distance never grants permission to advance, including
+            # before the first detection. Wait at zero with a bounded timeout.
+            reason = ("terminal_wall_unconfirmed" if self.terminal_seen_at_s is None
+                      else "terminal_wall_lost")
             if self._terminal_lost_since_s is None:
                 self._terminal_lost_since_s = now_s
             lost_for = now_s - self._terminal_lost_since_s
             if lost_for > self.terminal_lost_timeout_s:
-                return self._finish(False, "terminal_wall_lost")
+                return self._finish(False, reason)
             self._record_zero(now_s)
             fields["terminal_visible"] = False
+            fields["terminal_seen"] = self.terminal_seen_at_s is not None
             fields["terminal_lost_for_s"] = lost_for
-            return ActionOutcome(self.name, False, "terminal_wall_lost",
+            return ActionOutcome(self.name, False, reason,
                                  dict(fields, command=Twist2D(0.0, 0.0)), waiting=True)
         command, control = follow_command(
             right, self.target_distance_m, self.direction, limits=self.limits,
@@ -750,6 +749,10 @@ class TurnToWallBearing(WallAction):
         self._holding = False
         self._zero_commanded_s: float | None = None
         self._last_tick_s: float | None = None
+        self._last_scan_seq = -1
+        self._last_measured_s: float | None = None
+        self._last_bearing_rad: float | None = None
+        self._measured_omega_rad_s = 0.0
 
     def _track(self, snapshot: WallSnapshot):
         if self._continuous_bearing_rad is None:
@@ -768,12 +771,24 @@ class TurnToWallBearing(WallAction):
         wall = self._track(snapshot)
         if wall is None:
             # Hold zero and wait for the reference to come back.
+            self._last_measured_s = None
+            self._last_bearing_rad = None
+            self._measured_omega_rad_s = 0.0
             return self._wait(now_s, "reference_wall_lost")
         previous = self._continuous_bearing_rad
         self._continuous_bearing_rad = previous + wrap_to_pi(wall.bearing_rad - previous)
+        if snapshot.scan_seq > self._last_scan_seq:
+            measured_s = snapshot.observed_at_s
+            if self._last_measured_s is not None and measured_s > self._last_measured_s:
+                self._measured_omega_rad_s = -wrap_to_pi(
+                    wall.bearing_rad - self._last_bearing_rad) / (measured_s - self._last_measured_s)
+            self._last_measured_s = measured_s
+            self._last_bearing_rad = wall.bearing_rad
+            self._last_scan_seq = snapshot.scan_seq
         omega, fields = turn_command(wall, self.desired_bearing_rad, limits=self.limits,
                                      tolerance_rad=self.tolerance_rad, gain=self.gain,
-                                     max_omega_rad_s=self.max_omega_rad_s)
+                                     max_omega_rad_s=self.max_omega_rad_s,
+                                     measured_omega_rad_s=self._measured_omega_rad_s)
         fields["reference_rho_base_m"] = wall.rho_base_m
         fields["tracked_bearing_rad"] = self._continuous_bearing_rad
         fields["scan_seq"] = snapshot.scan_seq
@@ -796,9 +811,13 @@ class TurnToWallBearing(WallAction):
         fields["stable_count"] = self.gate.stable
         if self._holding:
             assert self._zero_commanded_s is not None
-            done = self.gate.observe(snapshot=snapshot, now_s=now_s,
-                                     zero_commanded_s=self._zero_commanded_s,
-                                     error_rad=fields["error_rad"])
+            if abs(self._measured_omega_rad_s) > TURN_SETTLED_RATE_RAD_S:
+                self.gate.reset()
+                done = False
+            else:
+                done = self.gate.observe(snapshot=snapshot, now_s=now_s,
+                                         zero_commanded_s=self._zero_commanded_s,
+                                         error_rad=fields["error_rad"])
             fields["stable_count"] = self.gate.stable
             if done:
                 return self._finish(True, "bearing_reached", **fields)
