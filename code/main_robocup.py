@@ -113,8 +113,17 @@ def run_direct_competition_stage(args) -> int:
     raise ValueError(f"unsupported direct competition stage: {stage}")
 
 
+def stop_marker_signature(path: Path):
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
 def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None,
-         on_runtime_ready=None, car_only_test=False, simulate_payload=False) -> int:
+         on_runtime_ready=None, car_only_test=False, simulate_payload=False,
+         stop_file_baseline=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
@@ -220,7 +229,8 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
             def guard():
                 if stop_event is not None and stop_event.is_set():
                     raise RuntimeError("competition interrupted by STOP")
-                if stop_file.exists():
+                current = stop_marker_signature(stop_file)
+                if current is not None and (stop_file_baseline is None or current != stop_file_baseline):
                     raise RuntimeError("competition interrupted by STOP file")
                 if runtime.clock() >= deadline:
                     raise RuntimeError("competition task time limit expired")

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import competition_boot as boot
-from components.fleet_models import (AckStatus, CommandId, CommandPayload, Frame,
+from components.fleet_models import (AckReason, AckStatus, CommandId, CommandPayload, Frame,
                                     MessageKind, NodeId)
 from components.fleet_protocol import encode_command, pack_frame, unpack_frame, decode_ack
 
@@ -151,10 +151,48 @@ class BootTests(unittest.TestCase):
             self.listener.local_command('start')
         self.mission.assert_not_called()
 
+    def test_run_captures_stop_signature_before_worker_and_preserves_snapshot(self):
+        self.signature.side_effect = self.real_signature
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'STOP'
+            marker.write_text('previous round')
+            baseline = self.real_signature(marker)
+            with patch.object(boot, 'Path', return_value=marker) as path, \
+                 patch.object(boot.threading, 'Thread') as thread, \
+                 patch.object(boot, 'FleetTaskSender', return_value=self.sender):
+                self.assertEqual(self.listener._start_mission(), (AckStatus.ACCEPTED, AckReason.NONE))
+                path.assert_called_once_with('logs/competition/STOP')
+                thread.return_value.start.assert_called_once_with()
+                args = thread.call_args.kwargs['args']
+                self.assertEqual(args[4], baseline)
+            marker.write_text('updated during countdown')
+            self.assertNotEqual(self.real_signature(marker), baseline)
+            self.listener._run_mission(ClockEvent(self), *args[1:])
+            self.assertEqual(self.mission.call_args.kwargs['stop_file_baseline'], baseline)
+            self.assertEqual(marker.read_text(), 'updated during countdown')
+
+    def test_run_stat_error_returns_failed_ack_without_starting_worker(self):
+        self.signature.side_effect = PermissionError('STOP stat denied')
+        raw = pack_frame(Frame(1, NodeId.GROUND, NodeId.CAR, MessageKind.COMMAND,
+            0, 10, 1, encode_command(CommandPayload(CommandId.CAR_START_MISSION))))
+        with patch.object(boot.threading, 'Thread') as thread, \
+             self.assertLogs(boot.LOG, level='ERROR'):
+            self.listener._on_bytes(raw)
+        ack = decode_ack(unpack_frame(self.driver.write.call_args.args[0]).payload)
+        self.assertEqual((ack.status, ack.reason), (AckStatus.FAILED, AckReason.INTERNAL_ERROR))
+        thread.assert_not_called()
+        self.assertIsNone(self.listener._worker)
+        self.assertIsNone(self.listener._stop_event)
+        self.close.assert_not_called()
+        self.mission.assert_not_called()
+
     def setUp(self):
         self.now=0.
         self.events=[]
         self.stack=ExitStack(); self.addCleanup(self.stack.close)
+        from main_robocup import stop_marker_signature
+        self.real_signature = stop_marker_signature
+        self.signature = self.stack.enter_context(patch('main_robocup.stop_marker_signature', return_value=None))
         self.open=self.stack.enter_context(patch.object(boot,'open_payload',side_effect=lambda:self.events.append(('open',self.now))))
         self.close=self.stack.enter_context(patch.object(boot,'close_payload',side_effect=lambda:self.events.append(('close',self.now))))
         self.remap=self.stack.enter_context(patch.object(boot,'restart_car_slam_sidecar',side_effect=lambda stop:self.events.append(('car_map',self.now))))

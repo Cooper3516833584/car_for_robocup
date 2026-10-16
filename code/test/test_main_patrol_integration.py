@@ -14,12 +14,13 @@ from unittest.mock import Mock, PropertyMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import competition_task as task
+import competition_boot as boot
 import target_patrol
 from components.pose_fusion import FusedPoseEstimate, PoseFusion, PoseFusionState
 from components.task_board_reader import TaskCounts
 from config.v2_runtime import RuntimeMode
 from core.types import Pose2D, Twist2D
-from main_robocup import main
+from main_robocup import main, stop_marker_signature
 from mission_control import step_runtime
 from robocup_runtime import RobocupMissionState, build_runtime, load_runtime_config
 
@@ -121,11 +122,11 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         self.now += dt
         if self.stop_during_detour and any(e=="payload_detour_stage_start" and v["stage"]=="safe_side_approach"
                                           for e,v in self.events):
-            self.stop_file.touch()
+            self.stop_file.write_text('STOP issued during this run')
 
-    def run_main(self, *extra):
+    def run_main(self, *extra, **kwargs):
         return main(["--mode","hardware-mission","--competition",
-                     "--speed-scale","2","--log-dir",self.directory,*extra])
+                     "--speed-scale","2","--log-dir",self.directory,*extra], **kwargs)
 
     def test_full_entry_preserves_field_route_and_uses_shared_fused_motion(self):
         self.assertEqual(self.run_main(),0)
@@ -229,14 +230,103 @@ class MainPatrolIntegrationTests(unittest.TestCase):
 
     def test_stop_file_interrupts_nested_payload_motion_and_guard_is_scoped(self):
         self.stop_during_detour=True
-        self.assertEqual(self.run_main(),1)
+        self.assertIsNone(stop_marker_signature(self.stop_file))
+        self.assertEqual(self.run_main(stop_file_baseline=None),1)
         self.assertFalse(any(e=="payload_release_start" for e,v in self.events))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
         self.assertEqual(self.runtime.drive.last_limited_twist,Twist2D(0,0))
         # An independent task must not inherit this mission's pending STOP file.
         fresh=self.make_runtime(self.config,RuntimeMode.DRY_RUN)
         fresh.start();fresh.motion.stop()
         step_runtime(fresh)
         self.assertNotEqual(fresh.mission.state,RobocupMissionState.SAFE_STOP)
+
+    def test_unchanged_old_stop_allows_new_run_without_deleting_marker(self):
+        self.stop_file.write_text('previous round STOP')
+        baseline = stop_marker_signature(self.stop_file)
+        self.assertEqual(self.run_main(stop_file_baseline=baseline), 0)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertEqual(stop_marker_signature(self.stop_file), baseline)
+        self.assertEqual(self.stop_file.read_text(), 'previous round STOP')
+
+    def test_rewritten_old_stop_interrupts_nested_payload_motion(self):
+        self.stop_file.write_text('old STOP')
+        baseline = stop_marker_signature(self.stop_file)
+        self.stop_during_detour = True
+        self.assertEqual(self.run_main(stop_file_baseline=baseline), 1)
+        self.assertNotEqual(stop_marker_signature(self.stop_file), baseline)
+        self.assertFalse(any(e == 'payload_release_start' for e, v in self.events))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist, Twist2D(0, 0))
+
+    def test_direct_main_with_old_stop_still_rejects_before_motion(self):
+        self.stop_file.write_text('old STOP')
+        self.assertEqual(self.run_main(), 1)
+        self.send.assert_not_called()
+        self.assertEqual(self.steps, 0)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist, Twist2D(0, 0))
+
+    def test_removed_old_stop_is_not_a_new_stop_event(self):
+        self.stop_file.write_text('old STOP')
+        baseline = stop_marker_signature(self.stop_file)
+        self.stop_file.unlink()
+        self.assertEqual(self.run_main(stop_file_baseline=baseline), 0)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
+
+    def test_stop_updated_during_boot_countdown_rejects_first_main_guard(self):
+        self.stop_file.write_text('old STOP')
+        baseline = stop_marker_signature(self.stop_file)
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.set.side_effect = lambda: setattr(stop.is_set, 'return_value', True)
+        def wait(duration):
+            self.now += duration
+            self.stop_file.write_text('new STOP during countdown')
+            return False
+        stop.wait.side_effect = wait
+        sender = Mock()
+        mission = Mock(side_effect=lambda argv, **kwargs: self.run_main(**kwargs))
+        listener = boot.CompetitionBoot(driver_factory=Mock(), mission_main=mission,
+                                       alarm=Mock(), clock=lambda: self.now)
+        with patch.object(boot, 'Path', return_value=self.stop_file), \
+             patch.object(boot.threading, 'Event', return_value=stop), \
+             patch.object(boot.threading, 'Thread') as thread, \
+             patch.object(boot, 'FleetTaskSender', return_value=sender):
+            self.assertEqual(listener._start_mission()[0], boot.AckStatus.ACCEPTED)
+            args = thread.call_args.kwargs['args']
+        self.assertEqual(args[4], baseline)
+        with patch.object(boot, 'close_payload'), patch.object(boot, 'open_payload'), \
+             patch.object(boot, 'restart_car_slam_sidecar'):
+            listener._run_mission(*args)
+        self.assertEqual(mission.call_args.kwargs['stop_file_baseline'], baseline)
+        self.send.assert_not_called()
+        sender.send_task_and_start.assert_not_called()
+        self.assertEqual(self.steps, 0)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist, Twist2D(0, 0))
+        listener._alarm.off.assert_called()
+
+    def test_stop_stat_error_during_motion_fails_safely(self):
+        def signature(path):
+            if self.steps > 0:
+                raise PermissionError('STOP stat denied')
+            return stop_marker_signature(path)
+        with patch('main_robocup.stop_marker_signature', side_effect=signature):
+            self.assertEqual(self.run_main(), 1)
+        self.assertGreater(self.steps, 0)
+        self.assertFalse(any(e == 'payload_release_start' for e, v in self.events))
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
+        self.assertEqual(self.runtime.drive.last_limited_twist, Twist2D(0, 0))
+
+    def test_stop_event_is_checked_before_marker_stat(self):
+        stop = Mock()
+        stop.is_set.return_value = True
+        with patch('main_robocup.stop_marker_signature') as signature:
+            self.assertEqual(self.run_main(stop_event=stop), 1)
+        signature.assert_not_called()
+        self.assertEqual(self.steps, 0)
+        self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
 
     def test_task_deadline_interrupts_original_lane_motion(self):
         self.assertEqual(self.run_main("--max-seconds","1"),1)
@@ -260,6 +350,28 @@ class MainPatrolIntegrationTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.run_main("--relay-port","/dev/physical-relay")
         self.builder.assert_not_called()
+
+
+class StopMarkerSignatureTests(unittest.TestCase):
+    def test_signature_covers_file_identity_size_and_nanosecond_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'STOP'
+            self.assertIsNone(stop_marker_signature(path))
+            path.write_text('STOP')
+            st = path.stat()
+            baseline = stop_marker_signature(path)
+            self.assertEqual(baseline, (st.st_dev, st.st_ino, st.st_size,
+                                        st.st_mtime_ns, st.st_ctime_ns))
+            path.write_text('new STOP with different length')
+            self.assertNotEqual(stop_marker_signature(path), baseline)
+
+    def test_stat_errors_are_not_treated_as_absence(self):
+        for error in (PermissionError('denied'), OSError('stat failed')):
+            with self.subTest(error=error):
+                path = Mock()
+                path.stat.side_effect = error
+                with self.assertRaises(type(error)):
+                    stop_marker_signature(path)
 
 
 class SharedVisionWorkerTests(unittest.TestCase):

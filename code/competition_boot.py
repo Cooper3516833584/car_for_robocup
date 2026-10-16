@@ -172,13 +172,19 @@ class CompetitionBoot:
         with self._state_lock:
             if self._closed or (self._worker is not None and self._worker.is_alive()):
                 return AckStatus.REJECTED, AckReason.BUSY
+            from main_robocup import stop_marker_signature
+            try:
+                stop_file_baseline = stop_marker_signature(Path('logs/competition/STOP'))
+            except OSError:
+                LOG.exception('could not capture RUN STOP file baseline')
+                return AckStatus.FAILED, AckReason.INTERNAL_ERROR
             stop = threading.Event()
             run_id = secrets.randbelow(0xffffffff) + 1
             t0 = self._clock()
             sender = None if self._car_only_test else FleetTaskSender(self, stop_event=stop)
             self._stop_event, self._sender = stop, sender
             self._worker = threading.Thread(target=self._run_mission,
-                args=(stop, sender, run_id, t0), name='competition-mission')
+                args=(stop, sender, run_id, t0, stop_file_baseline), name='competition-mission')
             try:
                 self._worker.start()
             except RuntimeError:
@@ -205,7 +211,7 @@ class CompetitionBoot:
                             closed=self._closed)
         raise ValueError('Unknown local action')
 
-    def _run_mission(self, stop, sender, run_id, t0):
+    def _run_mission(self, stop, sender, run_id, t0, stop_file_baseline=None):
         completed = False
         try:
             with self._payload_action_lock:
@@ -244,7 +250,8 @@ class CompetitionBoot:
                         sender.send_task_and_start(counts, start_drone=True))
 
             kwargs = dict(stop_event=stop, send_drone_task=handoff,
-                          on_runtime_ready=self._runtime_ready)
+                          on_runtime_ready=self._runtime_ready,
+                          stop_file_baseline=stop_file_baseline)
             if self._simulate_payload:
                 kwargs['simulate_payload'] = True
             if self._car_only_test:
