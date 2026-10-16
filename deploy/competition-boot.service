@@ -1,5 +1,5 @@
 [Unit]
-Description=RoboCup car-only full-flow listener (real SG90 payload, no drone commands)
+Description=RoboCup car-drone competition mission listener
 RequiresMountsFor=/home/radxa/car
 
 [Service]
@@ -13,7 +13,7 @@ RuntimeDirectoryMode=0700
 ExecStartPre=+/usr/bin/python3 /home/radxa/car/tools/setup_payload_pwm_permissions.py
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/vision_env/bin/python
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/bin/micromamba
-ExecStart=/home/radxa/robocup_ros/bin/micromamba run -p /home/radxa/robocup_ros/env /home/radxa/robocup_ros/vision_env/bin/python /home/radxa/car/code/car_full_flow_test.py --listen
+ExecStart=/home/radxa/robocup_ros/bin/micromamba run -p /home/radxa/robocup_ros/env /home/radxa/robocup_ros/vision_env/bin/python /home/radxa/car/code/competition_boot.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=40

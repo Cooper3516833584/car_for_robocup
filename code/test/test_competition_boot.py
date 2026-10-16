@@ -99,8 +99,23 @@ class BootTests(unittest.TestCase):
             car_full_flow_test.main(['--listen'])
         entry.assert_called_once_with(car_only_test=True, local_control=True)
         service = (Path(__file__).resolve().parents[2] / 'deploy/competition-boot.service').read_text()
-        self.assertIn('/home/radxa/car/code/car_full_flow_test.py --listen', service)
+        self.assertIn('/home/radxa/car/code/competition_boot.py', service)
+        self.assertNotIn('/code/car_full_flow_test.py', service)
+        self.assertNotIn('--listen', service)
+        self.assertNotIn('--competition', service)
         self.assertIn('RuntimeDirectory=robocup-car', service)
+
+    def test_default_main_only_starts_formal_listener(self):
+        done = Mock()
+        with patch.object(boot.threading, 'Event', return_value=done), \
+             patch.object(boot.signal, 'signal'), \
+             patch.object(boot, 'CompetitionBoot') as listener:
+            boot.main()
+        listener.assert_called_once_with(car_only_test=False)
+        listener.return_value.start.assert_called_once_with()
+        listener.return_value._start_mission.assert_not_called()
+        done.wait.assert_called_once_with()
+        listener.return_value.close.assert_called_once_with()
 
     def test_local_run_and_ground_run_share_busy_gate_and_ground_stop(self):
         self.listener._car_only_test = True

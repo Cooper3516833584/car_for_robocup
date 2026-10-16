@@ -49,7 +49,7 @@ fi
 if ! MAMBA_ROOT_PREFIX="$ROS_ROOT/root" \
     PYTHONPATH="$ROS_ROOT/python_ext:$CAR_CODE${PYTHONPATH:+:$PYTHONPATH}" \
     "$MICROMAMBA" run -p "$ROS_ROOT/env" "$COMPETITION_PYTHON" \
-    -c 'import competition_boot, car_full_flow_test; import rclpy, pyrealsense2, cv2, rapidocr, onnxruntime, ultralytics'; then
+    -c 'import competition_boot, main_robocup; import rclpy, pyrealsense2, cv2, rapidocr, onnxruntime, ultralytics'; then
     echo "competition environment cannot import ROS, T265, OCR or YOLO dependencies" >&2
     exit 1
 fi
