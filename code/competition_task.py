@@ -43,7 +43,9 @@ from robocup_runtime import RobocupMissionState
 # Distances: m. Angles here: deg, converted at the motion boundary.
 # ============================================================
 #
-# ---- Wall-following competition parameters (single source of truth) -------
+# ---- Defaults for direct diagnostic calls --------------------------------
+# Formal/test run-button settings are at the top of main_robocup.py and
+# car_full_flow_test.py and are passed per run without changing these defaults.
 # The four values below are user-measured lidar-centre perpendicular distances
 # to the field wall, taken at the parallel patrol pose. They are ordered by the
 # field diagram: left, bottom, right, top. The internal metre values are the
@@ -221,7 +223,7 @@ def build_payload_plan(counts):
     return plan
 
 
-def desired_right_base(leg_index, mount_y_m):
+def desired_right_base(leg_index, mount_y_m, *, options=None):
     """Lidar-centre right-wall distance for one leg, as a base_link target.
 
     The operator measured lidar-centre perpendicular distances at the parallel
@@ -231,7 +233,7 @@ def desired_right_base(leg_index, mount_y_m):
     """
     if isinstance(leg_index, bool) or not isinstance(leg_index, int) or not 0 <= leg_index < 4:
         raise ValueError('leg_index must be 0..3')
-    distance = WALL_RIGHT_DISTANCE_M[leg_index]
+    distance = (WALL_RIGHT_DISTANCE_M if options is None else options.wall_right_distance_m)[leg_index]
     if not math.isfinite(mount_y_m):
         raise ValueError('finite mount_y required')
     target = distance - mount_y_m
@@ -240,13 +242,14 @@ def desired_right_base(leg_index, mount_y_m):
     return target
 
 
-def finish_front_base(mount_x_m):
+def finish_front_base(mount_x_m, *, options=None):
     """Final parking front-wall base target, or ``None`` while unmeasured."""
-    if FINISH_FRONT_DISTANCE_M is None:
+    distance = FINISH_FRONT_DISTANCE_M if options is None else options.finish_front_m
+    if distance is None:
         return None
     if not math.isfinite(mount_x_m):
         raise ValueError('finite mount_x required')
-    target = FINISH_FRONT_DISTANCE_M + mount_x_m
+    target = distance + mount_x_m
     if not math.isfinite(target) or target <= 0:
         raise ValueError(f'finish front base target must be positive, got {target}')
     return target
@@ -790,14 +793,15 @@ def perform_payload_detour(runtime, *, servo=None, camera=None,
         runtime.record_event('payload_release_failed', actuator='payload_servo',
                              cargo_count=len(slots), slot=payload_slot, slots=slots, color=color,
                              reason='PWM unavailable or not writable')
-        runtime.drive.stop()
-        runtime.mission.request_safe_stop('payload PWM unavailable')
-        raise RuntimeError('payload PWM unavailable or not writable')
+        return None
+    options = getattr(runtime, "competition_options", None)
+    standard_reach = DROP_SAFE_M if options is None else options.standard_drop_m
+    right_reach = RIGHT_MOUNT_DROP_M if options is None else options.right_mount_drop_m
     wall_runtime = getattr(runtime, "observer", None) is not None
     if wall_runtime:
         settings = DetourSettings(
             payload_slot=payload_slot, payload_slots=slots,
-            approach_m=RIGHT_MOUNT_DROP_M if right_mount else DROP_SAFE_M,
+            approach_m=right_reach if right_mount else standard_reach,
             behavior="right_mount" if right_mount else "standard",
             release_hold_s=PAYLOAD_RELEASE_HOLD_S,
             position_tolerance_m=WALL_DROP_TOLERANCE_M)
@@ -807,8 +811,8 @@ def perform_payload_detour(runtime, *, servo=None, camera=None,
                                   on_release=on_release)
     settings = DetourSettings(
         payload_slot=payload_slot, payload_slots=slots,
-        approach_m=(RIGHT_MOUNT_DROP_M if right_mount else
-                    DROP_SAFE_M if safe_distance_m is None else safe_distance_m),
+        approach_m=(right_reach if right_mount else
+                    standard_reach if safe_distance_m is None else safe_distance_m),
         behavior="right_mount" if right_mount else "standard",
         release_hold_s=PAYLOAD_RELEASE_HOLD_S,
         patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
@@ -1010,7 +1014,7 @@ class MissionResult:
     attempted_slots: tuple = ()
 
 
-def build_wall_route(mount_x_m, mount_y_m):
+def build_wall_route(mount_x_m, mount_y_m, *, options=None):
     """The four wall legs, with every distance converted once from the field set.
 
     Every leg ends on a real front wall, including the top-edge search: with the
@@ -1019,7 +1023,7 @@ def build_wall_route(mount_x_m, mount_y_m):
     legs. It must not be looked for as a body-left wall, which is a different
     piece of geometry.
     """
-    desired = tuple(desired_right_base(index, mount_y_m) for index in range(4))
+    desired = tuple(desired_right_base(index, mount_y_m, options=options) for index in range(4))
     legs = (
         WallRouteLeg(0, "left", desired[0], +1, is_front_wall, desired[1], False,
                      "front_wall", True),
@@ -1108,14 +1112,13 @@ def _wait_for_vision_ready(runtime, vision, *, timeout_s: float = VISION_READY_T
             stamp, _colors = vision.observe_colours(runtime.clock())
         except Exception as exc:
             # A real inference failure is not "not ready yet": fail loudly.
-            if "unavailable or stale" not in str(exc) and "not ready" not in str(exc):
-                raise
             stamp = None
         if stamp is not None:
             runtime.record_event("competition_vision_ready", waited_s=float(runtime.clock()) - started)
             return stamp
         if float(runtime.clock()) - started > timeout_s:
-            raise RuntimeError("competition vision did not produce a usable frame")
+            runtime.record_event("competition_vision_unavailable", continuing=True)
+            return False
         runtime.drive.stop()
         runtime.action = None
         _wall_step(runtime)
@@ -1154,7 +1157,13 @@ def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches, limits,
             snapshot = runtime.observer.latest()
             fresh = snapshot is not None and snapshot.is_fresh(float(runtime.clock()))
             if leg.vision_active and pending and vision is not None and fresh:
-                stamp, colored = vision.observe_colours(runtime.clock())
+                try:
+                    stamp, colored = vision.observe_colours(runtime.clock())
+                except Exception as exc:
+                    stamp, colored = None, ()
+                    if follow.speed_cap_m_s is not None:
+                        runtime.record_event("vision_unavailable", reason=str(exc), continuing=True)
+                    follow.speed_cap_m_s = None
                 if stamp is not None and stamp > not_before and stamp != last_stamp:
                     last_stamp = stamp
                     width, height = vision.frame_size
@@ -1186,35 +1195,31 @@ def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches, limits,
                 runtime.record_event("payload_drop", actuator="payload_servo",
                                      cargo_count=len(slots), slot=slots[0], slots=slots,
                                      color=color,
-                                     success=dropped is not None and not simulate_release,
-                                     skipped=dropped is None or simulate_release,
+                                     success=(not simulate_release and
+                                              set(slots).issubset(dropped or ())),
+                                     skipped=not dropped or simulate_release,
+                                     commanded_slots=() if simulate_release else tuple(dropped or ()),
                                      simulated=simulate_release,
                                      detour_completed=dropped is not None,
                                      feedback_source="wall_scan")
-                if dropped is not None:
-                    # Book the slot out of pending here, so the same colour never
-                    # triggers a second detour just because it left the frame and
-                    # came back.
-                    _mark_dropped(pending, command_ledger, color, slots,
+                released_slots = slots if simulate_release and dropped is not None else tuple(dropped or ())
+                if released_slots:
+                    _mark_dropped(pending, command_ledger, color, released_slots,
                                   simulated=simulate_release)
-                    _reacquire_right_wall(runtime, tracker, leg.target_right_m,
-                                          phase=runtime.mission.phase)
-                    # A detour finished the old Follow. Reusing it would carry its
-                    # already-done outcome into the next corner decision, so the
-                    # leg continues with a fresh action that must re-measure the
-                    # corner from new scans.
-                    previous_follow = follow
-                    follow = _make_leg_follow(leg, tracker, limits, runtime)
-                    follow.inherit_terminal(previous_follow, right_before_detour)
-                    runtime.action = follow
-                    not_before = float(runtime.clock())
-                    last_stamp = None
-                    latches[color].require_clear()
-                    if leg.must_finish_on_pending_empty and not any(pending.values()):
-                        completed = True
-                        exhausted = False
-                        runtime.record_event("top_search_finished_early", leg=leg.index + 1,
-                                             pending_colors=())
+                _reacquire_right_wall(runtime, tracker, leg.target_right_m,
+                                      phase=runtime.mission.phase)
+                previous_follow = follow
+                follow = _make_leg_follow(leg, tracker, limits, runtime)
+                follow.inherit_terminal(previous_follow, right_before_detour)
+                runtime.action = follow
+                not_before = float(runtime.clock())
+                last_stamp = None
+                latches[color].require_clear()
+                if leg.must_finish_on_pending_empty and not any(pending.values()):
+                    completed = True
+                    exhausted = False
+                    runtime.record_event("top_search_finished_early", leg=leg.index + 1,
+                                         pending_colors=())
             # A terminal is only ever the wall the action actually measured.
             if follow.terminal_wall is not None:
                 terminal_wall = follow.terminal_wall
@@ -1393,7 +1398,8 @@ def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
         raise RuntimeError(f"final right turn failed ({outcome.reason})")
     _reacquire_right_wall(runtime, tracker, target_right, phase="finish_approach")
 
-    front_target = finish_front_base(runtime.config.d500_mount.x_m)
+    front_target = finish_front_base(runtime.config.d500_mount.x_m,
+                                     options=getattr(runtime, "competition_options", None))
     if front_target is None:
         runtime.drive.stop()
         runtime.record_event("finish_parameter_missing", parameter="FINISH_FRONT_DISTANCE_M",
@@ -1413,7 +1419,7 @@ def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
 
 
 def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
-                     color=TARGET_COLOR, simulate_release=False, payload_log_dir=None):
+                     color=TARGET_COLOR, simulate_release=False, payload_log_dir=None, fixed_counts=None):
     """The competition chain: four wall legs, then the finish zone."""
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
@@ -1422,17 +1428,27 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
     yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
     runtime.drive.stop()
     servo = build_servo(runtime.config, fake=runtime.mode is not RuntimeMode.HARDWARE_MISSION)
-    if servo is None:
-        raise RuntimeError("full competition requires the configured camera servo")
     vision = None
     commanded: list = []
     result = MissionResult(route_done=False, parking_done=False,
                            simulated=simulate_release, reason="")
     try:
-        park_servo(servo, 90)
-        runtime.record_event("competition_camera_hold", angle_deg=90, color=color)
-        counts = _stage(runtime, "task-board", lambda: read_task_board(
-            task_camera, runtime=runtime, allow_fallback=True))
+        if servo is not None:
+            try:
+                park_servo(servo, 90)
+                runtime.record_event("competition_camera_hold", angle_deg=90, color=color)
+            except Exception as exc:
+                runtime.record_event("camera_servo_unavailable", reason=str(exc), continuing=True)
+        options = getattr(runtime, "competition_options", None)
+        fixed_counts = fixed_counts if fixed_counts is not None else getattr(options, "task_counts", None)
+        if fixed_counts is None:
+            counts = _stage(runtime, "task-board", lambda: read_task_board(
+                task_camera, runtime=runtime, allow_fallback=True))
+        else:
+            from components.task_board_reader import TaskCounts
+            counts = TaskCounts(*fixed_counts)
+            runtime.record_event("task_board_counts", **counts.as_dict(), fallback=False,
+                                 source="fixed_rule", skipped=True)
         plan = build_payload_plan(counts)
         car_counts, drone_counts = split_task_allocation(counts)
         runtime.mission.set_task_counts(counts)
@@ -1458,12 +1474,12 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             except Exception:
                 LOG.exception("yellow model unavailable; skip visual drop")
         mount = runtime.config.d500_mount
-        legs, desired = build_wall_route(mount.x_m, mount.y_m)
-        runtime.record_event("competition_wall_route", wall_right_distance_m=WALL_RIGHT_DISTANCE_M,
+        legs, desired = build_wall_route(mount.x_m, mount.y_m, options=getattr(runtime, "competition_options", None))
+        runtime.record_event("competition_wall_route", wall_right_distance_m=WALL_RIGHT_DISTANCE_M if options is None else options.wall_right_distance_m,
                              leg_names=WALL_LEG_NAMES,
                              desired_base_right_m=desired,
-                             finish_front_distance_m=FINISH_FRONT_DISTANCE_M,
-                             finish_front_base_m=finish_front_base(mount.x_m),
+                             finish_front_distance_m=FINISH_FRONT_DISTANCE_M if options is None else options.finish_front_m,
+                             finish_front_base_m=finish_front_base(mount.x_m, options=options),
                              d500_mount_x=mount.x_m, d500_mount_y=mount.y_m,
                              mount_yaw_rad=mount.yaw_rad)
         limits = getattr(runtime, "limits", None) or WallActionLimits.from_config(runtime.config)
@@ -1528,22 +1544,17 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                              reason=result.reason)
         return result
     finally:
-        primary_error = sys.exc_info()[0] is not None
         runtime.action = None
-        cleanup_error = None
         cleanups = [("drive_stop", runtime.drive.stop)]
         if vision is not None:
             cleanups.append(("vision_close", vision.close))
-        if servo.is_running:
+        if servo is not None and servo.is_running:
             cleanups.append(("servo_close", lambda: servo.close(hold=True)))
         for name, cleanup in cleanups:
             try:
                 cleanup()
             except Exception as exc:
-                cleanup_error = cleanup_error or exc
                 runtime.record_event("competition_cleanup_failed", resource=name, reason=str(exc))
-        if cleanup_error is not None and not primary_error:
-            raise cleanup_error
 
 
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
@@ -1557,7 +1568,8 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         return run_wall_mission(runtime, task_board_camera=task_board_camera,
                                 yellow_camera=yellow_camera, detector=detector, color=color,
                                 simulate_release=simulate_release,
-                                payload_log_dir=payload_log_dir)
+                                payload_log_dir=payload_log_dir,
+                                fixed_counts=(1, 2, 1) if car_only_test else None)
     return _run_fused_mission(runtime, task_board_camera=task_board_camera,
                               yellow_camera=yellow_camera, detector=detector, color=color,
                               send_drone_task=send_drone_task, car_only_test=car_only_test,

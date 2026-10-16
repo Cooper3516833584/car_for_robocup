@@ -12,7 +12,7 @@ from pathlib import Path
 import random
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -203,6 +203,26 @@ class FakeObjectGuardTests(unittest.TestCase):
 
 
 class StopLatchTests(unittest.TestCase):
+    def test_control_exception_retries_without_latching_stop_or_cancelling_action(self):
+        from components.wall_navigation import ActionOutcome
+        runtime, backend, clock = self.make_runtime()
+        self.addCleanup(runtime.close)
+        runtime.start()
+        action = Mock()
+        action.step.side_effect = [ValueError('temporary association failure'),
+                                   ActionOutcome('follow_right_wall', False,
+                                                 fields={'command': Twist2D(.1, 0)})]
+        runtime.action = action
+        first = runtime.step()
+        self.assertIsNone(first.error)
+        self.assertFalse(runtime.stop_latched)
+        self.assertIs(runtime.action, action)
+        clock[0] += .1
+        resumed = runtime.step()
+        self.assertEqual(resumed.action_state, 'running')
+        self.assertGreater(resumed.command.linear_x_m_s, 0)
+        self.assertFalse(runtime.stop_latched)
+
     def make_runtime(self):
         from config.v2_loader import load_v2_config
         from config.v2_runtime import RuntimeMode

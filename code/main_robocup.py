@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+# 快速调整区：距离单位米，右墙距离顺序为左边、底边、右边、顶边。
+# 无参数运行此文件：通过开机监听服务启动正式任务，保留任务板识别。
+WALL_RIGHT_DISTANCE_M = (1.600, 1.895, 1.690, 2.330)
+STANDARD_DROP_M = 0.43       # 普通投放前进距离（槽位 0..3）
+RIGHT_MOUNT_DROP_M = 0.32    # 右侧投放前进距离（黄色，槽位 4）
+FINISH_FRONT_DISTANCE_M = 1.10
+
 import argparse
 import logging
 import math
@@ -30,9 +37,25 @@ DIRECT_COMPETITION_STAGES = {"task-board", "hc-send", "yellow-detect", "drop"}
 # observer and the wall-action controller instead.
 WALL_COMPETITION_STAGES = {"wall-observe", "wall-leg", "wall-turn", "drop-standard",
                            "drop-right", "top-return"}
-# The wall chain shares one deadline from RUN to the end of the run. The old
-# <=600 s cap must not reject the competition profile.
+# Retained CLI compatibility value; wall missions no longer abort on a timer.
 COMPETITION_MAX_SECONDS = 1200.0
+
+
+def operator_options():
+    from components.competition_options import CompetitionOptions
+    return CompetitionOptions(wall_right_distance_m=WALL_RIGHT_DISTANCE_M,
+                              standard_drop_m=STANDARD_DROP_M,
+                              right_mount_drop_m=RIGHT_MOUNT_DROP_M,
+                              finish_front_m=FINISH_FRONT_DISTANCE_M).as_dict()
+
+
+def launch(argv=None):
+    """Run-button entry; explicit CLI arguments retain the diagnostic interface."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments:
+        return main(arguments)
+    from components.local_mission_control import run_local
+    return run_local(operator_options())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speed-scale", type=float, default=1,
                         help="shared motion speed multiplier; use 2 for the validated faster profile")
     parser.add_argument("--max-seconds", type=float, default=COMPETITION_MAX_SECONDS,
-                        help="competition motion task time limit, including nested search and detour")
+                        help="legacy diagnostic argument; wall missions do not abort on this timer")
     return parser
 
 
@@ -140,7 +163,7 @@ def stop_marker_signature(path: Path):
 
 def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None,
          on_runtime_ready=None, car_only_test=False, simulate_payload=False,
-         stop_file_baseline=None, run_started_at_s=None) -> int:
+         stop_file_baseline=None, run_started_at_s=None, run_options=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
@@ -210,6 +233,13 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
         config = route_speed_config(config, args.speed_scale)
         if use_wall_runtime:
             runtime = build_wall_runtime(config, mode)
+            from components.competition_options import CompetitionOptions
+            options = operator_options()
+            if run_options is not None:
+                options.update(run_options)
+            if car_only_test and options.get('task_counts') is None:
+                options['task_counts'] = (1, 2, 1)
+            runtime.competition_options = CompetitionOptions(**options)
             runtime.record_event("competition_runtime_chain", chain="wall",
                                  stage=args.competition_stage or "full",
                                  fused_localization=False, drone_communication=False)
@@ -259,21 +289,18 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                                  lookahead_base_m=config.navigation.lookahead_m,
                                  lookahead_max_extension_m=config.navigation.lookahead_max_extension_m,
                                  actuator="dual_servo")
-            # One shared deadline. When the listener accepted RUN it recorded
-            # that instant and passes it in, so the 20 s preparation and the 5 s
-            # beep are inside the budget instead of being added on top of it.
-            deadline = ((float(run_started_at_s) if run_started_at_s is not None
-                         else runtime.clock()) + args.max_seconds)
+            # Only explicit STOP / Ctrl+C ends an unfinished wall mission.
             stop_file = Path(args.log_dir or "logs/competition") / "STOP"
 
             def guard():
                 if stop_event is not None and stop_event.is_set():
                     raise RuntimeError("competition interrupted by STOP")
-                current = stop_marker_signature(stop_file)
+                try:
+                    current = stop_marker_signature(stop_file)
+                except OSError:
+                    current = None
                 if current is not None and (stop_file_baseline is None or current != stop_file_baseline):
                     raise RuntimeError("competition interrupted by STOP file")
-                if runtime.clock() >= deadline:
-                    raise RuntimeError("competition task time limit expired")
 
             def terminate(*_):
                 raise KeyboardInterrupt
@@ -369,4 +396,4 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(launch())

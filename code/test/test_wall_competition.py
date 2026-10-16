@@ -299,13 +299,17 @@ class WallRouteTests(unittest.TestCase):
                                approach_m=task.RIGHT_MOUNT_DROP_M)
         self.assertAlmostEqual(right.approach_m, 0.32, places=9)
 
-    def test_p12_a_caller_safe_distance_cannot_override_the_32_centimetre_reach(self):
-        import inspect
-        source = inspect.getsource(task.perform_payload_detour)
-        # The wall branch hard-codes the fixed right-mount reach, exactly as the
-        # fused branch always did.
-        self.assertIn("RIGHT_MOUNT_DROP_M if right_mount else DROP_SAFE_M", source)
-        self.assertNotIn("safe_distance_m if right_mount", source)
+    def test_p12_per_run_settings_choose_both_reaches_independently(self):
+        from components.competition_options import CompetitionOptions
+        from types import SimpleNamespace
+        runtime = SimpleNamespace(observer=object(), competition_options=CompetitionOptions(
+            standard_drop_m=.51, right_mount_drop_m=.37), clock=lambda: 1.0)
+        with patch('payload_detour.run_payload_detour', return_value=() ) as run:
+            for slot, expected in ((1, .51), (4, .37)):
+                task.perform_payload_detour(runtime, payload_slot=slot, safe_distance_m=.99,
+                                            simulate_release=True, tracker=object(),
+                                            acquire_reference=lambda *_: None, limits=_limits())
+                self.assertAlmostEqual(run.call_args.args[1].approach_m, expected)
 
 
 def _limits():
@@ -694,17 +698,17 @@ class WallDetourTests(unittest.TestCase):
         runtime.step = step
         try:
             with patch("payload_detour.open_payload", side_effect=opener):
-                with self.assertRaises(RuntimeError):
-                    run_payload_detour(runtime, settings, clock=lambda: clock[0],
-                                       sleep=lambda _s: None, tracker=tracker,
-                                       acquire_reference=acquire, limits=limits,
-                                       on_release=seen.append)
+                result = run_payload_detour(runtime, settings, clock=lambda: clock[0],
+                                            sleep=lambda _s: None, tracker=tracker,
+                                            acquire_reference=acquire, limits=limits,
+                                            on_release=seen.append)
+                self.assertEqual(result, (2,))
         finally:
             runtime.step = original_step
         # The first slot stays recorded as released and is never re-issued.
         self.assertEqual(seen, [2])
 
-    def test_p15_a_return_failure_is_reported_separately_from_the_release(self):
+    def test_p15_reference_loss_during_return_recovers_without_releasing_twice(self):
         from payload_detour import run_payload_detour
 
         runtime, observer, clock, tracker, settings, events, drive = self.build(
@@ -713,6 +717,7 @@ class WallDetourTests(unittest.TestCase):
         world = {'bearing': -math.pi / 2, 'rho': 1.60}
         steps = [0]
         vanished = [False]
+        lost_at = [None]
         calls = []
 
         def opener(slot=None):
@@ -740,8 +745,9 @@ class WallDetourTests(unittest.TestCase):
             clock[0] += self.DT_S
             if not vanished[0] and stage_started("return_from_drop"):
                 vanished[0] = True
-            if vanished[0]:
-                observer.publish()  # the reference wall is gone for good
+                lost_at[0] = clock[0]
+            if vanished[0] and clock[0] - lost_at[0] < 8.0:
+                observer.publish()  # temporary loss longer than the former timeout
             else:
                 observer.publish(make_wall(world['bearing'], max(0.15, world['rho'])))
             result = original_step()
@@ -754,10 +760,9 @@ class WallDetourTests(unittest.TestCase):
         runtime.step = step
         try:
             with patch("payload_detour.open_payload", side_effect=opener):
-                with self.assertRaises(RuntimeError):
-                    run_payload_detour(runtime, settings, clock=lambda: clock[0],
-                                       sleep=lambda _s: None, tracker=tracker,
-                                       acquire_reference=acquire, limits=limits)
+                result = run_payload_detour(runtime, settings, clock=lambda: clock[0],
+                                            sleep=lambda _s: None, tracker=tracker,
+                                            acquire_reference=acquire, limits=limits)
         finally:
             runtime.step = original_step
 
@@ -767,10 +772,10 @@ class WallDetourTests(unittest.TestCase):
                       [event['stage'] for event in events
                        if event['type'] == 'payload_detour_stage_start'])
         self.assertTrue(any(event['type'] == 'payload_release_done' for event in events))
-        # ...the failure is recorded separately...
-        self.assertTrue(any(event['type'] == 'payload_detour_failed' for event in events))
-        # ...and cleanup opened every axis (None = all slots), logged as cleanup.
-        self.assertIn(None, calls)
+        self.assertEqual(result, (1,))
+        self.assertEqual(calls, [1])
+        self.assertFalse(any(event['type'] == 'payload_detour_failed' for event in events))
+        self.assertGreater(clock[0] - lost_at[0], 8.0)
 
     def test_p17_cleanup_is_logged_as_cleanup_not_as_five_successful_drops(self):
         import inspect

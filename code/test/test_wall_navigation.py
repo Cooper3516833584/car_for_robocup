@@ -783,7 +783,7 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertFalse(resumed.done)
         self.assertGreater(resumed.command.angular_z_rad_s, 0.0)
 
-    def test_t06_a_persistently_lost_reference_fails_instead_of_timing_a_turn(self):
+    def test_t06_a_lost_reference_waits_and_recovers_without_aborting(self):
         action = TurnToWallBearing(reference_bearing_rad=-math.pi / 2,
                                    desired_bearing_rad=REAR_BEARING_RAD,
                                    turn_direction=+1, limits=LIMITS,
@@ -794,9 +794,13 @@ class ActionStateMachineTests(unittest.TestCase):
         self.assertEqual(first.reason, "reference_wall_lost")
         self.assertEqual(first.command.linear_x_m_s, 0.0)
         outcome = action.step(snapshot_of(elsewhere, seq=2, observed=2.5), now_s=2.55)
-        self.assertTrue(action.finished)
+        self.assertFalse(action.finished)
         self.assertFalse(outcome.done)
         self.assertEqual(outcome.reason, "reference_wall_lost")
+
+        resumed = action.step(snapshot_of(make_wall(-math.pi / 2, 1.6), seq=3, observed=3.0), now_s=3.05)
+        self.assertGreater(resumed.command.angular_z_rad_s, 0)
+        self.assertFalse(action.finished)
 
     def test_t07_a_scan_delivered_after_zero_that_started_before_it_cannot_confirm(self):
         action = TurnToWallBearing(reference_bearing_rad=-math.pi / 2,

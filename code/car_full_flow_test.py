@@ -1,57 +1,26 @@
-"""Run this file without arguments in VS Code Remote SSH to start the full mission.
+"""VS Code Remote SSH: run this file to start the fixed red/blue/green 1/2/1 mission.
 
-The boot service uses --listen; local and radio RUN share that single mission
-owner, including countdown, SLAM, OCR, real drive, dual SG90 and cleanup.
+No task-board OCR. Uses the existing boot listener, real drive and five payload
+servos; Ctrl+C requests STOP. No command-line arguments are required.
 """
+# 快速调整区：距离单位米，顺序为左边、底边、右边、顶边。
+WALL_RIGHT_DISTANCE_M = (1.600, 1.895, 1.690, 2.330)
+STANDARD_DROP_M = 0.43       # 普通投放前进距离（槽位 0..3）
+RIGHT_MOUNT_DROP_M = 0.32    # 右侧投放前进距离（黄色，槽位 4）
+FINISH_FRONT_DISTANCE_M = 1.10
+TASK_COUNTS = (1, 2, 1)     # 红、蓝、绿；固定规则，跳过任务板
+
 import argparse
 import json
-import shutil
-import signal
-import subprocess
-import time
-
-from components.local_mission_control import request_local
+from components.local_mission_control import request_local, run_local as _run_local
+from components.competition_options import CompetitionOptions
 
 
 def run_local():
-    log = None
-    started = False
-    previous_handler = signal.getsignal(signal.SIGTERM)
-    def interrupt(*_):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, interrupt)
-    try:
-        if shutil.which('journalctl'):
-            log = subprocess.Popen(['journalctl', '-u', 'competition-boot.service',
-                                    '--since', 'now', '-f', '-o', 'cat', '--no-pager'])
-        result = request_local('start')
-        if not result.get('ok'):
-            print('启动未接受：' + json.dumps(result, ensure_ascii=False), flush=True)
-            return 1
-        started = True
-        print('本机全流程已启动：关闭物资后计时 20 秒，重建图后蜂鸣 5 秒；Ctrl+C 停止。', flush=True)
-        while request_local('status')['running']:
-            time.sleep(.5)
-        print('本轮任务已结束，结果见上方任务日志。', flush=True)
-        return 0
-    except KeyboardInterrupt:
-        if started:
-            request_local('stop')
-            print('已请求停车并结束本轮任务。', flush=True)
-        return 130
-    except (OSError, ValueError, KeyError) as exc:
-        if started:
-            try:
-                request_local('stop')
-            except (OSError, ValueError):
-                pass
-        print('本机任务连接失败：%s；请检查 competition-boot.service。' % exc, flush=True)
-        return 2
-    finally:
-        signal.signal(signal.SIGTERM, previous_handler)
-        if log is not None:
-            log.terminate()
-            log.wait(timeout=3)
+    return _run_local(CompetitionOptions(
+        wall_right_distance_m=WALL_RIGHT_DISTANCE_M,
+        standard_drop_m=STANDARD_DROP_M, right_mount_drop_m=RIGHT_MOUNT_DROP_M,
+        finish_front_m=FINISH_FRONT_DISTANCE_M, task_counts=TASK_COUNTS).as_dict())
 
 
 def main(argv=None):

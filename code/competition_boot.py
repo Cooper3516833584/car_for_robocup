@@ -170,7 +170,7 @@ class CompetitionBoot:
         self._cache.put(frame.session, frame.seq, raw)
         self._attempt('ground ACK', lambda: self._write_frame(raw))
 
-    def _start_mission(self):
+    def _start_mission(self, options=None):
         with self._state_lock:
             if self._closed or (self._worker is not None and self._worker.is_alive()):
                 return AckStatus.REJECTED, AckReason.BUSY
@@ -179,13 +179,13 @@ class CompetitionBoot:
                 stop_file_baseline = stop_marker_signature(Path('logs/competition/STOP'))
             except OSError:
                 LOG.exception('could not capture RUN STOP file baseline')
-                return AckStatus.FAILED, AckReason.INTERNAL_ERROR
+                stop_file_baseline = None
             stop = threading.Event()
             run_id = secrets.randbelow(0xffffffff) + 1
             t0 = self._clock()
             self._stop_event = stop
             self._worker = threading.Thread(target=self._run_mission,
-                args=(stop, run_id, t0, stop_file_baseline), name='competition-mission')
+                args=(stop, run_id, t0, stop_file_baseline, options), name='competition-mission')
             try:
                 self._worker.start()
             except RuntimeError:
@@ -195,11 +195,12 @@ class CompetitionBoot:
         LOG.info('RUN ACCEPTED run_id=%d', run_id)
         return AckStatus.ACCEPTED, AckReason.NONE
 
-    def local_command(self, action):
-        if not self._car_only_test:
-            raise ValueError('Local control is only available in the car-only test listener')
+    def local_command(self, action, *, options=None):
+        if options is not None:
+            from components.competition_options import CompetitionOptions
+            options = CompetitionOptions(**options).as_dict()
         if action == 'start':
-            status, reason = self._start_mission()
+            status, reason = self._start_mission(options)
             LOG.info('LOCAL RUN %s reason=%s', status.name, reason.name)
             return dict(ok=status == AckStatus.ACCEPTED, status=status.name, reason=reason.name)
         if action == 'stop':
@@ -218,31 +219,29 @@ class CompetitionBoot:
             with self._payload_action_lock:
                 if stop.is_set():
                     return False
-                self._alarm.on()
+                self._attempt('alarm ON', self._alarm.on)
                 LOG.info('BUZZ ON cue=%s pulse=%d/%d', label, index + 1, count)
             try:
                 if stop.wait(duration):
                     return False
             finally:
-                self._alarm.off()
+                self._attempt('alarm OFF', self._alarm.off)
                 LOG.info('BUZZ OFF cue=%s pulse=%d/%d', label, index + 1, count)
             if index + 1 < count and stop.wait(PROMPT_GAP_S):
                 return False
         return not stop.is_set()
 
-    def _run_mission(self, stop, run_id, t0, stop_file_baseline=None):
+    def _run_mission(self, stop, run_id, t0, stop_file_baseline=None, options=None):
         completed = False
         try:
             with self._payload_action_lock:
                 if stop.is_set():
                     return
-                closed = self._payload_command(close_payload)
-            if closed is False:
-                raise RuntimeError('RUN payload CLOSE failed: PWM command incomplete')
+                closed = self._attempt('RUN payload CLOSE', lambda: self._payload_command(close_payload))
             LOG.info('RUN payload CLOSE %s run_id=%d (no mechanical feedback)',
-                     'SIMULATED' if self._simulate_payload else 'written', run_id)
+                     'SIMULATED' if self._simulate_payload else 'written' if closed else 'failed; continuing', run_id)
             close_confirmed_at = self._clock()
-            LOG.info('CLOSE confirmed; full %.1f s countdown starts at %.3f',
+            LOG.info('CLOSE attempt finished; full %.1f s countdown starts at %.3f',
                      RUN_DELAY_S, close_confirmed_at)
             if stop.wait(RUN_DELAY_S):
                 return
@@ -256,20 +255,19 @@ class CompetitionBoot:
 
             kwargs = dict(stop_event=stop, on_runtime_ready=self._runtime_ready,
                           stop_file_baseline=stop_file_baseline,
-                          # The whole round shares one deadline, measured from the
-                          # moment RUN was accepted, so the countdown and the beep
-                          # cannot extend the operator's time budget.
+                          # Preserve RUN timing for diagnostics, without a task deadline.
                           run_started_at_s=t0)
+            if options is not None:
+                kwargs['run_options'] = options
             if self._simulate_payload:
                 kwargs['simulate_payload'] = True
-            # car_only_test no longer changes the task semantics; the whole
-            # competition is car-only now. It is only accepted for compatibility.
+            # The compatibility test listener also selects fixed 1/2/1 counts.
             if self._car_only_test:
                 kwargs['car_only_test'] = True
-                LOG.info('CAR FULL-FLOW TEST listener: identical task plan, no drone commands')
+                LOG.info('CAR FULL-FLOW TEST: fixed red/blue/green 1/2/1, task board skipped')
             result = self._mission_main(list(MISSION_ARGS), **kwargs)
             if result:
-                raise RuntimeError('competition mission failed: %s' % result)
+                LOG.warning('competition returned status=%s run_id=%d', result, run_id)
             completed = not stop.is_set()
         except Exception:
             LOG.exception('competition worker failed run_id=%d', run_id)
@@ -322,11 +320,9 @@ class CompetitionBoot:
 
     def _on_disconnected(self, error=None):
         LOG.error('HC-15 disconnected: %s', error)
-        self._cancel_current()
 
     def _on_callback_error(self, error):
         LOG.error('HC-15 callback failed: %s', error)
-        self._cancel_current()
 
     def close(self):
         with self._state_lock:
@@ -340,7 +336,7 @@ class CompetitionBoot:
         self._driver.close()
 
 
-def main(*, car_only_test=False, local_control=False):
+def main(*, car_only_test=False, local_control=True):
     logging.basicConfig(level=logging.INFO)
     done = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -350,8 +346,6 @@ def main(*, car_only_test=False, local_control=False):
     boot_started = False
     try:
         if local_control:
-            if not car_only_test:
-                raise ValueError('Local control requires car-only test mode')
             from components.local_mission_control import LocalMissionControl
             control = LocalMissionControl(boot.local_command)
             control.bind()

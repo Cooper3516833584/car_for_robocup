@@ -552,21 +552,17 @@ class WallAction:
         if not snapshot.is_fresh(now, max_age_s=self.max_age_s):
             return self._wait(now, "stale_wall_observation")
         outcome = self._tick(snapshot, now)
-        # Clear the outage timer only once this tick actually found what it was
-        # waiting for. Clearing it before ``_tick`` would make a persistently
-        # lost reference wall retry forever instead of failing.
+        # Clear the remembered outage once usable feedback has returned. A
+        # missing observation remains a wait and never finishes the action.
         if not outcome.waiting:
             self.last_error_s = None
         return outcome
 
     def _wait(self, now_s: float, reason: str, **fields) -> ActionOutcome:
-        # Stamp the start of the outage once; re-stamping every tick would mean
-        # the lost-wall timeout could never elapse.
+        # Missing feedback is a recoverable wait, never a task failure timer.
         if self.last_error_s is None:
             self.last_error_s = now_s
         self._record_zero(now_s)
-        if now_s - self.last_error_s > self.lost_timeout_s:
-            return self._finish(False, reason)
         return ActionOutcome(self.name, False, reason, dict(fields), waiting=True)
 
     def _tick(self, snapshot: WallSnapshot, now_s: float) -> ActionOutcome:  # pragma: no cover

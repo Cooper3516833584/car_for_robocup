@@ -11,10 +11,30 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from workspace_temp import WorkspaceTempDir
 import car_full_flow_test as entry
+from components import local_mission_control as control
 from components.local_mission_control import LocalMissionControl, request_local
 
 
 class LocalEntryTests(unittest.TestCase):
+    def test_client_connection_error_does_not_send_a_stop(self):
+        with patch.object(control.shutil, 'which', return_value=None), \
+                patch.object(control, 'request_local', side_effect=[dict(ok=True), OSError('lost')]) as request:
+            self.assertEqual(control.run_local(), 2)
+        self.assertEqual([c.args[0] for c in request.call_args_list], ['start', 'status'])
+
+    def test_options_are_serialized_with_the_start_request(self):
+        from unittest.mock import MagicMock
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.makefile.return_value.__enter__.return_value.readline.return_value = b'{"ok":true}\n'
+        with patch.object(socket, 'AF_UNIX', 1, create=True), \
+                patch.object(socket, 'socket', return_value=connection):
+            request_local('start', options={'task_counts': [1, 2, 1], 'standard_drop_m': .51})
+        data = json.loads(connection.__enter__.return_value.sendall.call_args.args[0])
+        self.assertEqual(data['action'], 'start')
+        self.assertEqual(data['options']['task_counts'], [1, 2, 1])
+        self.assertEqual(data['options']['standard_drop_m'], .51)
+
     def test_no_arguments_from_vscode_start_local_run(self):
         with patch.object(entry, 'run_local', return_value=0) as run:
             self.assertEqual(entry.main([]), 0)
@@ -28,15 +48,15 @@ class LocalEntryTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_ctrl_c_stops_the_locally_started_mission(self):
-        with patch.object(entry.shutil, 'which', return_value=None), \
-             patch.object(entry, 'request_local', side_effect=[dict(ok=True), KeyboardInterrupt(), dict(ok=True)]) as request:
-            self.assertEqual(entry.run_local(), 130)
+        with patch.object(control.shutil, 'which', return_value=None), \
+             patch.object(control, 'request_local', side_effect=[dict(ok=True), KeyboardInterrupt(), dict(ok=True)]) as request:
+            self.assertEqual(control.run_local(), 130)
         self.assertEqual([call.args[0] for call in request.call_args_list], ['start', 'status', 'stop'])
 
     def test_busy_does_not_stop_someone_elses_mission(self):
-        with patch.object(entry.shutil, 'which', return_value=None), \
-             patch.object(entry, 'request_local', return_value=dict(ok=False, reason='BUSY')) as request:
-            self.assertEqual(entry.run_local(), 1)
+        with patch.object(control.shutil, 'which', return_value=None), \
+             patch.object(control, 'request_local', return_value=dict(ok=False, reason='BUSY')) as request:
+            self.assertEqual(control.run_local(), 1)
         request.assert_called_once_with('start')
 
 

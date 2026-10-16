@@ -169,7 +169,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             runtime.mission.on_payload_action_done()
         reference = acquire_reference(runtime, tracker)
         if reference is None:
-            raise RuntimeError("payload detour has no visible reference wall")
+            runtime.record_event("payload_detour_skipped", reason="road reference unavailable")
+            return None
         d0 = reference.d0_base_m
         runtime.record_event("payload_detour_reference", reference_id=reference.reference_id,
                              d0_base_m=d0, bearing_rad=reference.bearing_rad,
@@ -206,16 +207,25 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
             else:
                 runtime.record_event("payload_release_start", actuator="payload_servo",
                                      slot=slot, cargo_count=1, behavior=settings.behavior)
-                released = open_payload(slot)
+                try:
+                    released = open_payload(slot)
+                except Exception as exc:
+                    runtime.record_event("payload_release_failed", slot=slot, reason=str(exc), continuing=True)
+                    continue
                 if released is False:
-                    raise RuntimeError('payload PWM command failed: returned False')
+                    runtime.record_event("payload_release_failed", slot=slot,
+                                         reason="PWM command returned False", continuing=True)
+                    continue
                 commanded.append(slot)
                 # Book the ledger *now*, before the hold and before the turn back
                 # to the road: the slot is open from this instant, so a later
                 # failure must not put it back into pending and let the same
                 # colour be serviced twice.
                 if on_release is not None:
-                    on_release(slot)
+                    try:
+                        on_release(slot)
+                    except Exception as exc:
+                        runtime.record_event("payload_drop_log_failed", slot=slot, reason=str(exc))
             hold(settings.release_hold_s)
             if not simulate_release:
                 runtime.record_event("payload_release_done", actuator="payload_servo",
@@ -256,7 +266,6 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         runtime.record_event("payload_detour_failed",
                              reason=f"{type(exc).__name__}: {exc}",
                              behavior=settings.behavior, commanded_slots=tuple(commanded))
-        runtime.mission.request_safe_stop(str(exc))
         raise
     finally:
         primary_error = sys.exc_info()[0] is not None
@@ -279,6 +288,3 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
                 if not primary_error:
                     cleanup_error = cleanup_error or exc
-                    runtime.mission.request_safe_stop(str(exc))
-        if cleanup_error is not None and not primary_error:
-            raise cleanup_error

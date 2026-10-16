@@ -4,6 +4,33 @@ This repository contains the RoboCup ground vehicle software for a differential-
 
 ## Quick start
 
+On the car in VS Code Remote SSH, open either file and click **Run Python File**;
+no arguments are needed:
+
+- `code/main_robocup.py`: formal mission, including task-board recognition.
+- `code/car_full_flow_test.py`: the same mission with fixed **red 1 / blue 2 /
+  green 1**, skipping task-board recognition; yellow remains mandatory.
+
+The quick tuning block at the top of **each** file contains the four right-wall
+distances (left / bottom / right / top), standard payload advance, right-mount
+payload advance, and final front-wall parking distance. All are metres. The
+values are sent with that run and do not change the next radio-started mission.
+The default right-wall distances are `(1.600, 1.895, 1.690, 2.330)`, and the two
+payload advances are `0.43` and `0.32`.
+
+Both run buttons use the existing `competition-boot.service` listener. Boot still
+only starts the HC-15 RUN/STOP/PING listener; it does not start driving. The
+existing 20-second preparation and 5-second buzzer remain. Radio RUN uses the
+formal mission. Ctrl+C and radio/local STOP cancel the current run.
+
+Missing terminal-wall measurements continue road-wall following; late distance
+measurements recover a crossed target. Missing road-wall or complete lidar
+feedback waits for a valid observation without a failure timeout. Unavailable
+vision and failed payload commands no longer abort the round; failed slots are
+not recorded as successful drops. Radio link/callback errors do not cancel an
+active mission, and the old total mission timeout is disabled. Normal completion,
+explicit STOP and process shutdown still clear drive output.
+
 Run the complete synthetic runtime on Windows, Linux, or macOS without connecting a vehicle:
 
 ```powershell
@@ -30,24 +57,20 @@ Copy-Item configs\robocup_diffdrive.example.toml configs\robocup_diffdrive.toml
 Production entry point: [code/main_robocup.py](code/main_robocup.py). Composition, startup, event loop, and safe shutdown live in [code/robocup_runtime.py](code/robocup_runtime.py). This path uses `DifferentialDrive` and does not import the old competition task runtime.
 
 The 2026 competition route is available with `--mode hardware-mission --competition`
-or `--competition-stage` for an individual action. Route points and quick tuning
-values live at the top of `code/competition_task.py` and currently need field
-measurements. See [docs/COMPETITION_TASK.md](docs/COMPETITION_TASK.md) for the stage
+or `--competition-stage` for an individual action. Quick tuning values for the
+formal/test missions live at the top of their respective entry files; direct
+diagnostic defaults remain in `code/competition_task.py`. See [docs/COMPETITION_TASK.md](docs/COMPETITION_TASK.md) for the stage
 commands, existing YOLO model path, atomic functions, and field acceptance order.
 The `task-board`, `hc-send`, `yellow-detect`, and `drop` CLI stages operate their
 devices directly without starting localization or drive runtime. Measured lane
 segments guide the main route, and the finish requires position only.
 
-The main mission and car-only listener share the three-leg route
-`(0,0) -> (7.23,0) -> (7.23,7.15) -> (0,7.15)` and fused payload detour.
-Both use real dual SG90 payload servos; the car-only listener disables drone
-commands. Listener/STOP/failure/completion OPEN both (1000 us), RUN CLOSEs both
-(1500 us), and each normal release OPENs only its colour's slot (0 or 1).
-The independent PWM7 camera axis is unchanged. See
+The formal and fixed-rule test missions share the four-wall route and five SG90
+payload outputs. RUN CLOSEs all five slots (1500 us); listener startup, explicit
+STOP and completion OPEN all five (1000 us). Each normal drop OPENs only the
+assigned slots. Slots 0..3 use the standard detour; yellow slot 4 uses the
+right-mount detour. The separate PWM7 camera axis is unchanged. See
 [docs/PAYLOAD_SG90.md](docs/PAYLOAD_SG90.md) for permissions and tools.
-The patrol test's 280/420/250 cm fixture is separate from the competition route.
-This integration has offline software coverage; field accuracy and servo
-operation still require physical acceptance.
 
 ## Task-board recognition
 

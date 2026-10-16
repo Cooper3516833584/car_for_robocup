@@ -1491,9 +1491,8 @@ class WallRuntime:
         try:
             outcome = action.step(snapshot, now_s=now_s)
         except Exception as exc:
-            self.mission.request_error(str(exc))
-            self.request_stop(f"wall action failed: {exc}")
-            return self._idle_step(now_s, "error", str(exc))
+            self.record_event("wall_control_retry", reason=str(exc))
+            return self._idle_step(now_s, "waiting", None)
         command = outcome.command
         fields = {key: value for key, value in outcome.fields.items()
                   if key not in {"command", "right_wall_normal"}}
@@ -1528,13 +1527,19 @@ class WallRuntime:
         with self._command_lock:
             if self._stop_latched:
                 return None
-            if command.linear_x_m_s == 0.0 and command.angular_z_rad_s == 0.0:
-                if self.drive.is_running:
-                    self.drive.stop()
-                return Twist2D(0.0, 0.0)
-            drive_now = self._ensure_drive_started(now_s)
-            self.drive.command(command, now_s=drive_now)
-            return self.drive.last_limited_twist
+            try:
+                if command.linear_x_m_s == 0.0 and command.angular_z_rad_s == 0.0:
+                    if self.drive.is_running:
+                        self.drive.stop()
+                    return Twist2D(0.0, 0.0)
+                drive_now = self._ensure_drive_started(now_s)
+                self.drive.command(command, now_s=drive_now)
+                return self.drive.last_limited_twist
+            except Exception as exc:
+                # Keep this run and action alive so a reconnect can recover.
+                # No success is fabricated and no mission stop latch is set.
+                self.record_event("drive_command_retry", reason=str(exc))
+                return None
 
 
 def build_wall_runtime(config: DifferentialRobotConfig, mode: RuntimeMode, *,

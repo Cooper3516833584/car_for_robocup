@@ -1,8 +1,8 @@
-"""Main-entry guard behaviour: STOP forms, deadline, SIGTERM and CLI validation.
+"""Main-entry supervision: explicit STOP, no task deadline, SIGTERM and CLI validation.
 
 The competition mission itself is covered by ``test_wall_competition.py`` and
 ``test_wall_runtime.py``. What lives here is the supervision around it: the
-STOP-marker signature, the shared task deadline, SIGTERM cleanup and the CLI
+STOP-marker signature, removal of the task deadline, SIGTERM cleanup and the CLI
 validation that must reject a bad invocation before any hardware is built.
 """
 
@@ -181,20 +181,25 @@ class GuardAndShutdownTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertTrue(runtime.closed)
 
-    def test_a_zero_deadline_aborts_before_any_motion(self):
+    def test_legacy_time_limit_no_longer_aborts_an_unfinished_mission(self):
         directory = temp_dir("deadline")
         self.addCleanup(cleanup_temp_dir, directory)
         now = [0.0]
         runtime = self.make_runtime(lambda: now[0])
 
         def mission(*_args, **_kwargs):
-            raise RuntimeError("competition task time limit expired")
+            from mission_control import step_wall_runtime
+            now[0] = 5000.0
+            step_wall_runtime(runtime)
+            runtime.mission.finish()
+            return True
 
         with patch.object(main_robocup, "build_wall_runtime", return_value=runtime), \
-             patch("competition_task.run_full_mission", side_effect=mission):
+                patch("competition_task.run_full_mission", side_effect=mission), \
+                patch.object(main_robocup, "open_payload"):
             code = main(["--competition", "--mode", "hardware-mission",
                          "--log-dir", directory, "--max-seconds", "1"])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertTrue(runtime.closed)
 
     def test_sigterm_is_restored_after_the_run(self):

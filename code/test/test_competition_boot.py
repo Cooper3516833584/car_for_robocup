@@ -130,7 +130,8 @@ class BootTests(unittest.TestCase):
         done = Mock()
         with patch.object(boot.threading, 'Event', return_value=done), \
              patch.object(boot.signal, 'signal'), \
-             patch.object(boot, 'CompetitionBoot') as listener:
+             patch.object(boot, 'CompetitionBoot') as listener, \
+             patch('components.local_mission_control.LocalMissionControl') as control:
             boot.main()
         listener.assert_called_once_with(car_only_test=False)
         listener.return_value.start.assert_called_once_with()
@@ -166,10 +167,25 @@ class BootTests(unittest.TestCase):
         self.assertEqual(self.mission.call_count, 1)
         self.driver.close.assert_not_called()
 
-    def test_formal_listener_refuses_local_control(self):
-        with self.assertRaises(ValueError):
-            self.listener.local_command('start')
+    def test_formal_listener_accepts_local_status_without_starting(self):
+        self.assertTrue(self.listener.local_command('status')['ok'])
         self.mission.assert_not_called()
+
+    def test_local_run_options_are_forwarded_once_without_changing_radio_defaults(self):
+        from components.competition_options import CompetitionOptions
+        settings = CompetitionOptions(standard_drop_m=.51, right_mount_drop_m=.37,
+                                      task_counts=(1, 2, 1)).as_dict()
+        self.listener._run_mission(ClockEvent(self), 7, 0., options=settings)
+        self.assertEqual(self.mission.call_args.kwargs['run_options'], settings)
+        self.mission.reset_mock()
+        self.run_worker()
+        self.assertNotIn('run_options', self.mission.call_args.kwargs)
+
+    def test_radio_disconnect_or_callback_error_does_not_cancel_the_running_task(self):
+        with patch.object(self.listener, '_cancel_current') as cancel:
+            self.listener._on_disconnected(OSError('link down'))
+            self.listener._on_callback_error(ValueError('bad frame'))
+        cancel.assert_not_called()
 
     def test_run_captures_stop_signature_before_worker_and_preserves_snapshot(self):
         self.signature.side_effect = self.real_signature
@@ -190,20 +206,16 @@ class BootTests(unittest.TestCase):
             self.assertEqual(self.mission.call_args.kwargs['stop_file_baseline'], baseline)
             self.assertEqual(marker.read_text(), 'updated during countdown')
 
-    def test_run_stat_error_returns_failed_ack_without_starting_worker(self):
-        self.signature.side_effect = PermissionError('STOP stat denied')
-        raw = pack_frame(Frame(1, NodeId.GROUND, NodeId.CAR, MessageKind.COMMAND,
-            0, 10, 1, encode_command(CommandPayload(CommandId.CAR_START_MISSION))))
-        with patch.object(boot.threading, 'Thread') as thread, \
-             self.assertLogs(boot.LOG, level='ERROR'):
-            self.listener._on_bytes(raw)
+    def test_run_stat_error_does_not_reject_or_cancel_start(self):
+        self.signature.side_effect = OSError('denied')
+        frame = Frame(1, NodeId.GROUND, NodeId.CAR, MessageKind.COMMAND, 0,
+                      123, 1, encode_command(CommandPayload(CommandId.CAR_START_MISSION)))
+        with patch.object(self.listener, '_run_mission') as worker:
+            self.listener._on_bytes(pack_frame(frame))
+            self.listener._worker.join(1)
         ack = decode_ack(unpack_frame(self.driver.write.call_args.args[0]).payload)
-        self.assertEqual((ack.status, ack.reason), (AckStatus.FAILED, AckReason.INTERNAL_ERROR))
-        thread.assert_not_called()
-        self.assertIsNone(self.listener._worker)
-        self.assertIsNone(self.listener._stop_event)
-        self.close.assert_not_called()
-        self.mission.assert_not_called()
+        self.assertEqual((ack.status, ack.reason), (AckStatus.ACCEPTED, AckReason.NONE))
+        self.assertIsNone(worker.call_args.args[3])
 
     def setUp(self):
         self.now=0.
@@ -266,11 +278,11 @@ class BootTests(unittest.TestCase):
         self.assertIn(('buzz_off', 22.), self.events)
         self.assertEqual(self.events[-1], ('open', 22.))
 
-    def test_false_payload_close_prevents_mission(self):
+    def test_false_payload_close_is_reported_but_does_not_abort_mission(self):
         self.close.side_effect=None
         self.close.return_value=False
         self.run_worker()
-        self.mission.assert_not_called()
+        self.mission.assert_called_once()
         self.assertEqual(self.events[-1][0],'open')
 
     def test_attempt_false_fails_but_none_is_success(self):
