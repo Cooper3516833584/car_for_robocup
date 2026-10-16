@@ -63,11 +63,11 @@ class CompetitionTaskTests(unittest.TestCase):
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
         self.assertEqual(self.runtime.drive.last_limited_twist.linear_x_m_s, 0)
 
-    def test_production_length_three_leg_route_finishes_at_0_7_36(self):
-        with patch.object(task, 'ROUTE_POINTS', ((0.,0.),(7.60,0.),(7.60,7.36),(0.,7.36))):
+    def test_production_length_three_leg_route_finishes_at_0_7_15(self):
+        with patch.object(task, 'ROUTE_POINTS', ((0.,0.),(7.23,0.),(7.23,7.15),(0.,7.15))):
             self.run_visual_route([])
         self.assertEqual(len(self.route_events('competition_route_leg_done')), 3)
-        self.assertLess(math.dist(self.xy_yaw[:2], (0.,7.36)), .035)
+        self.assertLess(math.dist(self.xy_yaw[:2], (0.,7.15)), .035)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.FINISHED)
 
     def test_assigned_colour_before_yellow_on_different_legs(self):
@@ -858,7 +858,7 @@ class CompetitionTaskTests(unittest.TestCase):
 
 class FieldRouteGeometryTests(unittest.TestCase):
     def test_field_route_constants(self):
-        self.assertEqual(task.ROUTE_POINTS, ((0.,0.),(7.60,0.),(7.60,7.36),(0.,7.36)))
+        self.assertEqual(task.ROUTE_POINTS, ((0.,0.),(7.23,0.),(7.23,7.15),(0.,7.15)))
         self.assertEqual(task.ROUTE_HEADINGS_DEG, (0.,90.,180.))
 
     def test_translated_rotated_origin_with_zero_mount(self):

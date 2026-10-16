@@ -33,9 +33,9 @@ YELLOW_CAMERA = 0
 # Full mission reads the task board at the start with the camera already at +90°.
 
 START = (0.00, 0.00)
-CORNER_1 = (7.60, 0.00)
-CORNER_2 = (7.60, 7.36)
-FINISH = (0.00, 7.36)
+CORNER_1 = (7.23, 0.00)
+CORNER_2 = (7.23, 7.15)
+FINISH = (0.00, 7.15)
 ROUTE_POINTS = (START, CORNER_1, CORNER_2, FINISH)
 ROUTE_HEADINGS_DEG = (0.0, 90.0, 180.0)
 # Standalone stages retain their caller-owned fused-frame interpretation.

@@ -39,7 +39,7 @@ devices directly without starting localization or drive runtime. Measured lane
 segments guide the main route, and the finish requires position only.
 
 The main mission and car-only listener share the three-leg route
-`(0,0) -> (7.60,0) -> (7.60,7.36) -> (0,7.36)` and fused payload detour.
+`(0,0) -> (7.23,0) -> (7.23,7.15) -> (0,7.15)` and fused payload detour.
 Both use real dual SG90 payload servos; the car-only listener disables drone
 commands. Listener/STOP/failure/completion OPEN both (1000 us), RUN CLOSEs both
 (1500 us), and each normal release OPENs only its colour's slot (0 or 1).
