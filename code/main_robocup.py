@@ -249,6 +249,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                     weights=args.yellow_model, send_drone_task=send_drone_task,
                     car_only_test=car_only_test,
                     simulate_release=simulate_payload,
+                    payload_log_dir=Path(args.log_dir or "logs/competition") / "payload" if stage == "full" else None,
                 )
             logging.info("competition stage completed: %s; result=%s",
                          stage,

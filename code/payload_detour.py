@@ -42,7 +42,8 @@ class DetourSettings:
 
 def run_payload_detour(runtime, settings, *, guard=lambda: None,
                        check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
-                       travel_drive=None, fine_align=None, simulate_release=False):
+                       travel_drive=None, fine_align=None, simulate_release=False,
+                       on_release=None):
     """Left90 at the centred stop, approach, release, return, restore road yaw.
 
     Without ``fine_align`` the approach uses settings.approach_m. With it, the
@@ -172,6 +173,8 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 released = open_payload(slot)
                 if released is False:
                     raise RuntimeError('payload PWM command failed: returned False')
+                if on_release is not None:
+                    on_release(slot)
             hold(settings.release_hold_s)
             if not simulate_release:
                 runtime.record_event("payload_release_done",

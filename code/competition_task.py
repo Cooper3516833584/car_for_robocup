@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 import math
 from statistics import median
@@ -13,6 +14,7 @@ import time
 from components.basic_motion_controller import MotionActionState
 from components.fleet_task_sender import send_task_and_start
 from components.payload_servos import open_payload, payload_configured
+from components.payload_drop_log import PayloadDropLog
 from mission_control import LocalizationLostError, step_runtime as _step, usable_pose as _usable_pose
 from components.yellow_yolo_adapter import load_detector, select_yellow
 from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
@@ -798,7 +800,7 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
 
 def perform_payload_detour(runtime, *, servo=None, camera=None,
                            color=TARGET_COLOR, safe_distance_m=None, payload_slot=0,
-                           simulate_release=False, payload_slots=()):
+                           simulate_release=False, payload_slots=(), on_release=None):
     """Turn at the centred stop, side line, reverse, one inward turn."""
     from payload_detour import DetourSettings, run_payload_detour
     settings = DetourSettings(
@@ -824,7 +826,8 @@ def perform_payload_detour(runtime, *, servo=None, camera=None,
     try:
         return run_payload_detour(runtime, settings, clock=runtime.clock,
                                   sleep=time.sleep, travel_drive=original_drive,
-                                  fine_align=fine_align, simulate_release=simulate_release)
+                                  fine_align=fine_align, simulate_release=simulate_release,
+                                  on_release=on_release)
     finally:
         runtime.motion.drive = original_drive
 
@@ -909,7 +912,8 @@ def _actual_route_pose(runtime):
 
 
 def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
-                                    vision, servo, latches, *, simulate_release=False):
+                                    vision, servo, latches, *, simulate_release=False,
+                                    on_release=None):
     """Resume the same fixed fused line after every colour-specific detour."""
     from target_patrol import find_centered_target
     if vision is None:
@@ -961,7 +965,8 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
         slot = slots[0]
         dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
             runtime, servo=servo, color=color, payload_slot=slot,
-            simulate_release=simulate_release, payload_slots=slots))
+            simulate_release=simulate_release, payload_slots=slots,
+            on_release=on_release))
         runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=len(slots),
                              slot=slot, slots=slots, color=color, success=dropped is not None and not simulate_release,
                              skipped=dropped is None or simulate_release, simulated=simulate_release,
@@ -973,7 +978,7 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
 
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
                      color=TARGET_COLOR, send_drone_task=None, car_only_test=False,
-                     simulate_release=False):
+                     simulate_release=False, payload_log_dir=None):
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
 
@@ -996,6 +1001,18 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.drive.stop()
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
             raise
+        payload_log = (PayloadDropLog(payload_log_dir, counts, car_counts, drone_counts)
+                       if payload_log_dir is not None else None)
+
+        def record_release(slot):
+            if payload_log is None:
+                return
+            try:
+                payload_log.record_release(slot, datetime.now().astimezone())
+            except OSError:
+                LOG.exception('payload drop log update failed: %s', payload_log.path)
+                runtime.record_event('payload_drop_log_failed', slot=slot)
+
         if detector is None and runtime.mode is RuntimeMode.HARDWARE_MISSION:
             try:
                 detector = load_detector(YELLOW_MODEL_PATH)
@@ -1056,7 +1073,8 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                           desired_heading_local_deg=heading)
             runtime.record_event("competition_route_leg_start", **fields, **_actual_route_pose(runtime))
             result = patrol_leg_with_pending_targets(runtime, a, b, pending_payloads,
-                vision, servo, latches, simulate_release=simulate_release)
+                vision, servo, latches, simulate_release=simulate_release,
+                on_release=record_release)
             runtime.record_event("competition_route_leg_done", **fields, **_actual_route_pose(runtime))
         for target_color, slots in pending_payloads.items():
             runtime.record_event("payload_drop", actuator="payload_servo", cargo_count=len(slots),
@@ -1089,7 +1107,8 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
 
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
                           yellow_camera=None, weights=None, send_drone_task=None,
-                          color=TARGET_COLOR, car_only_test=False, simulate_release=False):
+                          color=TARGET_COLOR, car_only_test=False, simulate_release=False,
+                          payload_log_dir=None):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
         raise ValueError(f"unknown competition stage: {stage}")
@@ -1114,7 +1133,8 @@ def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
     if stage == "full":
         return run_full_mission(runtime, task_board_camera=task_camera,
                                 yellow_camera=yellow_camera, detector=detector, send_drone_task=send_drone_task,
-                                color=color, car_only_test=car_only_test, simulate_release=simulate_release)
+                                color=color, car_only_test=car_only_test, simulate_release=simulate_release,
+                                payload_log_dir=payload_log_dir)
     if stage == "hc-send":
         if runtime.mission.task_counts is None:
             raise RuntimeError("hc-send requires actual task counts")

@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import math
 import sys
+import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
@@ -39,11 +40,23 @@ class CompetitionTaskTests(unittest.TestCase):
                 for index, color, at in schedule if index == leg['leg'] and at <= progress <= at+.075)
         return observe
 
-    def run_visual_route(self, schedule, *, car_only_test=True):
+    def run_visual_route(self, schedule, *, car_only_test=True, payload_log_dir=None):
         self.stack.enter_context(patch.object(task, 'read_task_board', return_value=TaskCounts(2,1,1)))
         self.send = self.stack.enter_context(patch.object(task, 'send_task_to_drone_once', return_value=True))
         self.fake_vision(self.visual_schedule(schedule))
-        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=car_only_test)
+        task.run_full_mission(self.runtime, detector=Mock(), car_only_test=car_only_test,
+                              payload_log_dir=payload_log_dir)
+
+    def test_full_route_log_records_both_double_slots_and_unvisited_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.run_visual_route([(1, 'red', .07)], payload_log_dir=directory)
+            files = list(Path(directory).glob('payload_*.txt'))
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding='utf-8').splitlines()
+            self.assertTrue(any('槽位 2' in line and '未投放' not in line for line in lines))
+            self.assertTrue(any('槽位 3' in line and '未投放' not in line for line in lines))
+            self.assertTrue(any('槽位 0' in line and '未投放' in line for line in lines))
+            self.assertTrue(any('槽位 1' in line and '未投放' in line for line in lines))
 
     def test_three_legs_two_absolute_turns_and_final_endpoint_with_real_pp(self):
         self.xy_yaw[:] = [1.2, -.4, math.radians(30)]

@@ -33,13 +33,16 @@ class PayloadDetourTests(unittest.TestCase):
 
     def test_stop_between_grouped_releases_prevents_second_normal_release(self):
         self.fixture()
+        actions = []
         def guard():
             if any(e == 'payload_release_start' for e,v in self.events):
                 raise RuntimeError('STOP during release hold')
         with self.assertRaisesRegex(RuntimeError, 'STOP during release hold'):
             run_payload_detour(self.runtime, DetourSettings(payload_slots=(2, 3)), guard=guard,
-                               clock=lambda: self.now, sleep=self.advance)
+                               clock=lambda: self.now, sleep=self.advance,
+                               on_release=actions.append)
         self.assertEqual([c.args for c in self.open.call_args_list], [(2,), ()])
+        self.assertEqual(actions, [2])
         self.assertFalse(any(e == 'payload_release_done' for e,v in self.events))
         self.assertNotIn('reverse_from_drop', self.stage_poses)
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
@@ -53,9 +56,11 @@ class PayloadDetourTests(unittest.TestCase):
     def test_false_release_stops_before_reverse_and_opens_both(self):
         self.fixture()
         self.open.side_effect = [False, True]
+        actions = []
         with self.assertRaisesRegex(RuntimeError, 'PWM command failed'):
-            self.run_detour()
+            self.run_detour(on_release=actions.append)
         self.assertEqual([c.args for c in self.open.call_args_list], [(0,), ()])
+        self.assertEqual(actions, [])
         self.assertNotIn('reverse_from_drop', self.stage_poses)
         self.assertFalse(any(e == 'payload_release_done' for e, _ in self.events))
         self.assertEqual(self.runtime.mission.state, RobocupMissionState.SAFE_STOP)
