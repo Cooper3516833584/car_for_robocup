@@ -14,7 +14,24 @@ from components.basic_motion_controller import MotionActionState
 from components.fleet_task_sender import send_task_and_start
 from components.payload_servos import open_payload, payload_configured
 from components.payload_drop_log import PayloadDropLog
-from mission_control import LocalizationLostError, step_runtime as _step, usable_pose as _usable_pose
+from components.wall_navigation import (
+    FollowRightWall,
+    RIGHT_BEARING_RAD,
+    REAR_BEARING_RAD,
+    WallActionLimits,
+    WallTracker,
+    drop_turn,
+    is_front_wall,
+    is_rear_wall,
+    is_right_wall,
+)
+from mission_control import (
+    LocalizationLostError,
+    step_runtime as _step,
+    step_wall_runtime as _wall_step,
+    task_scope as _task_scope,
+    usable_pose as _usable_pose,
+)
 from components.yellow_yolo_adapter import load_detector, select_yellow
 from components.yolo_cpu import CAMERA_FPS, CAMERA_HEIGHT, CAMERA_WIDTH, IMGSZ
 from config.v2_runtime import RuntimeMode
@@ -23,9 +40,44 @@ from robocup_runtime import RobocupMissionState
 # ============================================================
 # FIELD / COMPETITION QUICK TUNING
 # Distances: m. Angles here: deg, converted at the motion boundary.
-# Field-local origin: D500 centre at launch. +X forward, +Y left at launch.
-# Capture the fused base_link origin once; transform targets at the boundary.
 # ============================================================
+#
+# ---- Wall-following competition parameters (single source of truth) -------
+# The four values below are user-measured lidar-centre perpendicular distances
+# to the field wall, taken at the parallel patrol pose. They are ordered by the
+# field diagram: left, bottom, right, top. The internal metre values are the
+# lidar-centre distances; ``desired_right_base()`` converts them to
+# drive-axis-centre (base_link) targets using the live D500 mount extrinsic, so
+# nothing here may be pre-compensated by hand.
+#
+# 2026-10-16 revision: the operator re-measured every leg wall distance and
+# added 20 cm to each of the four original values (140/169.5/149/213 cm), and
+# supplied the final H-zone parking distance.
+WALL_RIGHT_DISTANCE_M = (1.600, 1.895, 1.690, 2.330)
+WALL_LEG_NAMES = ("left", "bottom", "right", "top")
+# Lidar to top wall at the final upward parking pose.
+FINISH_FRONT_DISTANCE_M = 1.10
+DROP_SAFE_M = 0.43        # Standard blind reach: drive-axis travel into the target.
+RIGHT_MOUNT_DROP_M = 0.32  # Yellow right-mount reach; never overridden by DROP_SAFE_M.
+RIGHT_MOUNT_SLOT = 4
+YELLOW_PAYLOAD_SLOT = RIGHT_MOUNT_SLOT
+# Yellow is the car's mandatory drop and only lights up on the bottom leg.
+YELLOW_SEARCH_LEGS = (1,)
+PAYLOAD_RELEASE_HOLD_S = 0.50
+# Wall-line algorithm starting values. These are package defaults, NOT measured
+# field values; keep them here instead of spreading command-line switches.
+WALL_LINE_RESIDUAL_M = 0.03
+WALL_LINE_MIN_SPAN_M = 0.80
+WALL_LINE_MIN_POINTS = 10
+WALL_LINE_MAX_RMS_M = 0.03
+WALL_MAX_AGE_S = 0.40
+CORNER_TOLERANCE_M = 0.02
+WALL_DROP_TOLERANCE_M = 0.01
+
+# ---- Legacy fused-route constants ----------------------------------------
+# Retained only for the standalone fused diagnostic stages that still exist
+# during the migration; the competition chain no longer uses them.
+# Field-local origin: D500 centre at launch. +X forward, +Y left at launch.
 CONTROL_DT_S = 0.05
 LOCALIZATION_WAIT_S = 30.0
 TASK_BOARD_CAMERA = 0
@@ -80,12 +132,9 @@ ALIGN_MAX_STEPS = 20
 # Relative short moves now construct endpoints in the fused frame.
 SHORT_MOVE_TOLERANCE_M = 0.005
 
-# ---- Central 10% trigger, then fixed fused side-drop ------------------------
+# ---- Central 10% trigger, then fixed blind side-drop ------------------------
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
-DROP_SAFE_M = 0.43       # Operator revised the blind drop reach, 2026-10-11.
-RIGHT_MOUNT_DROP_M = 0.32
-RIGHT_MOUNT_SLOT = 4
 DROP_FINE_SPEED_M_S = 0.05
 DROP_TERMINAL_SPEED_M_S = 0.012
 DROP_TERMINAL_RANGE_M = 0.06
@@ -100,16 +149,22 @@ DROP_FRAME_TRIES = 3      # frames read per observation before calling it arc-fr
 DROP_REFERENCE = (Path(__file__).resolve().parents[1] / "assets"
                   / "ch3_yellow_servo0_field_reference.jpg")
 
-# Legacy standalone drop-route tuning; full uses the shared fused payload detour.
+# Legacy standalone drop-route tuning; full uses the shared payload detour.
 # Only ("drive", m), ("rotate", deg), ("rotate_to", deg) are supported.
 FIXED_DROP_ROUTE = [("drive", 0.00)]
-PAYLOAD_RELEASE_HOLD_S = 0.50
 # ===== END FIELD / COMPETITION QUICK TUNING =====
 
 LOG = logging.getLogger(__name__)
 STAGES = ("full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
           "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop",
-          "drop-align", "corner2", "finish")
+          "drop-align", "corner2", "finish",
+          "wall-observe", "wall-leg", "wall-turn", "drop-standard", "drop-right",
+          "top-return", "finish")
+# Stage names of the wall chain; the fused diagnostic stages above remain
+# individually callable but are not part of any competition run.
+WALL_STAGES = ("wall-observe", "wall-leg", "wall-turn", "drop-standard", "drop-right",
+               "top-return")
+WALL_MOTION_STAGES = ("wall-leg", "wall-turn", "drop-standard", "drop-right", "top-return")
 
 
 @dataclass(frozen=True)
@@ -128,6 +183,69 @@ def split_task_allocation(counts):
     if sorted(values.values()) != [1, 1, 2]:
         raise ValueError('task board must contain one double-item and two single-item targets (2/1/1)')
     return dict(values), DroneAllocation(red=0, blue=0, green=0)
+
+
+# Slot usage is a fixed hardware contract, not a per-run decision:
+#   4 -> yellow (PWM6/Pin 27, right_mount, 32 cm)
+#   2,3 -> the double-item colour, released in one approach
+#   1 -> the first single-item colour, 0 -> the second single-item colour
+# Both single-item colours use the standard 43 cm behaviour.
+def build_payload_plan(counts):
+    """The one and only car payload plan. Every slot 0..4 appears exactly once.
+
+    Raises on anything that is not the 2/1/1 task-board shape instead of using
+    an ``assert`` that ``python -O`` would remove.
+    """
+    values = counts.as_dict()
+    for color, amount in values.items():
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            raise ValueError(f'task-board quota for {color} must be a non-negative int')
+    if sorted(values) != ['blue', 'green', 'red'] or sorted(values.values()) != [1, 1, 2]:
+        raise ValueError('task board must contain one double-item and two single-item '
+                         f'targets (2/1/1), got {values}')
+    double = next(color for color in ('red', 'blue', 'green') if values[color] == 2)
+    singles = [color for color in ('red', 'blue', 'green') if values[color] == 1]
+    plan = {
+        'yellow': (YELLOW_PAYLOAD_SLOT,),
+        double: (2, 3),
+        singles[0]: (1,),
+        singles[1]: (0,),
+    }
+    used = sorted(slot for slots in plan.values() for slot in slots)
+    if used != list(range(5)):
+        raise ValueError(f'payload plan must use each slot 0..4 once, got {used}')
+    return plan
+
+
+def desired_right_base(leg_index, mount_y_m):
+    """Lidar-centre right-wall distance for one leg, as a base_link target.
+
+    The operator measured lidar-centre perpendicular distances at the parallel
+    patrol pose; with the right wall normal at ``(0, -1)`` the drive-axis-centre
+    target is ``D - mount_y``. Compute this once per leg from the live extrinsic
+    instead of re-deriving it from the changing measured normal every frame.
+    """
+    if isinstance(leg_index, bool) or not isinstance(leg_index, int) or not 0 <= leg_index < 4:
+        raise ValueError('leg_index must be 0..3')
+    distance = WALL_RIGHT_DISTANCE_M[leg_index]
+    if not math.isfinite(mount_y_m):
+        raise ValueError('finite mount_y required')
+    target = distance - mount_y_m
+    if not math.isfinite(target) or target <= 0:
+        raise ValueError(f'leg {leg_index} base right target must be positive, got {target}')
+    return target
+
+
+def finish_front_base(mount_x_m):
+    """Final parking front-wall base target, or ``None`` while unmeasured."""
+    if FINISH_FRONT_DISTANCE_M is None:
+        return None
+    if not math.isfinite(mount_x_m):
+        raise ValueError('finite mount_x required')
+    target = FINISH_FRONT_DISTANCE_M + mount_x_m
+    if not math.isfinite(target) or target <= 0:
+        raise ValueError(f'finish front base target must be positive, got {target}')
+    return target
 
 
 def wait_for_fused_localization(runtime):
@@ -652,11 +770,37 @@ def align_drop_position(runtime, camera, side_pose, road_yaw, side_yaw, motion, 
 
 def perform_payload_detour(runtime, *, servo=None, camera=None,
                            color=TARGET_COLOR, safe_distance_m=None, payload_slot=0,
-                           simulate_release=False, payload_slots=(), on_release=None):
-    """Shared fused detour; slot 4 adds its mounting turns at the 32 cm end."""
+                           simulate_release=False, payload_slots=(), on_release=None,
+                           tracker=None, acquire_reference=None, limits=None,
+                           behavior=None):
+    """Dispatch the detour: wall feedback for a wall runtime, fused for legacy.
+
+    The 0.43 m standard reach and the fixed 0.32 m right-mount reach are the
+    same in both chains; ``safe_distance_m`` can never override the 0.32 m one.
+    """
     from payload_detour import DetourSettings, run_payload_detour
     slots = tuple(payload_slots) or (payload_slot,)
-    right_mount = slots == (RIGHT_MOUNT_SLOT,)
+    right_mount = behavior == "right_mount" or (
+        behavior is None and slots == (RIGHT_MOUNT_SLOT,))
+    if not simulate_release and not all(payload_configured(slot) for slot in slots):
+        runtime.record_event('payload_release_failed', actuator='payload_servo',
+                             cargo_count=len(slots), slot=payload_slot, slots=slots, color=color,
+                             reason='PWM unavailable or not writable')
+        runtime.drive.stop()
+        runtime.mission.request_safe_stop('payload PWM unavailable')
+        raise RuntimeError('payload PWM unavailable or not writable')
+    wall_runtime = getattr(runtime, "observer", None) is not None
+    if wall_runtime:
+        settings = DetourSettings(
+            payload_slot=payload_slot, payload_slots=slots,
+            approach_m=RIGHT_MOUNT_DROP_M if right_mount else DROP_SAFE_M,
+            behavior="right_mount" if right_mount else "standard",
+            release_hold_s=PAYLOAD_RELEASE_HOLD_S,
+            position_tolerance_m=WALL_DROP_TOLERANCE_M)
+        return run_payload_detour(runtime, settings, clock=runtime.clock, sleep=time.sleep,
+                                  tracker=tracker, acquire_reference=acquire_reference,
+                                  limits=limits, simulate_release=simulate_release,
+                                  on_release=on_release)
     settings = DetourSettings(
         payload_slot=payload_slot, payload_slots=slots,
         approach_m=(RIGHT_MOUNT_DROP_M if right_mount else
@@ -664,13 +808,6 @@ def perform_payload_detour(runtime, *, servo=None, camera=None,
         behavior="right_mount" if right_mount else "standard",
         release_hold_s=PAYLOAD_RELEASE_HOLD_S,
         patrol_slow_speed_m_s=.08 * runtime.motion.navigation.translation_speed_scale)
-    if not simulate_release and not all(payload_configured(slot) for slot in settings.release_slots):
-        runtime.record_event('payload_release_failed', actuator='payload_servo', cargo_count=len(settings.release_slots),
-                             slot=payload_slot, slots=settings.release_slots, color=color,
-                             reason='PWM unavailable or not writable')
-        runtime.drive.stop()
-        runtime.mission.request_safe_stop('payload PWM unavailable')
-        raise RuntimeError('payload PWM unavailable or not writable')
     original_drive = runtime.motion.drive
     runtime.motion.drive = replace(original_drive, max_linear_speed_m_s=min(
         original_drive.max_linear_speed_m_s, settings.patrol_slow_speed_m_s))
@@ -829,9 +966,456 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
     return track_lane_line(runtime, start_xy, end_xy)
 
 
+# ===========================================================================
+# Wall-following competition chain
+#
+# Route topology is fixed; positions are not. Leg order is always
+# left -> bottom -> right -> top, each leg follows its measured wall distance and
+# stops on a reference wall, and the top edge reverses instead of turning
+# around. Nothing below reads a fused pose, a map origin or a global line.
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class WallRouteLeg:
+    index: int
+    name: str
+    target_right_m: float
+    direction: int
+    terminal_role: object | None      # predicate over WallLine, None for the search leg
+    terminal_target_m: float | None
+    terminal_is_rear: bool
+    terminal_name: str
+    vision_active: bool
+
+
+@dataclass(frozen=True)
+class MissionResult:
+    """Competition outcome. There is deliberately no fused pose in here."""
+
+    route_done: bool
+    parking_done: bool
+    commanded_release_slots: tuple = ()
+    pending_slots: tuple = ()
+    simulated: bool = False
+    reason: str = ""
+
+
+def build_wall_route(mount_x_m, mount_y_m):
+    """The four wall legs, with every distance converted once from the field set."""
+    desired = tuple(desired_right_base(index, mount_y_m) for index in range(4))
+    # After three left-hand corner turns the car is on the top edge with the
+    # right wall behind it; the left perimeter wall stands in for the remaining
+    # distance, and it is the only real observation that can end the search.
+    left_terminal = desired[0]
+    legs = (
+        WallRouteLeg(0, "left", desired[0], +1, is_front_wall, desired[1], False,
+                     "front_wall", True),
+        WallRouteLeg(1, "bottom", desired[1], +1, is_front_wall, desired[2], False,
+                     "front_wall", True),
+        WallRouteLeg(2, "right", desired[2], +1, is_front_wall, desired[3], False,
+                     "front_wall", True),
+        WallRouteLeg(3, "top_search", desired[3], +1, None, left_terminal, False,
+                     "left_wall", True),
+    )
+    return legs, desired
+
+
+def wall_drop_reference(runtime, tracker):
+    """Lock the leg's road wall as the detour reference and freeze ``d0``."""
+    from payload_detour import WallDropReference
+
+    wall = tracker.wall
+    if wall is None:
+        snapshot = runtime.observer.latest()
+        if snapshot is None or not snapshot.is_fresh(float(runtime.clock())):
+            return None
+        candidates = [line for line in snapshot.lines if is_right_wall(line)]
+        if not candidates:
+            return None
+        wall = tracker.set_reference(min(candidates, key=lambda line: line.rho_base_m))
+    runtime.record_event("payload_reference_locked", reference_id="road_right_wall",
+                         rho_base_m=wall.rho_base_m, bearing_rad=wall.bearing_rad,
+                         span_m=wall.span_m, rms_m=wall.rms_m)
+    return WallDropReference(reference_id="road_right_wall", d0_base_m=wall.rho_base_m,
+                             bearing_rad=wall.bearing_rad, normal_xy=wall.normal_xy)
+
+
+def _run_wall_action(runtime, action, phase):
+    runtime.mission.phase = phase
+    runtime.action = action
+    runtime.record_event("wall_action_start", action=action.name, phase=phase)
+    try:
+        while True:
+            _wall_step(runtime)
+            outcome = action.outcome
+            if outcome is not None and (outcome.done or action.finished):
+                runtime.action = None
+                runtime.record_event("wall_action_done", action=action.name, phase=phase,
+                                     done=outcome.done, reason=outcome.reason)
+                return outcome
+            time.sleep(CONTROL_DT_S)
+    except BaseException:
+        runtime.action = None
+        raise
+
+
+def _reacquire_right_wall(runtime, tracker, target_right_m, *, phase):
+    """Re-seed the tracked wall after a turn when it is not alongside us yet."""
+    wall = tracker.wall
+    if wall is not None and is_right_wall(wall):
+        return wall
+    snapshot = runtime.observer.latest()
+    if snapshot is None:
+        return None
+    candidates = [line for line in snapshot.lines if is_right_wall(line)]
+    if not candidates:
+        return None
+    seeded = min(candidates, key=lambda line: abs(line.rho_base_m - target_right_m))
+    tracker.set_reference(seeded)
+    runtime.record_event("wall_selection", phase=phase, role="right", selected=True,
+                         reference_id="road_right_wall", rejection_reason=None,
+                         rho_base_m=seeded.rho_base_m, bearing_rad=seeded.bearing_rad)
+    return seeded
+
+
+def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches,
+                    limits, simulate_release=False, on_release=None):
+    """One wall leg: visual triggering, terminal stop, then the corner turn.
+
+    Returns ``(completed, exhausted)``. ``completed`` means the leg reached its
+    terminal reference; ``exhausted`` means the top-edge search ran out of field
+    with payload still pending. Both are normal outcomes.
+    """
+    from target_patrol import horizontal_target, visible_target
+
+    runtime.mission.phase = f"leg_{leg.index + 1}_{leg.name}"
+    runtime.record_event("competition_route_leg_start", leg=leg.index + 1, leg_name=leg.name,
+                         target_base_right_m=leg.target_right_m, direction=leg.direction,
+                         terminal=leg.terminal_name, feedback_source="wall_scan")
+    follow = FollowRightWall(target_distance_m=leg.target_right_m, direction=leg.direction,
+                             limits=limits, tracker=tracker,
+                             terminal_role=leg.terminal_role,
+                             terminal_target_m=leg.terminal_target_m,
+                             terminal_tolerance_m=CORNER_TOLERANCE_M,
+                             clock=runtime.clock)
+    runtime.action = follow
+    not_before = float(runtime.clock())
+    last_stamp = None
+    completed = False
+    exhausted = False
+    triggered = None
+    try:
+        while True:
+            _wall_step(runtime)
+            snapshot = runtime.observer.latest()
+            fresh = snapshot is not None and snapshot.is_fresh(float(runtime.clock()))
+            # 1. A centred, still-pending target stops the leg and runs the drop.
+            if leg.vision_active and pending and vision is not None and fresh:
+                stamp, colored = vision.observe_colours(runtime.clock())
+                if stamp is not None and stamp > not_before and stamp != last_stamp:
+                    last_stamp = stamp
+                    width, height = vision.frame_size
+                    triggered = _select_centered(colored, pending, latches, width, height,
+                                                 visible_target, horizontal_target)
+            if triggered is not None:
+                color, box, slots = triggered
+                triggered = None
+                runtime.action = None
+                runtime.drive.stop()
+                runtime.record_event("competition_target_centered", color=color,
+                                     cx_px=(box[0] + box[2]) / 2, tolerance_px=YELLOW_CX_TOL_PX,
+                                     confidence=box[4], leg=leg.index + 1)
+                dropped = _stage(runtime, "payload-detour", lambda: perform_payload_detour(
+                    runtime, tracker=tracker, acquire_reference=wall_drop_reference,
+                    limits=limits, color=color, payload_slot=slots[0], payload_slots=slots,
+                    simulate_release=simulate_release, on_release=on_release))
+                runtime.record_event("payload_drop", actuator="payload_servo",
+                                     cargo_count=len(slots), slot=slots[0], slots=slots,
+                                     color=color,
+                                     success=dropped is not None and not simulate_release,
+                                     skipped=dropped is None or simulate_release,
+                                     simulated=simulate_release,
+                                     detour_completed=dropped is not None,
+                                     feedback_source="wall_scan")
+                if dropped is not None:
+                    # The return restores the road heading, but the wall the leg
+                    # follows may have moved in the body frame: re-acquire the
+                    # right wall from the newest scan before resuming.
+                    runtime.action = follow
+                    _reacquire_right_wall(runtime, tracker, leg.target_right_m,
+                                          phase=runtime.mission.phase)
+                    not_before = float(runtime.clock())
+                    last_stamp = None
+                    latches[color].require_clear()
+            # 2. The terminal reference: a corner stop for legs 1..3, or the left
+            #    perimeter wall ending the top-edge search for leg 4.
+            terminal_reached = follow.outcome is not None and follow.outcome.done
+            if leg.terminal_role is None and fresh:
+                left = [line for line in snapshot.lines if line.normal_xy[1] >= 0.5]
+                if left:
+                    nearest = min(line.rho_base_m for line in left)
+                    if nearest - leg.terminal_target_m <= CORNER_TOLERANCE_M:
+                        runtime.record_event("top_search_exhausted", measured_base_m=nearest,
+                                             target_base_m=leg.terminal_target_m,
+                                             pending_colors=tuple(sorted(pending)))
+                        if pending:
+                            exhausted = True
+                        completed = True
+            if terminal_reached:
+                completed = True
+            if completed:
+                runtime.action = None
+                runtime.drive.stop()
+                follow.begin(float(runtime.clock()))
+                break
+            if follow.finished and follow.outcome is not None and not follow.outcome.done:
+                raise RuntimeError(f"leg {leg.index + 1}: right wall was not usable "
+                                   f"({follow.outcome.reason})")
+            time.sleep(CONTROL_DT_S)
+    finally:
+        runtime.action = None
+    runtime.record_event("competition_route_leg_done", leg=leg.index + 1, leg_name=leg.name,
+                         completed=completed, exhausted=exhausted,
+                         top_search_exhausted=exhausted)
+    return completed, exhausted
+
+
+def _select_centered(colored, pending, latches, width, height, visible_target,
+                     horizontal_target):
+    """Deterministic pick of the centred, latched, still-pending target.
+
+    Ordering is nearest to horizontal centre, then colour name. A candidate only
+    consumes its latch when the caller actually accepts the drop.
+    """
+    candidates = []
+    for color in sorted(pending):
+        slots = pending[color]
+        boxes = sorted((box for name, box in colored if name == color),
+                       key=lambda box: abs((box[0] + box[2]) / 2 - width / 2))
+        visible = visible_target(boxes, width, height, YELLOW_MIN_CONF)
+        middle = horizontal_target(boxes, width, YELLOW_MIN_CONF,
+                                   center_width_ratio=2 * YELLOW_CX_TOL_PX / CAMERA_WIDTH)
+        latches[color].update(visible, trigger=False)
+        if middle is not None and latches[color].armed:
+            candidates.append((abs((middle[0] + middle[2]) / 2 - width / 2), color, middle, slots))
+    if not candidates:
+        return None
+    _, color, box, slots = min(candidates, key=lambda item: (item[0], item[1]))
+    return color, box, slots
+
+
+def turn_left_at_corner(runtime, tracker, leg, limits):
+    """Left turn so the wall just in front becomes the right wall of the next leg."""
+    wall = tracker.wall
+    if wall is None:
+        raise RuntimeError(f"leg {leg.index + 1}: no reference wall to turn on")
+    runtime.mission.phase = f"corner_{leg.index + 1}"
+    turn = drop_turn(wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits, tracker=tracker,
+                     turn_direction=+1, clock=runtime.clock)
+    outcome = _run_wall_action(runtime, turn, runtime.mission.phase)
+    if not outcome.done:
+        raise RuntimeError(f"leg {leg.index + 1}: corner turn failed ({outcome.reason})")
+    return outcome
+
+
+def reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits):
+    """Top edge: keep the nose left and reverse until the rear wall is at leg 3."""
+    runtime.mission.phase = "top_reverse"
+    back_target = desired[2]
+    follow = FollowRightWall(target_distance_m=desired[3], direction=-1, limits=limits,
+                             tracker=tracker, terminal_role=is_rear_wall,
+                             terminal_target_m=back_target,
+                             terminal_tolerance_m=CORNER_TOLERANCE_M, clock=runtime.clock)
+    outcome = _run_wall_action(runtime, follow, "top_reverse")
+    if not outcome.done:
+        raise RuntimeError(f"top reverse did not reach the return corner ({outcome.reason})")
+    return outcome
+
+
+def enter_finish_zone(runtime, tracker, desired, limits):
+    """Right turn to face up, then close the front-wall distance into the H zone."""
+    target_right = desired[2]
+    wall = tracker.wall
+    if wall is None:
+        raise RuntimeError("finish approach has no reference wall")
+    runtime.mission.phase = "finish_turn"
+    turn = drop_turn(wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits, tracker=tracker,
+                     turn_direction=-1, clock=runtime.clock)
+    outcome = _run_wall_action(runtime, turn, "finish_turn")
+    if not outcome.done:
+        raise RuntimeError(f"final right turn failed ({outcome.reason})")
+    _reacquire_right_wall(runtime, tracker, target_right, phase="finish_approach")
+
+    front_target = finish_front_base(runtime.config.d500_mount.x_m)
+    if front_target is None:
+        runtime.drive.stop()
+        runtime.record_event("finish_parameter_missing", parameter="FINISH_FRONT_DISTANCE_M",
+                             at_corner=True, front_target_base_m=None)
+        return False
+    runtime.mission.phase = "finish_approach"
+    follow = FollowRightWall(target_distance_m=target_right, direction=+1, limits=limits,
+                             tracker=tracker, terminal_role=is_front_wall,
+                             terminal_target_m=front_target,
+                             terminal_tolerance_m=CORNER_TOLERANCE_M, clock=runtime.clock)
+    outcome = _run_wall_action(runtime, follow, "finish_approach")
+    if not outcome.done:
+        raise RuntimeError(f"finish approach did not reach the parking distance "
+                           f"({outcome.reason})")
+    runtime.drive.stop()
+    return True
+
+
+def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
+                     color=TARGET_COLOR, simulate_release=False, payload_log_dir=None):
+    """The competition chain: four wall legs, then the finish zone."""
+    from config.v2_factory import build_servo
+    from components.servo_positioning import park_servo
+
+    task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
+    yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
+    runtime.drive.stop()
+    servo = build_servo(runtime.config, fake=runtime.mode is not RuntimeMode.HARDWARE_MISSION)
+    if servo is None:
+        raise RuntimeError("full competition requires the configured camera servo")
+    vision = None
+    commanded: list = []
+    result = MissionResult(route_done=False, parking_done=False,
+                           simulated=simulate_release, reason="")
+    try:
+        park_servo(servo, 90)
+        runtime.record_event("competition_camera_hold", angle_deg=90, color=color)
+        counts = _stage(runtime, "task-board", lambda: read_task_board(
+            task_camera, runtime=runtime, allow_fallback=True))
+        plan = build_payload_plan(counts)
+        car_counts, drone_counts = split_task_allocation(counts)
+        runtime.mission.set_task_counts(counts)
+        runtime.record_event("payload_target_assignment", car_allocation=car_counts,
+                             car_mandatory_yellow=1, car_target_required=4, car_payload_count=5,
+                             drone_allocation=drone_counts.as_dict(),
+                             drone_communication="disabled")
+        payload_log = (PayloadDropLog(payload_log_dir, counts, car_counts, drone_counts, plan)
+                       if payload_log_dir is not None else None)
+
+        def record_release(slot):
+            commanded.append(slot)
+            if payload_log is None:
+                return
+            try:
+                payload_log.record_release(slot, datetime.now().astimezone())
+            except OSError:
+                LOG.exception('payload drop log update failed: %s', payload_log.path)
+                runtime.record_event('payload_drop_log_failed', slot=slot)
+
+        if detector is None and runtime.mode is RuntimeMode.HARDWARE_MISSION:
+            try:
+                detector = load_detector(YELLOW_MODEL_PATH)
+            except Exception:
+                LOG.exception("yellow model unavailable; skip visual drop")
+        mount = runtime.config.d500_mount
+        legs, desired = build_wall_route(mount.x_m, mount.y_m)
+        runtime.record_event("competition_wall_route", wall_right_distance_m=WALL_RIGHT_DISTANCE_M,
+                             leg_names=WALL_LEG_NAMES,
+                             desired_base_right_m=desired,
+                             finish_front_distance_m=FINISH_FRONT_DISTANCE_M,
+                             finish_front_base_m=finish_front_base(mount.x_m),
+                             d500_mount_x=mount.x_m, d500_mount_y=mount.y_m,
+                             mount_yaw_rad=mount.yaw_rad)
+        limits = getattr(runtime, "limits", None) or WallActionLimits.from_config(runtime.config)
+
+        from target_patrol import YoloVision, EntryLatch
+        pending = {name: tuple(slots) for name, slots in plan.items()}
+        latches = {name: EntryLatch() for name in pending}
+        if detector is not None:
+            vision = YoloVision(YELLOW_MODEL_PATH, yellow_camera, confidence=YELLOW_MIN_CONF,
+                                target_region="frame", detector=detector,
+                                drop_center_width_ratio=2 * YELLOW_CX_TOL_PX / CAMERA_WIDTH)
+            vision.start()
+
+        tracker = WallTracker()
+        exhausted = False
+        for index, leg in enumerate(legs):
+            ok, leg_exhausted = patrol_wall_leg(
+                runtime, leg, tracker, pending=pending, vision=vision, latches=latches,
+                limits=limits, simulate_release=simulate_release, on_release=record_release)
+            if not ok:
+                raise RuntimeError(f"leg {index + 1} ({leg.name}) did not complete")
+            exhausted = exhausted or leg_exhausted
+            if index < len(legs) - 1:
+                turn_left_at_corner(runtime, tracker, leg, limits)
+                # A new leg consumes new observations only.
+                runtime.record_event("vision_window_reset", not_before_s=float(runtime.clock()))
+        result = MissionResult(route_done=True, parking_done=False,
+                              commanded_release_slots=tuple(commanded),
+                              pending_slots=tuple(slot for slots in pending.values()
+                                                  for slot in slots),
+                              simulated=simulate_release,
+                              reason="top_search_exhausted" if exhausted else "")
+
+        # Nothing left to search: skip the meaningless extra left-hand search run
+        # and go straight to the return/finish sequence from the same position.
+        reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits)
+        parking_done = enter_finish_zone(runtime, tracker, desired, limits)
+        result = replace(result, parking_done=parking_done,
+                         reason=result.reason if parking_done else "finish_parameter_missing")
+        for target_color, slots in pending.items():
+            if any(slot in commanded for slot in slots):
+                continue
+            runtime.record_event("payload_drop", actuator="payload_servo",
+                                 cargo_count=len(slots), slot=slots[0], slots=slots,
+                                 color=target_color, success=False, skipped=True,
+                                 simulated=simulate_release, detour_completed=False,
+                                 reason="route exhausted without a completed detour")
+        runtime.drive.stop()
+        if parking_done:
+            runtime.mission.finish()
+        runtime.record_event("mission_result", route_done=result.route_done,
+                             parking_done=result.parking_done,
+                             commanded_slots=result.commanded_release_slots,
+                             pending_slots=result.pending_slots, simulated=result.simulated,
+                             reason=result.reason)
+        return result
+    finally:
+        primary_error = sys.exc_info()[0] is not None
+        runtime.action = None
+        cleanup_error = None
+        cleanups = [("drive_stop", runtime.drive.stop)]
+        if vision is not None:
+            cleanups.append(("vision_close", vision.close))
+        if servo.is_running:
+            cleanups.append(("servo_close", lambda: servo.close(hold=True)))
+        for name, cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+                runtime.record_event("competition_cleanup_failed", resource=name, reason=str(exc))
+        if cleanup_error is not None and not primary_error:
+            raise cleanup_error
+
+
 def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
                      color=TARGET_COLOR, send_drone_task=None, car_only_test=False,
                      simulate_release=False, payload_log_dir=None):
+    """Competition entry: the wall chain for a wall runtime, else the legacy chain."""
+    if getattr(runtime, "observer", None) is not None:
+        if send_drone_task is not None:
+            runtime.record_event("hc_task_send_deprecated",
+                                 reason="the car competition chain never contacts the drone")
+        return run_wall_mission(runtime, task_board_camera=task_board_camera,
+                                yellow_camera=yellow_camera, detector=detector, color=color,
+                                simulate_release=simulate_release,
+                                payload_log_dir=payload_log_dir)
+    return _run_fused_mission(runtime, task_board_camera=task_board_camera,
+                              yellow_camera=yellow_camera, detector=detector, color=color,
+                              send_drone_task=send_drone_task, car_only_test=car_only_test,
+                              simulate_release=simulate_release,
+                              payload_log_dir=payload_log_dir)
+
+
+def _run_fused_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
+                       color=TARGET_COLOR, send_drone_task=None, car_only_test=False,
+                       simulate_release=False, payload_log_dir=None):
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
 
@@ -850,11 +1434,13 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             counts = _stage(runtime, "task-board", lambda: read_task_board(
                 task_camera, runtime=runtime, allow_fallback=True))
             car_counts, drone_counts = split_task_allocation(counts)
+            plan = build_payload_plan(counts)
         except Exception:
             runtime.drive.stop()
             runtime.mission.request_safe_stop("actual task-board counts unavailable")
             raise
-        payload_log = (PayloadDropLog(payload_log_dir, counts, car_counts, drone_counts)
+        payload_log = (PayloadDropLog(payload_log_dir, counts, car_counts, drone_counts,
+                                      plan)
                        if payload_log_dir is not None else None)
 
         def record_release(slot):
@@ -903,10 +1489,7 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             runtime.mission.request_safe_stop("drone task/start was not confirmed")
             raise RuntimeError("drone task/start was not confirmed")
         from target_patrol import YoloVision, EntryLatch
-        double_color = next(c for c in ("red", "blue", "green") if car_counts[c] == 2)
-        single_colors = [c for c in ("red", "blue", "green") if car_counts[c] == 1]
-        pending_payloads = {"yellow": (0,), double_color: (2, 3),
-                            single_colors[0]: (1,), single_colors[1]: (RIGHT_MOUNT_SLOT,)}
+        pending_payloads = {color: slots for color, slots in plan.items()}
         latches = {name: EntryLatch() for name in pending_payloads}
         if detector is not None:
             vision = YoloVision(YELLOW_MODEL_PATH, yellow_camera, confidence=YELLOW_MIN_CONF,
@@ -960,15 +1543,103 @@ def run_full_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             raise cleanup_error
 
 
+def run_wall_stage(runtime, stage, *, leg=None, camera=None, detector=None,
+                   simulate_release=False, color=TARGET_COLOR):
+    """Independently runnable wall stages for field bring-up.
+
+    ``wall-observe`` is read-only hardware: it starts the D500 observer, prints
+    right/front/rear candidates and a raw point summary, and constructs neither
+    the drive nor a payload output. Every motion stage is explicit
+    ``hardware-mission`` and never guesses a global position or runs the full
+    mission by itself.
+    """
+    from components.wall_navigation import WallActionLimits
+    from components.wall_observer import WallTracker
+
+    if stage not in WALL_STAGES:
+        raise ValueError(f"unknown wall stage: {stage}")
+    if stage in {"wall-leg", "wall-turn"} and leg not in (1, 2, 3, 4):
+        raise ValueError("wall-leg and wall-turn require --leg 1..4")
+    limits = getattr(runtime, "limits", None) or WallActionLimits.from_config(runtime.config)
+    legs, desired = build_wall_route(runtime.config.d500_mount.x_m,
+                                     runtime.config.d500_mount.y_m)
+
+    if stage == "wall-observe":
+        runtime.record_event("wall_observe_start", mode=runtime.mode.value,
+                             port=runtime.config.d500.port)
+        while True:
+            _wall_step(runtime)
+            snapshot = runtime.observer.latest()
+            if snapshot is None:
+                runtime.record_event("wall_observe_empty")
+            else:
+                roles = {}
+                for role, predicate in (("right", is_right_wall), ("front", is_front_wall),
+                                        ("rear", is_rear_wall),
+                                        ("left", lambda line: line.normal_xy[1] >= 0.5)):
+                    candidates = [line for line in snapshot.lines if predicate(line)]
+                    if candidates:
+                        nearest = min(candidates, key=lambda line: line.rho_base_m)
+                        roles[role] = dict(rho_base_m=nearest.rho_base_m,
+                                           bearing_rad=nearest.bearing_rad,
+                                           span_m=nearest.span_m, rms_m=nearest.rms_m,
+                                           inliers=nearest.inlier_count)
+                runtime.record_event("wall_observe", scan_seq=snapshot.scan_seq,
+                                     point_count=snapshot.point_count,
+                                     candidates=len(snapshot.lines), roles=roles,
+                                     error=snapshot.error)
+            time.sleep(CONTROL_DT_S)
+
+    if stage == "wall-leg":
+        target = legs[leg - 1]
+        tracker = WallTracker()
+        runtime.record_event("wall_stage_leg", leg=leg, leg_name=target.name,
+                             target_base_right_m=target.target_right_m,
+                             terminal_target_base_m=target.terminal_target_m)
+        ok, _ = patrol_wall_leg(runtime, target, tracker, pending={}, vision=None,
+                                latches={}, limits=limits,
+                                simulate_release=simulate_release, on_release=None)
+        return ok
+    if stage == "wall-turn":
+        target = legs[leg - 1]
+        tracker = WallTracker()
+        outcome = turn_left_at_corner(runtime, tracker, target, limits)
+        return outcome.done
+    if stage == "top-return":
+        tracker = WallTracker()
+        return reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits).done
+    if stage == "finish":
+        tracker = WallTracker()
+        return enter_finish_zone(runtime, tracker, desired, limits)
+    if stage in {"drop-standard", "drop-right"}:
+        behavior = "standard" if stage == "drop-standard" else "right_mount"
+        slots = (0,) if behavior == "standard" else (RIGHT_MOUNT_SLOT,)
+        tracker = WallTracker()
+        result = perform_payload_detour(runtime, tracker=tracker,
+                                       acquire_reference=wall_drop_reference, limits=limits,
+                                       color=color, payload_slot=slots[0], payload_slots=slots,
+                                       simulate_release=simulate_release,
+                                       behavior=behavior)
+        return result is not None
+    raise ValueError(f"unhandled wall stage: {stage}")
+
+
 def run_competition_stage(runtime, stage="full", *, task_board_camera=None,
                           yellow_camera=None, weights=None, send_drone_task=None,
                           color=TARGET_COLOR, car_only_test=False, simulate_release=False,
-                          payload_log_dir=None):
+                          payload_log_dir=None, leg=None):
     """Thin CLI dispatch. No stage implicitly starts the complete mission."""
     if stage not in STAGES:
         raise ValueError(f"unknown competition stage: {stage}")
     if car_only_test and stage != "full":
         raise ValueError("car full-flow test requires the full mission")
+    task_camera = TASK_BOARD_CAMERA if task_board_camera is None else task_board_camera
+    yellow_camera = YELLOW_CAMERA if yellow_camera is None else yellow_camera
+    if stage in WALL_STAGES:
+        if not runtime.is_running:
+            runtime.start()
+        return run_wall_stage(runtime, stage, leg=leg, camera=yellow_camera,
+                              simulate_release=simulate_release, color=color)
     if stage != "full":
         runtime.record_event("competition_stage_frame", stage=stage,
                              coordinate_frame="caller_owned_fused_base", captures_field_origin=False)

@@ -6,24 +6,42 @@ from pathlib import Path
 
 
 COLOR_NAMES = {'red': '红色', 'blue': '蓝色', 'green': '绿色', 'yellow': '黄色'}
+# Field-diagram order, then the double/single ordering the plan guarantees.
+TARGET_ORDER = ('yellow', 'red', 'blue', 'green')
 
 
 class PayloadDropLog:
-    def __init__(self, directory, counts, car_counts, drone_counts):
+    """Renders the one shared payload plan; it never re-derives slot numbers."""
+
+    def __init__(self, directory, counts, car_counts, drone_counts, plan):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.started = datetime.now().astimezone()
         self.task_id = self.started.strftime('%Y%m%d-%H%M%S-%f')
         self.path = self.directory / ('payload_' + self.task_id + '.txt')
-        double = next(color for color, count in car_counts.items() if count == 2)
-        singles = [color for color in ('red', 'blue', 'green') if car_counts[color] == 1]
-        self.targets = (('yellow', (0,)), (double, (2, 3)),
-                        (singles[0], (1,)), (singles[1], (4,)))
+        self.targets = self._ordered_targets(plan)
         self.counts = counts.as_dict()
         self.drone_counts = drone_counts.as_dict()
         self.actions = {}
         with self.path.open('x', encoding='utf-8', newline='\n') as stream:
             stream.write(self._render())
+
+    @staticmethod
+    def _ordered_targets(plan):
+        missing = [color for color in TARGET_ORDER if color not in plan]
+        if missing:
+            raise ValueError('payload plan is missing colours: %s' % ', '.join(missing))
+        targets = tuple((color, tuple(plan[color])) for color in TARGET_ORDER)
+        used = sorted(slot for _, slots in targets for slot in slots)
+        if used != list(range(5)):
+            raise ValueError('payload plan must use each slot 0..4 once, got %s' % used)
+        return targets
+
+    def target_for_slot(self, slot):
+        for color, slots in self.targets:
+            if slot in slots:
+                return color
+        return None
 
     def record_release(self, slot, when):
         if isinstance(slot, bool) or not isinstance(slot, int) or slot not in range(5):
@@ -43,8 +61,8 @@ class PayloadDropLog:
         lines.append('小车：' + '；'.join('目标点%d（%s）%d 份，槽位 %s' % (
             index, COLOR_NAMES[color], len(slots), '、'.join(map(str, slots)))
             for index, (color, slots) in enumerate(self.targets, 1)))
-        lines.append('无人机：黄色目标 1 份；' + '；'.join('%s目标 %d 份' % (
-            COLOR_NAMES[color], amount) for color, amount in self.drone_counts.items() if amount))
+        # The car alone carries all five payloads; no drone task is sent.
+        lines.append('无人机：通信已禁用，本次不分配、不发送任何任务')
         lines.append('小车投放记录')
         for index, (color, slots) in enumerate(self.targets, 1):
             for item, slot in enumerate(slots, 1):

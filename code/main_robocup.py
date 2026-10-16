@@ -16,10 +16,23 @@ from components.navigation_common import NavigationGoal
 from config.relative_slam_profile import accepted_relative_slam_profile
 from config.mission_profile import route_speed_config
 from config.v2_runtime import RuntimeMode
-from robocup_runtime import RuntimeReadinessError, build_runtime, load_runtime_config
+from robocup_runtime import (
+    RuntimeReadinessError,
+    WallRuntimeReadinessError,
+    build_runtime,
+    build_wall_runtime,
+    load_runtime_config,
+)
 
 
 DIRECT_COMPETITION_STAGES = {"task-board", "hc-send", "yellow-detect", "drop"}
+# Stages that must never run through the fused runtime: they need the raw wall
+# observer and the wall-action controller instead.
+WALL_COMPETITION_STAGES = {"wall-observe", "wall-leg", "wall-turn", "drop-standard",
+                           "drop-right", "top-return"}
+# The wall chain shares one deadline from RUN to the end of the run. The old
+# <=600 s cap must not reject the competition profile.
+COMPETITION_MAX_SECONDS = 1200.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,9 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--competition-stage", choices=(
         "full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
         "yellow-detect", "yellow-search", "yellow-align", "drop-route", "drop",
-        "drop-align", "corner2", "finish"),
+        "drop-align", "corner2", "finish",
+        "wall-observe", "wall-leg", "wall-turn", "drop-standard", "drop-right",
+        "top-return"),
         help="run only this stage; task-board/hc-send/yellow-detect/drop use direct hardware without "
-             "localization runtime; drop-align expects the car already at the left-turn pose")
+             "localization runtime; wall-observe is read-only; wall-leg/wall-turn take --leg 1..4")
+    parser.add_argument("--leg", type=int, choices=(1, 2, 3, 4),
+                        help="wall-leg/wall-turn only: which wall leg to exercise")
     parser.add_argument("--yellow-camera", help="competition camera index or stable device path")
     parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
     parser.add_argument("--speed-scale", type=float, default=1,
@@ -135,8 +152,15 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
     if not math.isfinite(args.speed_scale) or args.speed_scale <= 0:
         logging.error("--speed-scale must be finite and positive")
         return 2
-    if not math.isfinite(args.max_seconds) or not 1 <= args.max_seconds <= 600:
-        logging.error("--max-seconds must be finite and between 1 and 600")
+    if not math.isfinite(args.max_seconds) or not 1 <= args.max_seconds <= COMPETITION_MAX_SECONDS:
+        logging.error("--max-seconds must be finite and between 1 and %g", COMPETITION_MAX_SECONDS)
+        return 2
+    wall_stage = args.competition_stage in WALL_COMPETITION_STAGES
+    if args.leg is not None and args.competition_stage not in {"wall-leg", "wall-turn"}:
+        logging.error("--leg applies only to wall-leg and wall-turn")
+        return 2
+    if args.competition_stage in {"wall-leg", "wall-turn"} and args.leg is None:
+        logging.error("--competition-stage %s requires --leg 1..4", args.competition_stage)
         return 2
     if competition_enabled and not direct_stage and args.mode != RuntimeMode.HARDWARE_MISSION.value:
         logging.error("competition requires --mode hardware-mission; use fake unit tests for software route validation")
@@ -173,26 +197,38 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
             logging.exception("direct competition stage failed: %s", args.competition_stage)
             return 1
 
+    use_wall_runtime = wall_stage or (competition_enabled and not direct_stage)
     try:
         config = load_runtime_config(args.config)
         mode = RuntimeMode(args.mode)
-        if args.relative_slam or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config):
+        # The wall chain must be chosen BEFORE the fused profile default, or a
+        # "new navigation" would still build the old localization stack.
+        if not use_wall_runtime and (
+                args.relative_slam
+                or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config)):
             config = accepted_relative_slam_profile(config)
         config = route_speed_config(config, args.speed_scale)
-        runtime = build_runtime(
-            config,
-            mode,
-            replay_file=args.replay_file,
-            mission_profile=args.mission_profile,
-        )
+        if use_wall_runtime:
+            runtime = build_wall_runtime(config, mode)
+            runtime.record_event("competition_runtime_chain", chain="wall",
+                                 stage=args.competition_stage or "full",
+                                 fused_localization=False, drone_communication=False)
+        else:
+            runtime = build_runtime(
+                config,
+                mode,
+                replay_file=args.replay_file,
+                mission_profile=args.mission_profile,
+            )
         if args.log_dir is not None:
             runtime.event_logger = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
         elif task_board_enabled or competition_enabled:
             runtime.event_logger = JsonlEventLogger(Path("logs") / (
                 "competition" if competition_enabled else "task-board") / "events.jsonl")
-    except (RuntimeReadinessError, FileNotFoundError, ValueError, NotImplementedError) as exc:
+    except (RuntimeReadinessError, WallRuntimeReadinessError, FileNotFoundError,
+            ValueError, NotImplementedError) as exc:
         logging.error("cannot start RoboCup runtime: %s", exc)
-        if isinstance(exc, RuntimeReadinessError) and args.log_dir is not None:
+        if isinstance(exc, (RuntimeReadinessError, WallRuntimeReadinessError)) and args.log_dir is not None:
             try:
                 readiness_log = JsonlEventLogger(Path(args.log_dir) / "events.jsonl")
                 readiness_log.emit(
@@ -250,6 +286,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                     car_only_test=car_only_test,
                     simulate_release=simulate_payload,
                     payload_log_dir=Path(args.log_dir or "logs/competition") / "payload" if stage == "full" else None,
+                    leg=args.leg,
                 )
             logging.info("competition stage completed: %s; result=%s",
                          stage,
@@ -258,9 +295,14 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                 return 1
             if stage in {"yellow-search", "yellow-align", "drop-align"}:
                 return 0 if result is not None else 1
-            if stage in {"drop-route", "drop"} and result is False:
+            if stage in {"drop-route", "drop", "drop-standard", "drop-right"} and result is False:
                 return 1
+            if stage in {"wall-leg", "wall-turn", "top-return", "finish"}:
+                return 0 if result is not False else 1
             if stage == "full":
+                # Reaching the finish zone is what "finished" means; a
+                # missing finish distance stays parked at the corner and reports
+                # a partial result rather than a fake success.
                 return 0 if runtime.mission.state.value == "finished" else 1
             return 0
         if task_board_enabled:

@@ -41,3 +41,29 @@ def step_runtime(runtime):
             raise LocalizationLostError(reason)
         raise RuntimeError(reason)
     return result
+
+
+class WallObservationLostError(RuntimeError):
+    """The wall observation cannot support the requested action any more."""
+
+
+def step_wall_runtime(runtime):
+    """Task guard + wall step + STOP/ERROR check, with no pose requirement.
+
+    This is the competition, payload and hold path. It deliberately never calls
+    ``usable_pose()``: the wall chain has no fused estimate to be usable, and
+    pretending otherwise (for example by making ``usable_pose`` always true)
+    would hide exactly the dependency this runtime exists to remove.
+    """
+    guard = _task_guard.get()
+    if guard is not None:
+        guard()
+    result = runtime.step()
+    if result.error or runtime.mission.state in {
+            RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR,
+            RobocupMissionState.FINISHED}:
+        reason = runtime.mission.last_error or result.error or runtime.mission.state.value
+        if runtime.mission.state in {RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
+            raise WallObservationLostError(reason)
+        raise RuntimeError(reason)
+    return result

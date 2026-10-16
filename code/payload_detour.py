@@ -1,25 +1,49 @@
-"""Interruptible left-side payload detour using the existing runtime motion API."""
+"""Interruptible payload detour driven by one tracked field wall.
 
-from dataclasses import dataclass, replace
+The detour no longer uses a fused pose, a map origin, a global line or a
+``Pose2D`` endpoint. It locks one *same physical wall* (the road wall the leg is
+patrolling), records the drive-axle-centre perpendicular distance ``d0`` to it,
+and then performs every move and turn against that wall's measured normal
+distance and measured body bearing:
+
+  standard      left90 -> forward 0.43 m -> release -> reverse to d0 -> right90
+  right_mount   left90 -> forward 0.32 m -> left90 -> release -> right90
+                -> reverse to d0 -> right90
+
+Both sequences come from ``docs/06_PAYLOAD_AND_ALLOCATION.md``. Nothing here
+reads a fused pose, and no move ever substitutes an elapsed time or an
+integrated command for a measured distance.
+"""
+
+from dataclasses import dataclass
 import math
 import sys
 import time
 
-from core.frames import normalize_angle_rad
-from components.basic_motion_controller import MotionActionState
 from components.payload_servos import open_payload
-from mission_control import step_runtime as _step, usable_pose as _usable_pose
+from components.wall_navigation import (
+    LEFT_BEARING_RAD,
+    MoveNormalToWall,
+    REAR_BEARING_RAD,
+    RIGHT_BEARING_RAD,
+    WallActionLimits,
+    drop_turn,
+)
+from components.wall_observer import WallLine
+from mission_control import step_wall_runtime as _step
 from robocup_runtime import RobocupMissionState
 
 PERIOD_S = 0.05
+# Retained for the retired fused call sites; the wall path uses WallActionLimits.
+DEFAULT_APPROACH_M = 0.43
 
 
 @dataclass(frozen=True)
 class DetourSettings:
-    payload_slot: int = 0  # 0: yellow; 1/4: singles; 2/3: double target.
+    payload_slot: int = 4  # Slot usage comes from build_payload_plan(); 4 is yellow.
     approach_m: float = 0.43
     release_hold_s: float = 0.5
-    position_tolerance_m: float = 0.005
+    position_tolerance_m: float = 0.01
     patrol_slow_speed_m_s: float = 0.08
     payload_slots: tuple[int, ...] = ()
     behavior: str = "standard"
@@ -47,137 +71,120 @@ class DetourSettings:
                 raise ValueError(f"{name} must be finite and positive")
 
 
+@dataclass(frozen=True)
+class WallDropReference:
+    """The one reference wall a detour works against."""
+
+    reference_id: str
+    d0_base_m: float
+    bearing_rad: float
+    normal_xy: tuple[float, float]
+
+
 def run_payload_detour(runtime, settings, *, guard=lambda: None,
                        check_vision=lambda: None, clock=time.monotonic, sleep=time.sleep,
-                       travel_drive=None, fine_align=None, simulate_release=False,
-                       on_release=None):
-    """Left90, fused approach, release, reverse, restore road yaw.
+                       tracker=None, acquire_reference=None, limits=None,
+                       simulate_release=False, on_release=None, **legacy):
+    """Wall-referenced detour. ``acquire_reference`` locks the tracked wall.
 
-    Slot 4's right_mount adds left90 before release and right90 before reverse.
+    ``acquire_reference(runtime, tracker)`` must return a
+    :class:`WallDropReference` for the wall the leg is currently patrolling, or
+    ``None`` when it cannot be seen. It is called once, before the first turn,
+    and then never again: ``d0`` is frozen for the whole detour so the return
+    distance cannot chase the current measurement.
 
-    Without ``fine_align`` the approach uses settings.approach_m. With it, the
-    callback owns a fused side-axis approach and stopped distance verification.
-    Return starts at the latest fused pose and reverses parallel to side_yaw
-    into the pivot's inner cross-section before the single inward turn.
-
-    Caller owns runtime lifecycle and resumes its original segment.
-    Every motion/hold tick checks cancellation, vision and runtime safety.
-    Absolute turn headings avoid accumulating left/right turn tolerances.
-    Translation, headings and saved return endpoints share the fused pose frame.
+    ``legacy`` swallows the retired ``travel_drive`` / ``fine_align`` arguments
+    so an old call site fails loudly on behaviour instead of silently keeping a
+    fused feedback source.
     """
-    original = runtime.motion.navigation
-    entry_drive = runtime.motion.drive
-    hold_failure = None
-    on_side_line = False
-    side_yaw = None
+    if legacy:
+        raise TypeError("fused detour arguments are retired: %s" % ", ".join(sorted(legacy)))
+    if tracker is None:
+        raise ValueError("payload detour requires the tracked wall object")
+    if acquire_reference is None:
+        raise ValueError("payload detour requires a wall reference source")
+    if limits is None:
+        limits = getattr(runtime, "limits", None) or WallActionLimits.from_config(runtime.config)
+    release_error = None
+    commanded: list[int] = []
 
     def check():
         guard()
         check_vision()
 
-    def fused_pose(result):
-        if not _usable_pose(result):
-            raise RuntimeError("payload fused pose unavailable")
-        return result.estimate.pose
+    def current_wall() -> WallLine | None:
+        return tracker.wall
 
-    def motion(label, method, *args, on_tick=None, **kwargs):
+    def run_action(action, stage):
         check()
-        if on_side_line:
-            if method != "track_global_line":
-                raise ValueError("side approach/return permits only straight fused lines")
-            delta = (args[1][0]-args[0][0], args[1][1]-args[0][1])
-            cross = delta[0]*math.sin(side_yaw)-delta[1]*math.cos(side_yaw)
-            if abs(cross) > 1e-6:
-                raise ValueError("side approach/return must remain parallel to side_yaw")
-        runtime.motion.stop()
-        if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
-            runtime.mission.on_payload_action_done()
-        getattr(runtime.motion, method)(*args, **kwargs)
-        runtime.record_event("payload_detour_stage_start", stage=label, args=args, kwargs=kwargs,
-                             pose_reference="fused", behavior=settings.behavior)
-        while True:
-            check()
-            result = _step(runtime)
-            fused_pose(result)  # Also fail closed if loss happens before the action's first tick.
-            if _usable_pose(result) and on_tick is not None and on_tick(result.estimate.pose):
-                runtime.motion.stop()
-                runtime.drive.stop()
-                settled = _step(runtime)
-                runtime.record_event("payload_detour_stage_done", stage=label,
-                                     pose=settled.estimate.pose, early_stop=True,
-                                     pose_reference="fused", behavior=settings.behavior)
-                return fused_pose(settled)
-            if runtime.motion.state is MotionActionState.SUCCEEDED:
-                runtime.drive.stop()
-                runtime.record_event("payload_detour_stage_done", stage=label,
-                                     pose=result.estimate.pose, pose_reference="fused",
-                                     behavior=settings.behavior)
-                return fused_pose(result)
-            if runtime.motion.state not in {MotionActionState.RUNNING, MotionActionState.POSE_LOST}:
-                raise RuntimeError(f"{label}: motion failed: {runtime.motion.state.value}")
-            sleep(PERIOD_S)
-
-    def hold(duration):
-        nonlocal hold_failure
+        runtime.action = action
+        runtime.record_event("payload_detour_stage_start", stage=stage, action=action.name,
+                             behavior=settings.behavior, feedback_source="wall_scan")
         try:
-            deadline = clock() + duration
-            while clock() < deadline:
+            while True:
                 check()
-                fused_pose(_step(runtime))  # Stopped hold still requires live fusion.
-                sleep(min(PERIOD_S, max(0, deadline - clock())))
-            check()
-        except BaseException as exc:
-            hold_failure = exc
+                _step(runtime)
+                outcome = action.outcome
+                if outcome is not None:
+                    runtime.action = None
+                    if outcome.done:
+                        runtime.record_event("payload_detour_stage_done", stage=stage,
+                                             action=action.name, reason=outcome.reason,
+                                             behavior=settings.behavior)
+                        return True
+                    if action.finished:
+                        raise RuntimeError(f"{stage}: {action.name} failed: {outcome.reason}")
+                sleep(PERIOD_S)
+        except BaseException:
+            runtime.action = None
             raise
 
-    def record_drop_pose(A, B, side_yaw, expected_yaw=None):
+    def hold(duration):
+        deadline = clock() + duration
+        runtime.record_event("payload_release_hold_start", duration_s=duration,
+                             behavior=settings.behavior)
+        while clock() < deadline:
+            check()
+            # The stopped hold keeps the drive fed and observes guard/STOP; it
+            # needs no pose and no wall observation.
+            _step(runtime)
+            sleep(min(PERIOD_S, max(0.0, deadline - clock())))
         check()
-        result = _step(runtime)  # Motion cancelled: maintain zero output.
-        pose = fused_pose(result)
-        ux, uy = math.cos(side_yaw), math.sin(side_yaw)
-        span = (B[0]-A[0])*ux + (B[1]-A[1])*uy
-        raw = (pose.x_m-A[0])*ux + (pose.y_m-A[1])*uy
-        cross = ux*(pose.y_m-A[1])-uy*(pose.x_m-A[0])
-        target_yaw = side_yaw if expected_yaw is None else expected_yaw
-        runtime.record_event("payload_drop_pose", pose_reference="fused",
-                             raw_progress_m=raw,cross_track_m=cross,
-                             along_track_error_m=raw-span,
-                             yaw_error_rad=normalize_angle_rad(pose.yaw_rad-target_yaw),
-                             target_yaw_rad=target_yaw, behavior=settings.behavior)
+        runtime.record_event("payload_release_hold_done", behavior=settings.behavior)
 
     try:
-        runtime.motion.navigation = replace(original, position_tolerance_m=min(
-            original.position_tolerance_m, settings.position_tolerance_m))
         check()
-        runtime.motion.stop()
-        entry = _step(runtime)
-        road_pose = fused_pose(entry)
-        road_yaw = road_pose.yaw_rad
-        runtime.record_event("payload_detour_road_pose", pose=road_pose, pose_reference="fused")
-        runtime.motion.drive = travel_drive if travel_drive is not None else entry_drive
-        side_yaw = normalize_angle_rad(road_yaw + math.pi / 2)
-        side_pose = motion("left_90deg", "rotate_to", side_yaw)
-        on_side_line = True
-        A2 = (side_pose.x_m, side_pose.y_m)
-        runtime.record_event("payload_detour_pivot", pose=side_pose, side_yaw=side_yaw,
-                             road_yaw=road_yaw, pose_reference="fused")
-        if fine_align is None:
-            B2 = (A2[0] + settings.approach_m * math.cos(side_yaw),
-                  A2[1] + settings.approach_m * math.sin(side_yaw))
-            motion("forward_to_drop", "track_global_line", A2, B2)
-        else:
-            # The callback only drives through this fused motion closure; it
-            # returns the fused pose the payload is aligned at.
-            final_pose = fine_align(side_pose, road_yaw, side_yaw, motion)
-            B2 = (final_pose.x_m, final_pose.y_m)
-        runtime.motion.stop()
         runtime.drive.stop()
-        release_yaw = side_yaw
+        if runtime.mission.state is RobocupMissionState.TARGET_OPERATION:
+            runtime.mission.on_payload_action_done()
+        reference = acquire_reference(runtime, tracker)
+        if reference is None:
+            raise RuntimeError("payload detour has no visible reference wall")
+        d0 = reference.d0_base_m
+        runtime.record_event("payload_detour_reference", reference_id=reference.reference_id,
+                             d0_base_m=d0, bearing_rad=reference.bearing_rad,
+                             behavior=settings.behavior, feedback_source="wall_scan")
+        runtime.mission.on_payload_action_start()
+
+        left = drop_turn(reference.bearing_rad, REAR_BEARING_RAD, limits=limits,
+                         tracker=tracker, turn_direction=1, clock=clock)
+        if not run_action(left, "left_90deg"):
+            raise RuntimeError("left_90deg did not complete")
+
+        approach_target = d0 + settings.approach_m
+        approach = MoveNormalToWall(target_distance_m=approach_target, direction=1,
+                                    reference_bearing_rad=tracker.wall.bearing_rad,
+                                    limits=limits, tracker=tracker, clock=clock)
+        if not run_action(approach, "forward_to_drop"):
+            raise RuntimeError("forward_to_drop did not complete")
+
         if settings.behavior == "right_mount":
-            on_side_line = False
-            release_yaw = normalize_angle_rad(road_yaw + math.pi)
-            motion("right_mount_left_90deg", "rotate_to", release_yaw)
-        record_drop_pose(A2, B2, side_yaw, expected_yaw=release_yaw)
+            second_left = drop_turn(tracker.wall.bearing_rad, LEFT_BEARING_RAD,
+                                    limits=limits, tracker=tracker, turn_direction=1,
+                                    clock=clock)
+            if not run_action(second_left, "right_mount_left_90deg"):
+                raise RuntimeError("right_mount_left_90deg did not complete")
+
         for slot in settings.release_slots:
             check()
             if simulate_release:
@@ -190,58 +197,67 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 released = open_payload(slot)
                 if released is False:
                     raise RuntimeError('payload PWM command failed: returned False')
+                commanded.append(slot)
+                # Book the ledger before the hold and the return: an IO failure
+                # later must never turn an opened slot back into pending.
                 if on_release is not None:
                     on_release(slot)
             hold(settings.release_hold_s)
             if not simulate_release:
-                runtime.record_event("payload_release_done",
-                                     actuator="payload_servo", cargo_count=1, slot=slot,
-                                     behavior=settings.behavior,
+                runtime.record_event("payload_release_done", actuator="payload_servo",
+                                     cargo_count=1, slot=slot, behavior=settings.behavior,
                                      reason="PWM command written; no mechanical feedback")
+
         if settings.behavior == "right_mount":
-            motion("right_mount_right_90deg", "rotate_to", side_yaw)
-            on_side_line = True
-        # Use the latest fusion after the release hold/turn, then reverse along the
-        # saved side axis. Even a small cross-track residual cannot turn this
-        # into a diagonal path to the historical XY pivot.
-        current = fused_pose(_step(runtime))
-        B2 = (current.x_m, current.y_m)
-        ux, uy = math.cos(side_yaw), math.sin(side_yaw)
-        reach = (B2[0]-A2[0])*ux + (B2[1]-A2[1])*uy
-        inside = (B2[0]-reach*ux, B2[1]-reach*uy)
-        if reach > settings.position_tolerance_m:
-            motion("reverse_from_drop" if fine_align is None else "return_from_drop",
-                   "track_global_line", B2, inside, reverse=True)
-        else:
-            runtime.record_event("payload_detour_stage_skipped", stage="return_from_drop",
-                                 reason="already at the turn pose", pose_reference="fused")
-        on_side_line = False
-        returned = motion("right_90deg", "rotate_to", road_yaw)
-        runtime.record_event("payload_detour_done", actuator="dual_servo", pose=returned,
-                             pose_reference="fused", behavior=settings.behavior)
-        return returned
+            back = drop_turn(tracker.wall.bearing_rad, REAR_BEARING_RAD, limits=limits,
+                             tracker=tracker, turn_direction=-1, clock=clock)
+            if not run_action(back, "right_mount_right_90deg"):
+                raise RuntimeError("right_mount_right_90deg did not complete")
+
+        return_wall = tracker.wall
+        if return_wall is None:
+            raise RuntimeError("reference wall lost before the return")
+        ret = MoveNormalToWall(target_distance_m=d0, direction=-1,
+                               reference_bearing_rad=return_wall.bearing_rad,
+                               limits=limits, tracker=tracker, clock=clock)
+        if not run_action(ret, "return_from_drop"):
+            raise RuntimeError("return_from_drop did not complete")
+
+        restore_wall = tracker.wall
+        if restore_wall is None:
+            raise RuntimeError("reference wall lost before restoring the road heading")
+        restore = drop_turn(restore_wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits,
+                            tracker=tracker, turn_direction=-1, clock=clock)
+        if not run_action(restore, "right_90deg"):
+            raise RuntimeError("right_90deg did not complete")
+        runtime.mission.on_payload_action_done()
+        runtime.record_event("payload_detour_done", actuator="payload_servo",
+                             behavior=settings.behavior, reference_id=reference.reference_id,
+                             commanded_slots=tuple(commanded), feedback_source="wall_scan")
+        return tuple(commanded)
     except BaseException as exc:
-        runtime.record_event("payload_detour_failed", reason=f"{type(exc).__name__}: {exc}",
-                             behavior=settings.behavior)
+        runtime.record_event("payload_detour_failed",
+                             reason=f"{type(exc).__name__}: {exc}",
+                             behavior=settings.behavior, commanded_slots=tuple(commanded))
         runtime.mission.request_safe_stop(str(exc))
         raise
     finally:
         primary_error = sys.exc_info()[0] is not None
+        runtime.action = None
         cleanup_error = None
-        for stop in (runtime.drive.stop, runtime.motion.stop):
-            try:
-                stop()
-            except Exception as exc:
-                cleanup_error = cleanup_error or exc
-                runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
-                if not primary_error:
-                    runtime.mission.request_safe_stop(str(exc))
-        runtime.motion.navigation = original
-        runtime.motion.drive = entry_drive
+        try:
+            runtime.drive.stop()
+        except Exception as exc:
+            cleanup_error = exc
+            runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
+        # Cleanup opens every slot for safety, and is logged as cleanup -- never
+        # as five successful target releases.
         if not simulate_release and (primary_error or cleanup_error):
             try:
                 if open_payload() is False:
                     raise RuntimeError('cleanup payload OPEN failed: returned False')
+                runtime.record_event("cleanup_open", actuator="payload_servo", slots="all",
+                                     reason="detour failure or cleanup")
             except Exception as exc:
                 runtime.record_event("payload_detour_cleanup_failed", reason=str(exc))
                 if not primary_error:

@@ -24,7 +24,10 @@ PAYLOAD_COUNT = 5
 _axes = [None] * PAYLOAD_COUNT
 _lock = threading.RLock()
 LOG = logging.getLogger(__name__)
-# 0 = yellow; 1/4 = single targets; 2/3 = double target; 4 uses right_mount.
+# Competition slot usage: 4 = yellow mandatory drop (right_mount, 32 cm);
+# 1 = first single-item colour and 0 = second single-item colour (standard,
+# 43 cm each); 2/3 = the double-item colour released in one approach. The plan
+# in competition_task.build_payload_plan() is the only place that decides this.
 
 
 def _pins():

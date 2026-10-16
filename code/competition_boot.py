@@ -1,4 +1,11 @@
-"""HC-15 competition listener; the mission worker shares its single radio owner."""
+"""HC-15 competition listener; the mission worker shares its single radio owner.
+
+The car competition chain contacts no drone. This listener keeps the ground
+station's RUN / STOP / PING handling and their ACKs, the single radio owner, the
+20 s preparation wait and the 5 s completion beep; it creates no
+``FleetTaskSender``, restarts no car SLAM sidecar and waits for no drone ACK, so
+a drone that is powered off, absent or on a broken link cannot block startup.
+"""
 import logging
 from pathlib import Path
 import secrets
@@ -9,10 +16,9 @@ import threading
 import time
 
 from components.fleet_models import (AckPayload, AckReason, AckStatus, CommandId,
-    CommandPayload, Frame, MessageKind, NodeId)
+    Frame, MessageKind, NodeId)
 from components.fleet_protocol import (FrameParser, RecentResponseCache, SequenceCounter,
-    decode_command, encode_ack, encode_command, new_session, pack_frame)
-from components.fleet_task_sender import FleetTaskSender
+    decode_command, encode_ack, new_session, pack_frame)
 from components.payload_servos import open_payload, close_payload
 from components.serial_communication import HC15SerialDriver
 from components.sound_light_alarm import SoundLightAlarm
@@ -25,11 +31,14 @@ PROMPT_GAP_S = 0.15
 SLAM_SERVICE = 'robocup-slam.service'
 SYSTEMCTL = shutil.which('systemctl') or '/usr/bin/systemctl'
 MISSION_CONFIG = Path(__file__).resolve().parents[1] / 'configs' / 'robocup_diffdrive.toml'
-MISSION_ARGS = ('--competition', '--mode', 'hardware-mission', '--relative-slam',
+# No --relative-slam: the competition entry builds the wall runtime, and the
+# fused/SLAM profile must not be applied on the way in.
+MISSION_ARGS = ('--competition', '--mode', 'hardware-mission',
                 '--config', str(MISSION_CONFIG))
 
 
 def restart_car_slam_sidecar(stop_event):
+    """Manual diagnostic helper only; the competition chain never calls it."""
     def identity():
         result = subprocess.run([SYSTEMCTL, 'show', SLAM_SERVICE,
             '--property=ActiveState,MainPID,InvocationID'], check=True,
@@ -82,7 +91,7 @@ class CompetitionBoot:
         self._write_lock = threading.Lock()
         self._tx_seq_lock = threading.Lock()
         self._payload_action_lock = threading.Lock()
-        self._worker = self._stop_event = self._sender = self._runtime = None
+        self._worker = self._stop_event = self._runtime = None
         self._closed = False
         self._parser = FrameParser(local_node=NodeId.CAR)
         self._cache = RecentResponseCache()
@@ -91,12 +100,6 @@ class CompetitionBoot:
         self._driver = driver_factory(on_bytes=self._on_bytes, port='/dev/ttyS4',
             baudrate=115200, bridge_envelope=True, on_disconnected=self._on_disconnected,
             on_callback_error=self._on_callback_error)
-
-    def write(self, data):
-        with self._write_lock:
-            if self._stop_event is None or self._stop_event.is_set():
-                raise RuntimeError('competition task send was cancelled')
-            self._driver.write(data)
 
     def _write_frame(self, data):
         with self._write_lock:
@@ -135,10 +138,8 @@ class CompetitionBoot:
         for frame in self._parser.feed(data):
             if frame.src == NodeId.GROUND and frame.dst == NodeId.CAR and frame.kind == MessageKind.COMMAND:
                 self._handle_ground(frame)
-        with self._state_lock:
-            sender = self._sender
-        if sender is not None:
-            sender.feed_bytes(data)
+        # Frames addressed to (or from) the drone are read and discarded: they
+        # are not car task input and they never trigger a car-to-drone write.
 
     def _handle_ground(self, frame):
         self._cache.begin_ground_session(frame.session)
@@ -156,7 +157,6 @@ class CompetitionBoot:
                 status, reason = self._start_mission()
             elif command_id == CommandId.TARGETED_STOP:
                 self._cancel_current()
-                self._forward_stop()
                 status, reason = AckStatus.ACCEPTED, AckReason.NONE
             elif command_id == CommandId.PING:
                 status, reason = AckStatus.COMPLETED, AckReason.NONE
@@ -183,14 +183,13 @@ class CompetitionBoot:
             stop = threading.Event()
             run_id = secrets.randbelow(0xffffffff) + 1
             t0 = self._clock()
-            sender = None if self._car_only_test else FleetTaskSender(self, stop_event=stop)
-            self._stop_event, self._sender = stop, sender
+            self._stop_event = stop
             self._worker = threading.Thread(target=self._run_mission,
-                args=(stop, sender, run_id, t0, stop_file_baseline), name='competition-mission')
+                args=(stop, run_id, t0, stop_file_baseline), name='competition-mission')
             try:
                 self._worker.start()
             except RuntimeError:
-                self._worker = self._sender = self._stop_event = None
+                self._worker = self._stop_event = None
                 LOG.exception('could not start competition worker')
                 return AckStatus.FAILED, AckReason.INTERNAL_ERROR
         LOG.info('RUN ACCEPTED run_id=%d', run_id)
@@ -231,7 +230,7 @@ class CompetitionBoot:
                 return False
         return not stop.is_set()
 
-    def _run_mission(self, stop, sender, run_id, t0, stop_file_baseline=None):
+    def _run_mission(self, stop, run_id, t0, stop_file_baseline=None):
         completed = False
         try:
             with self._payload_action_lock:
@@ -242,8 +241,6 @@ class CompetitionBoot:
                 raise RuntimeError('RUN payload CLOSE failed: PWM command incomplete')
             LOG.info('RUN payload CLOSE %s run_id=%d (no mechanical feedback)',
                      'SIMULATED' if self._simulate_payload else 'written', run_id)
-            if not self._car_only_test and not sender.close_drone_payload(run_id):
-                raise RuntimeError('drone CLOSE was not confirmed by software ACK')
             close_confirmed_at = self._clock()
             LOG.info('CLOSE confirmed; full %.1f s countdown starts at %.3f',
                      RUN_DELAY_S, close_confirmed_at)
@@ -251,31 +248,21 @@ class CompetitionBoot:
                 return
             if stop.is_set():
                 return
-            if not self._car_only_test and not sender.begin_drone_remap(run_id):
-                raise RuntimeError('drone REMAP not accepted')
-            restart_car_slam_sidecar(stop)
-            if stop.is_set():
-                return
-            if not self._car_only_test and not sender.wait_drone_remap(run_id, stop):
-                raise RuntimeError('drone new-map completion was not confirmed')
-            if not self._beep(stop, label='maps_ready', duration=BUZZ_LAST_S):
+            # No drone CLOSE/REMAP wait and no SLAM sidecar restart: the wall
+            # chain needs neither a drone nor a rebuilt map. The 5 s beep is the
+            # completion cue and must not be shortened by anything in parallel.
+            if not self._beep(stop, label='payload_ready', duration=BUZZ_LAST_S):
                 return
 
-            def handoff(counts):
-                if not self._beep(stop, label='task_board_ready'):
-                    return False
-                return sender.send_task_and_start(counts, start_drone=True,
-                    on_task_sent=lambda: self._beep(stop, label='task_sent', count=2),
-                    on_task_ack=lambda: self._beep(stop, label='task_ack'))
-
-            kwargs = dict(stop_event=stop, send_drone_task=handoff,
-                          on_runtime_ready=self._runtime_ready,
+            kwargs = dict(stop_event=stop, on_runtime_ready=self._runtime_ready,
                           stop_file_baseline=stop_file_baseline)
             if self._simulate_payload:
                 kwargs['simulate_payload'] = True
+            # car_only_test no longer changes the task semantics; the whole
+            # competition is car-only now. It is only accepted for compatibility.
             if self._car_only_test:
-                kwargs.update(car_only_test=True, send_drone_task=None)
-                LOG.info('CAR FULL-FLOW TEST: no drone commands; real payload servos unless explicitly simulated')
+                kwargs['car_only_test'] = True
+                LOG.info('CAR FULL-FLOW TEST listener: identical task plan, no drone commands')
             result = self._mission_main(list(MISSION_ARGS), **kwargs)
             if result:
                 raise RuntimeError('competition mission failed: %s' % result)
@@ -287,10 +274,8 @@ class CompetitionBoot:
             self._attempt('finally alarm OFF', self._alarm.off)
             with self._payload_action_lock:
                 self._attempt('finally payload OPEN', lambda: self._payload_command(open_payload))
-            if not completed:
-                self._forward_stop()
             with self._state_lock:
-                self._runtime = self._sender = self._stop_event = None
+                self._runtime = self._stop_event = None
             LOG.info('FULL CLEANUP run_id=%d', run_id)
 
     def _runtime_ready(self, runtime):
@@ -316,29 +301,19 @@ class CompetitionBoot:
             self._attempt('STOP payload OPEN', lambda: self._payload_command(open_payload))
         self._stop_runtime(runtime)
 
-    def _forward_stop(self):
-        if self._car_only_test:
-            return
-        raw = pack_frame(Frame(1, NodeId.CAR, NodeId.DRONE, MessageKind.COMMAND, 0,
-            self._session, self._next_seq(), encode_command(CommandPayload(CommandId.TARGETED_STOP))))
-        self._attempt('remote STOP write', lambda: self._write_frame(raw))
-        LOG.warning('Remote OPEN unconfirmed: STOP delivery has no awaited ACK')
-
     def _on_disconnected(self, error=None):
+        LOG.error('HC-15 disconnected: %s', error)
         self._cancel_current()
-        self._forward_stop()
 
     def _on_callback_error(self, error):
         LOG.error('HC-15 callback failed: %s', error)
         self._cancel_current()
-        self._forward_stop()
 
     def close(self):
         with self._state_lock:
             self._closed = True
             worker = self._worker
         self._cancel_current()
-        self._forward_stop()
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=35)
             if worker.is_alive():

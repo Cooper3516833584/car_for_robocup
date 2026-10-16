@@ -7,11 +7,13 @@ from enum import Enum
 import logging
 import math
 import queue
+import threading
 import time
 from typing import TYPE_CHECKING, Callable, Iterable
 
 if TYPE_CHECKING:
     from components.task_board_reader import TaskCounts
+    from components.wall_observer import WallSnapshot
 
 from components.differential_drive import DifferentialDrive
 from components.basic_motion_controller import BasicMotionController, MotionActionState, MotionActionType, MotionOutput, MotionPhase
@@ -1259,3 +1261,279 @@ def build_runtime(
 
 def load_runtime_config(path: str | None = None) -> DifferentialRobotConfig:
     return load_v2_config(path)
+
+
+# ===========================================================================
+# Wall-following runtime
+#
+# The competition chain does NOT use the fused runtime above. This thin runtime
+# composes one raw-scan wall observer, one wall-driven motion controller and the
+# existing ``DifferentialDrive``. It deliberately constructs none of
+# RealSenseT265PoseSource, T265PoseAdapter, PoseFusion, SlamBridge,
+# D500RadarComponent, RadarOdometry, ICPScanMatcher, the map anchor or
+# DifferentialNavigator/BasicMotionController: a competition run must import and
+# build with no ROS, no pyrealsense2 and no SLAM workspace at all.
+# ===========================================================================
+
+
+class WallRuntimeReadinessError(RuntimeError):
+    """The configured robot is not ready for wall-following motion."""
+
+
+@dataclass(frozen=True, slots=True)
+class WallStep:
+    """One control tick of the wall runtime; there is deliberately no estimate."""
+
+    now_s: float
+    walls: "WallSnapshot | None"
+    phase: str
+    command: Twist2D
+    action_state: str
+    limited_command: Twist2D | None = None
+    error: str | None = None
+
+
+class WallMission:
+    """Small mission-state holder; carries no navigator and no motion object."""
+
+    def __init__(self) -> None:
+        self.state = RobocupMissionState.INIT
+        self.last_error: str | None = None
+        self.task_counts = None
+        self.phase = "idle"
+
+    def set_task_counts(self, counts) -> None:
+        if self.task_counts is not None:
+            raise RuntimeError("task board result already set")
+        self.task_counts = counts
+
+    def finish(self) -> None:
+        self.state = RobocupMissionState.FINISHED
+
+    def on_payload_action_start(self) -> None:
+        self.state = RobocupMissionState.TARGET_OPERATION
+
+    def on_payload_action_done(self) -> None:
+        if self.state is RobocupMissionState.TARGET_OPERATION:
+            self.state = RobocupMissionState.READY
+
+    def request_safe_stop(self, reason: str = "operator requested safe stop") -> None:
+        self.last_error = reason
+        self.state = RobocupMissionState.SAFE_STOP
+
+    def request_error(self, reason: str) -> None:
+        self.last_error = reason
+        self.state = RobocupMissionState.ERROR
+
+
+def validate_wall_runtime_config(config: DifferentialRobotConfig,
+                                 mode: RuntimeMode) -> list[str]:
+    """Narrow wall-motion preflight; deliberately not the fused readiness gate.
+
+    It keeps the existing chassis checks that still matter (a differential
+    protocol, usable limits and a configured D500 port) and drops every
+    requirement about map anchors, T265, SLAM services and the measured field
+    reference, because none of those participate in wall following.
+    """
+    errors: list[str] = []
+    if mode is RuntimeMode.HARDWARE_MISSION:
+        if config.drive.kinematics != "differential":
+            errors.append("wall runtime requires differential kinematics")
+        if not config.d500.enabled or not config.d500.port:
+            errors.append("wall runtime requires the D500 lidar to be enabled with a port")
+        if (config.drive.protocol_mode == "differential_vx_vz"
+                and config.safety.require_verified_c10b_diff_firmware_for_curved_motion
+                and not config.calibration.c10b_diff_firmware_verified):
+            errors.append(
+                "differential_vx_vz requires verified C10B differential firmware; "
+                "select ackermann_firmware_compat for the compatibility backend")
+    return errors
+
+
+class WallRuntime:
+    """Observation -> wall action -> one differential drive command.
+
+    The caller owns the action sequence. Every non-zero command leaves this
+    object through one place, under one command lock, after a final check of the
+    irreversible stop latch, so a STOP that arrives between "compute" and "send"
+    cannot let a stale command reach the motors.
+    """
+
+    def __init__(self, config: DifferentialRobotConfig, mode: RuntimeMode, *,
+                 drive: DifferentialDrive,
+                 observer,
+                 clock: Callable[[], float] = time.monotonic,
+                 event_logger: JsonlEventLogger | None = None,
+                 limits=None) -> None:
+        from components.wall_navigation import WallActionLimits
+
+        self.config = config
+        self.mode = mode
+        self.drive = drive
+        self.observer = observer
+        self.clock = clock
+        self.event_logger = event_logger
+        self.limits = limits or WallActionLimits.from_config(config)
+        self.mission = WallMission()
+        self.action = None
+        self._command_lock = threading.RLock()
+        self._stop_latched = False
+        self._stop_reason: str | None = None
+        self._started = False
+        self._closed = False
+        self._start_time_s: float | None = None
+        self._drive_started = False
+
+    # ---- observability ---------------------------------------------------
+    @property
+    def is_running(self) -> bool:
+        return self._started and not self._closed
+
+    @property
+    def stop_latched(self) -> bool:
+        return self._stop_latched
+
+    @property
+    def stop_reason(self) -> str | None:
+        return self._stop_reason
+
+    def record_event(self, event_type: str, **fields) -> None:
+        if self.event_logger is None:
+            return
+        try:
+            event_time = float(self.clock())
+            relative_t = 0.0 if self._start_time_s is None else max(0.0, event_time - self._start_time_s)
+            self.event_logger.emit({"t": relative_t, "type": event_type, **fields},
+                                   priority=True)
+        except Exception:
+            LOG.exception("wall runtime event logging failed")
+
+    # ---- lifecycle -------------------------------------------------------
+    def start(self) -> None:
+        if self._closed:
+            raise RuntimeError("WallRuntime is closed; build a new one for the next RUN")
+        if self._started:
+            return
+        # A new run must not inherit the previous run's scans, wall reference or
+        # stop latch.
+        self._stop_latched = False
+        self._stop_reason = None
+        self.action = None
+        self.mission = WallMission()
+        self.observer.start()
+        self._started = True
+        self._start_time_s = float(self.clock())
+        self.record_event("wall_runtime_started", mode=self.mode.value)
+
+    def _ensure_drive_started(self, now_s: float) -> float:
+        if not self.drive.is_running:
+            self.drive.start()
+            self._drive_started = True
+        return now_s
+
+    def request_stop(self, reason: str = "operator requested safe stop") -> None:
+        """Irreversible per-run stop: latch, cancel the action, zero the output."""
+        with self._command_lock:
+            self._stop_latched = True
+            self._stop_reason = reason
+            self.action = None
+            self.mission.request_safe_stop(reason)
+            try:
+                self.drive.stop()
+            except Exception:
+                LOG.exception("wall runtime drive stop failed")
+        self.record_event("wall_runtime_stop", reason=reason)
+
+    def reset_action(self) -> None:
+        self.action = None
+
+    def close(self, *, timeout_s: float = 2.0) -> None:
+        # Permanently forbid further non-zero output for this run, then release
+        # owned resources. One failing resource must not skip the others.
+        with self._command_lock:
+            self._stop_latched = True
+            self.action = None
+        errors = []
+        for name, cleanup in (("drive_stop", self.drive.stop),
+                              ("observer_close", lambda: self.observer.close(timeout_s=timeout_s)),
+                              ("drive_close", self.drive.close)):
+            try:
+                cleanup()
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+                LOG.exception("wall runtime cleanup failed: %s", name)
+        self._closed = True
+        self._started = False
+        if errors:
+            self.record_event("wall_runtime_cleanup_failed", errors=errors)
+
+    # ---- control ---------------------------------------------------------
+    def step(self) -> WallStep:
+        now_s = float(self.clock())
+        if self._stop_latched:
+            return WallStep(now_s, self.observer.latest(), "stopped", Twist2D(0.0, 0.0),
+                            "stopped", error=self._stop_reason)
+        if self.mission.state in {RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
+            return WallStep(now_s, self.observer.latest(), "stopped", Twist2D(0.0, 0.0),
+                            self.mission.state.value, error=self.mission.last_error)
+        snapshot = self.observer.latest()
+        action = self.action
+        if action is None:
+            return WallStep(now_s, snapshot, "idle", Twist2D(0.0, 0.0), "idle")
+        try:
+            outcome = action.step(snapshot, now_s=now_s)
+        except Exception as exc:
+            self.mission.request_error(str(exc))
+            self.request_stop(f"wall action failed: {exc}")
+            return WallStep(now_s, snapshot, "error", Twist2D(0.0, 0.0), "error", error=str(exc))
+        command = outcome.command
+        fields = {key: value for key, value in outcome.fields.items()
+                  if key not in {"command", "right_wall_normal"}}
+        self.record_event("wall_control", action=action.name, phase=self.mission.phase,
+                          done=outcome.done, reason=outcome.reason, **fields)
+        limited = self._send(command, now_s)
+        state = "done" if outcome.done else ("waiting" if outcome.reason else "running")
+        return WallStep(now_s, snapshot, self.mission.phase, command, state,
+                        limited_command=limited, error=None if not outcome.reason else outcome.reason)
+
+    def _send(self, command: Twist2D, now_s: float) -> Twist2D | None:
+        """Single output gate. Re-checks the stop latch inside the lock."""
+        with self._command_lock:
+            if self._stop_latched:
+                return None
+            if command.linear_x_m_s == 0.0 and command.angular_z_rad_s == 0.0:
+                if self.drive.is_running:
+                    self.drive.stop()
+                return Twist2D(0.0, 0.0)
+            drive_now = self._ensure_drive_started(now_s)
+            self.drive.command(command, now_s=drive_now)
+            return self.drive.last_limited_twist
+
+
+def build_wall_runtime(config: DifferentialRobotConfig, mode: RuntimeMode, *,
+                       clock: Callable[[], float] = time.monotonic,
+                       event_logger: JsonlEventLogger | None = None,
+                       observer=None, drive=None,
+                       limits=None) -> WallRuntime:
+    """Compose the wall-following competition runtime without starting a device."""
+    if mode is RuntimeMode.HARDWARE_PROBE:
+        raise ValueError("the wall runtime never runs a hardware probe")
+    errors = validate_wall_runtime_config(config, mode)
+    if errors:
+        raise WallRuntimeReadinessError("; ".join(errors))
+    if drive is None:
+        drive = build_differential_drive(config, fake=mode is not RuntimeMode.HARDWARE_MISSION,
+                                        clock=clock)
+    if observer is None:
+        from components.wall_observer import WallObserver
+        from components.radar_driver import RadarMount
+
+        mount = RadarMount(
+            x_forward_cm=config.d500_mount.x_m * 100.0,
+            y_left_cm=config.d500_mount.y_m * 100.0,
+            yaw_cw_deg=-math.degrees(config.d500_mount.yaw_rad),
+        )
+        observer = WallObserver(port=config.d500.port, baudrate=config.d500.baudrate,
+                               mount=mount, clock=clock)
+    return WallRuntime(config, mode, drive=drive, observer=observer, clock=clock,
+                       event_logger=event_logger, limits=limits)
