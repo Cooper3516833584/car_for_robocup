@@ -20,6 +20,8 @@ from components.sound_light_alarm import SoundLightAlarm
 LOG = logging.getLogger(__name__)
 RUN_DELAY_S = 20.0
 BUZZ_LAST_S = 5.0
+PROMPT_BEEP_S = 0.15
+PROMPT_GAP_S = 0.15
 SLAM_SERVICE = 'robocup-slam.service'
 SYSTEMCTL = shutil.which('systemctl') or '/usr/bin/systemctl'
 MISSION_CONFIG = Path(__file__).resolve().parents[1] / 'configs' / 'robocup_diffdrive.toml'
@@ -211,6 +213,24 @@ class CompetitionBoot:
                             closed=self._closed)
         raise ValueError('Unknown local action')
 
+    def _beep(self, stop, *, label, count=1, duration=None):
+        duration = PROMPT_BEEP_S if duration is None else duration
+        for index in range(count):
+            with self._payload_action_lock:
+                if stop.is_set():
+                    return False
+                self._alarm.on()
+                LOG.info('BUZZ ON cue=%s pulse=%d/%d', label, index + 1, count)
+            try:
+                if stop.wait(duration):
+                    return False
+            finally:
+                self._alarm.off()
+                LOG.info('BUZZ OFF cue=%s pulse=%d/%d', label, index + 1, count)
+            if index + 1 < count and stop.wait(PROMPT_GAP_S):
+                return False
+        return not stop.is_set()
+
     def _run_mission(self, stop, sender, run_id, t0, stop_file_baseline=None):
         completed = False
         try:
@@ -225,18 +245,10 @@ class CompetitionBoot:
             if not self._car_only_test and not sender.close_drone_payload(run_id):
                 raise RuntimeError('drone CLOSE was not confirmed by software ACK')
             close_confirmed_at = self._clock()
-            buzz_at = max(t0 + RUN_DELAY_S - BUZZ_LAST_S, close_confirmed_at)
-            if stop.wait(max(0.0, buzz_at - self._clock())):
+            LOG.info('CLOSE confirmed; full %.1f s countdown starts at %.3f',
+                     RUN_DELAY_S, close_confirmed_at)
+            if stop.wait(RUN_DELAY_S):
                 return
-            with self._payload_action_lock:
-                if stop.is_set():
-                    return
-                self._alarm.on()
-                LOG.info('BUZZ ON')
-            if stop.wait(BUZZ_LAST_S):
-                return
-            self._alarm.off()
-            LOG.info('BUZZ OFF')
             if stop.is_set():
                 return
             if not self._car_only_test and not sender.begin_drone_remap(run_id):
@@ -244,10 +256,17 @@ class CompetitionBoot:
             restart_car_slam_sidecar(stop)
             if stop.is_set():
                 return
+            if not self._car_only_test and not sender.wait_drone_remap(run_id, stop):
+                raise RuntimeError('drone new-map completion was not confirmed')
+            if not self._beep(stop, label='maps_ready', duration=BUZZ_LAST_S):
+                return
 
             def handoff(counts):
-                return (sender.wait_drone_remap(run_id, stop) and
-                        sender.send_task_and_start(counts, start_drone=True))
+                if not self._beep(stop, label='task_board_ready'):
+                    return False
+                return sender.send_task_and_start(counts, start_drone=True,
+                    on_task_sent=lambda: self._beep(stop, label='task_sent', count=2),
+                    on_task_ack=lambda: self._beep(stop, label='task_ack'))
 
             kwargs = dict(stop_event=stop, send_drone_task=handoff,
                           on_runtime_ready=self._runtime_ready,
@@ -292,8 +311,8 @@ class CompetitionBoot:
             stop, runtime = self._stop_event, self._runtime
             if stop is not None:
                 stop.set()
-        self._attempt('STOP alarm OFF', self._alarm.off)
         with self._payload_action_lock:
+            self._attempt('STOP alarm OFF', self._alarm.off)
             self._attempt('STOP payload OPEN', lambda: self._payload_command(open_payload))
         self._stop_runtime(runtime)
 

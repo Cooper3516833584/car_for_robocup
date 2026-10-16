@@ -50,25 +50,36 @@ class FleetTaskSender:
                     self._condition.notify_all()
 
     def _request(self, command_id, body, *, require_completed=False, return_status=False,
-                 deadline_s=None):
+                 deadline_s=None, on_sent=None):
         seq = self._seq.next()
         raw = pack_frame(Frame(1, NodeId.CAR, NodeId.DRONE, MessageKind.COMMAND, 0,
             self.session, seq, encode_command(CommandPayload(command_id, command_body=body))))
         with self._condition:
             self._pending = (self.session, seq, int(command_id))
             self._ack = None
+        sent_notified = False
         try:
             for attempt in range(1, self.retries+2):
                 if self.stop_event.is_set() or (deadline_s is not None and time.monotonic() >= deadline_s):
                     return False
+                written = False
                 try:
                     self.transport.write(raw)
+                    written = True
                     LOG.info("Drone command=0x%02x seq=%d attempt=%d", command_id, seq, attempt)
                 except (OSError, RuntimeError):
                     LOG.exception("Drone task write failed")
                 deadline = time.monotonic()+self.timeout
                 if deadline_s is not None:
                     deadline = min(deadline, deadline_s)
+                if self.stop_event.is_set():
+                    return False
+                # Notify once per logical request, after a successful UART write.
+                # Run outside the ACK condition so RX can continue during cues.
+                if written and not sent_notified:
+                    sent_notified = True
+                    if on_sent is not None and on_sent() is False:
+                        return False
                 with self._condition:
                     while not self.stop_event.is_set():
                         ack = self._ack
@@ -119,12 +130,20 @@ class FleetTaskSender:
         LOG.error("Drone new-map readiness not confirmed")
         return False
 
-    def send_task_and_start(self, counts, *, task_id=None, start_drone=True):
+    def send_task_and_start(self, counts, *, task_id=None, start_drone=True,
+                            on_task_sent=None, on_task_ack=None):
         task = DropTask(secrets.randbelow(0xffffffff)+1 if task_id is None else task_id,
                         counts.red, counts.blue, counts.green)
         with self._send_lock:
             # No start unless the drone confirms the validated allocation was stored.
-            if not self._request(CommandId.DRONE_SET_DROP_TASK, encode_drop_task(task), require_completed=True):
+            if not self._request(CommandId.DRONE_SET_DROP_TASK, encode_drop_task(task),
+                                 require_completed=True, on_sent=on_task_sent):
+                return False
+            if self.stop_event.is_set():
+                return False
+            if on_task_ack is not None and on_task_ack() is False:
+                return False
+            if self.stop_event.is_set():
                 return False
             if not start_drone:
                 return True

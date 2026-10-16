@@ -56,6 +56,87 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual([t.command_id for t in tasks], [CommandId.DRONE_SET_DROP_TASK, CommandId.DRONE_START_DROP_TASK])
         self.assertTrue(all(unpack_frame(raw).dst == NodeId.DRONE and unpack_frame(raw).src == NodeId.CAR for raw in sent))
 
+    def test_task_sent_and_completed_ack_cues_precede_start_even_with_immediate_ack(self):
+        events = []
+        def send(raw):
+            command = decode_command(unpack_frame(raw).payload)
+            events.append('task_write' if command.command_id == CommandId.DRONE_SET_DROP_TASK else 'start_write')
+            self.ack(sender, raw)
+        sender = self.make_sender(send)
+        self.assertTrue(sender.send_task_and_start(self.counts, task_id=42,
+            on_task_sent=lambda: events.append('sent_cue'),
+            on_task_ack=lambda: events.append('ack_cue')))
+        self.assertEqual(events, ['task_write', 'sent_cue', 'ack_cue', 'start_write'])
+
+    def test_retry_cues_once_and_only_completed_matching_ack_confirms(self):
+        sent, cues = [], []
+        def send(raw):
+            sent.append(raw)
+            if len(sent) == 1:
+                self.ack(sender, raw, AckStatus.RECEIVED)
+                self.ack(sender, raw, AckStatus.ACCEPTED)
+                self.ack(sender, raw, src=NodeId.GROUND)
+            else:
+                self.ack(sender, raw)
+        sender = self.make_sender(send)
+        self.assertTrue(sender.send_task_and_start(self.counts, task_id=42,
+            on_task_sent=lambda: cues.append('sent'), on_task_ack=lambda: cues.append('ack')))
+        self.assertEqual(sent[0], sent[1])
+        self.assertEqual(cues, ['sent', 'ack'])
+        self.assertEqual(len(sent), 3)
+
+    def test_rejected_or_missing_task_ack_never_plays_confirmation(self):
+        for status in (None, AckStatus.RECEIVED, AckStatus.ACCEPTED, AckStatus.REJECTED, AckStatus.FAILED):
+            with self.subTest(status=status):
+                sent_cue, ack_cue = Mock(), Mock()
+                def send(raw):
+                    if status is not None:
+                        self.ack(sender, raw, status)
+                sender = self.make_sender(send, retries=0)
+                self.assertFalse(sender.send_task_and_start(self.counts,
+                    on_task_sent=sent_cue, on_task_ack=ack_cue))
+                sent_cue.assert_called_once_with()
+                ack_cue.assert_not_called()
+
+    def test_cue_failure_or_stop_prevents_start(self):
+        for cue_name in ('on_task_sent', 'on_task_ack'):
+            for cancel in (False, True):
+                with self.subTest(cue=cue_name, cancel=cancel):
+                    stop, sent = threading.Event(), []
+                    def send(raw):
+                        sent.append(raw)
+                        self.ack(sender, raw)
+                    def cue():
+                        if cancel:
+                            stop.set()
+                            return True
+                        return False
+                    sender = self.make_sender(send, stop_event=stop)
+                    self.assertFalse(sender.send_task_and_start(self.counts, **{cue_name:cue}))
+                    self.assertEqual(len(sent), 1)
+
+    def test_cue_exception_never_sends_start(self):
+        sent = []
+        def send(raw):
+            sent.append(raw)
+            self.ack(sender, raw)
+        sender = self.make_sender(send)
+        with self.assertRaisesRegex(RuntimeError, 'buzzer failed'):
+            sender.send_task_and_start(self.counts, on_task_ack=Mock(side_effect=RuntimeError('buzzer failed')))
+        self.assertEqual(len(sent), 1)
+
+    def test_rx_callback_can_deliver_ack_while_sent_cue_is_running(self):
+        sent = []
+        def cue():
+            worker = threading.Thread(target=lambda: self.ack(sender, sent[-1]))
+            worker.start()
+            worker.join(.5)
+            self.assertFalse(worker.is_alive(), 'sent cue must not hold the ACK receive lock')
+        def send(raw):
+            sent.append(raw)
+        sender = self.make_sender(send)
+        self.assertTrue(sender.send_task_and_start(self.counts, start_drone=False, on_task_sent=cue))
+
     def test_no_start_after_missing_received_only_or_rejected_task_ack(self):
         for status in (None, AckStatus.RECEIVED, AckStatus.ACCEPTED, AckStatus.REJECTED, AckStatus.FAILED):
             with self.subTest(status=status):
