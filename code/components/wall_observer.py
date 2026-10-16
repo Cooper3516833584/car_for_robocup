@@ -186,12 +186,20 @@ def fit_line_tls(points: Sequence[tuple[float, float]]):
         syy += dy * dy
     trace = sxx + syy
     if trace <= 1e-12:
+        # Every point is at the same place: no direction exists at all.
         return None
     root = math.sqrt(max(0.0, (sxx - syy) ** 2 + 4.0 * sxy * sxy))
     small = 0.5 * (trace - root)
     large = 0.5 * (trace + root)
-    if large <= 1e-12 or small / large < 1e-9:
+    if large <= 1e-12:
         return None
+    # Only a genuinely coincident set is degenerate. Requiring a minimum
+    # *eigenvalue ratio* instead would reject exactly collinear points, whose
+    # perpendicular spread is legitimately zero -- and a perfect line is the
+    # least ambiguous wall there is. The caller's RMS and span gates judge
+    # quality; this function only has to return a well-defined direction.
+    if small <= 0.0:
+        small = 0.0
     # The eigenvector of the SMALL eigenvalue is the normal direction.
     if abs(sxy) > 1e-12:
         normal = (small - syy, sxy)
@@ -394,9 +402,20 @@ def select_candidate(lines: Sequence[WallLine], bearing_rad: float, *,
 class WallTracker:
     """Keeps one reference wall across frames instead of hopping structures.
 
+    Two different distances matter here and must never be mixed:
+
+    * ``reference_rho_m`` is the distance at which this physical wall was first
+      identified. It is the wall's *identity*, and control targets such as
+      ``d0 + 0.43`` must never be written into it.
+    * ``last_rho_m`` is the most recent *measured* distance of that same wall.
+      It, not the control target, is what the next frame's association is
+      centred on. Centring association on a target the chassis is driving toward
+      makes the tracker accept a different parallel structure that happens to sit
+      at the target distance, which then reads as "already arrived".
+
     ``track()`` never re-picks a different body-relative sector; it follows the
-    stored bearing (rotated by the measured body motion between snapshots) and
-    only re-seeds with a wide gate when the narrow continuity gate fails.
+    stored bearing and only re-seeds with a wide gate when the narrow continuity
+    gate fails.
     """
 
     def __init__(self, *, angle_gate_rad: float = TRACK_ANGLE_GATE_RAD,
@@ -410,6 +429,7 @@ class WallTracker:
         self.wall: WallLine | None = None
         self.reference_bearing_rad: float | None = None
         self.reference_rho_m: float | None = None
+        self.last_rho_m: float | None = None
         self.inlier_count = 0
 
     def set_reference(self, wall: WallLine) -> WallLine:
@@ -417,6 +437,7 @@ class WallTracker:
         self.wall = wall
         self.reference_bearing_rad = wall.bearing_rad
         self.reference_rho_m = wall.rho_base_m
+        self.last_rho_m = wall.rho_base_m
         self.inlier_count = 0
         return wall
 
@@ -424,6 +445,7 @@ class WallTracker:
         self.wall = None
         self.reference_bearing_rad = None
         self.reference_rho_m = None
+        self.last_rho_m = None
         self.inlier_count = 0
 
     def track(self, lines: Sequence[WallLine], *, expected_bearing_rad: float,
@@ -433,8 +455,10 @@ class WallTracker:
 
         ``expected_bearing_rad`` is where the *reference* wall should now be in
         the body frame, normally the stored bearing plus the measured body
-        rotation. A missing result means the caller must hold zero speed, never
-        that it should integrate a command into a virtual angle.
+        rotation. ``expected_distance_m`` should be that wall's most recent
+        measured distance (or a prediction of it), never a control target. A
+        missing result means the caller must hold zero speed, never that it
+        should integrate a command into a virtual angle.
         """
         if not math.isfinite(expected_bearing_rad):
             raise ValueError("expected bearing must be finite")
@@ -453,7 +477,13 @@ class WallTracker:
                 distance_gate_m=self.seed_distance_gate_m)
         if narrow is None:
             return None
-        return self.set_reference(narrow)
+        # Continue the *same* reference: advance its measured distance and
+        # bearing, but keep reference_rho_m as the identity distance recorded
+        # when this wall was first locked.
+        self.wall = narrow
+        self.reference_bearing_rad = narrow.bearing_rad
+        self.last_rho_m = narrow.rho_base_m
+        return narrow
 
 
 def supported_corner(right: WallLine, terminal: WallLine, *, rear: bool = False,

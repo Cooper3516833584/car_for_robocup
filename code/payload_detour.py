@@ -206,8 +206,10 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                 if released is False:
                     raise RuntimeError('payload PWM command failed: returned False')
                 commanded.append(slot)
-                # Book the ledger before the hold and the return: an IO failure
-                # later must never turn an opened slot back into pending.
+                # Book the ledger *now*, before the hold and before the turn back
+                # to the road: the slot is open from this instant, so a later
+                # failure must not put it back into pending and let the same
+                # colour be serviced twice.
                 if on_release is not None:
                     on_release(slot)
             hold(settings.release_hold_s)

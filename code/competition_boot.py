@@ -255,7 +255,11 @@ class CompetitionBoot:
                 return
 
             kwargs = dict(stop_event=stop, on_runtime_ready=self._runtime_ready,
-                          stop_file_baseline=stop_file_baseline)
+                          stop_file_baseline=stop_file_baseline,
+                          # The whole round shares one deadline, measured from the
+                          # moment RUN was accepted, so the countdown and the beep
+                          # cannot extend the operator's time budget.
+                          run_started_at_s=t0)
             if self._simulate_payload:
                 kwargs['simulate_payload'] = True
             # car_only_test no longer changes the task semantics; the whole
@@ -286,10 +290,25 @@ class CompetitionBoot:
             self._stop_runtime(runtime)
 
     def _stop_runtime(self, runtime):
-        if runtime is not None:
-            self._attempt('base stop', runtime.drive.stop)
-            self._attempt('motion stop', runtime.motion.stop)
-            self._attempt('mission safe stop', lambda: runtime.mission.request_safe_stop('remote STOP'))
+        """Stop through the interface the runtime actually has.
+
+        The competition runtime is a ``WallRuntime``: it has no ``motion``
+        attribute, and the interface that actually prevents a stale control tick
+        from re-energising the motors is ``request_stop()``, which latches
+        irreversibly under the command lock, cancels the action and zeroes the
+        drive. The legacy fused runtime keeps its own branch so a diagnostic
+        tool cannot be broken by this change.
+        """
+        if runtime is None:
+            return
+        if hasattr(runtime, "request_stop"):
+            self._attempt("wall runtime stop",
+                          lambda: runtime.request_stop("remote STOP"))
+            return
+        self._attempt('base stop', runtime.drive.stop)
+        self._attempt('motion stop', lambda: runtime.motion.stop())
+        self._attempt('mission safe stop',
+                      lambda: runtime.mission.request_safe_stop('remote STOP'))
 
     def _cancel_current(self):
         with self._state_lock:

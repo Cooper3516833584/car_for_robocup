@@ -325,12 +325,23 @@ class BootTests(unittest.TestCase):
                 release.set()
                 self.listener._worker.join(1)
 
-    def test_active_runtime_stop_preserves_base_stop_and_safe_stop(self):
-        runtime=Mock()
-        self.listener._runtime=runtime
-        self.listener._stop_event=threading.Event()
+    def test_stop_on_a_wall_runtime_calls_the_stop_latch(self):
+        # The competition runtime has no ``motion`` attribute at all; touching it
+        # would raise before the latch was ever set.
+        runtime = Mock(spec=['drive', 'mission', 'request_stop'])
+        self.listener._runtime = runtime
+        self.listener._stop_event = threading.Event()
         self.listener._cancel_current()
+        runtime.request_stop.assert_called_once_with('remote STOP')
         self.assertTrue(self.listener._stop_event.is_set())
+
+    def test_stop_on_a_legacy_fused_runtime_keeps_its_own_branch(self):
+        # A diagnostic tool built on the old runtime must not be broken by the
+        # wall-runtime change.
+        runtime = Mock(spec=['drive', 'motion', 'mission'])
+        self.listener._runtime = runtime
+        self.listener._stop_event = threading.Event()
+        self.listener._cancel_current()
         runtime.drive.stop.assert_called_once()
         runtime.motion.stop.assert_called_once()
         runtime.mission.request_safe_stop.assert_called_once_with('remote STOP')

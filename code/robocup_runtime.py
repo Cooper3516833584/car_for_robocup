@@ -1456,7 +1456,8 @@ class WallRuntime:
         errors = []
         for name, cleanup in (("drive_stop", self.drive.stop),
                               ("observer_close", lambda: self.observer.close(timeout_s=timeout_s)),
-                              ("drive_close", self.drive.close)):
+                              ("drive_close", self.drive.close),
+                              ("logger_close", self._close_logger)):
             try:
                 cleanup()
             except Exception as exc:
@@ -1467,25 +1468,28 @@ class WallRuntime:
         if errors:
             self.record_event("wall_runtime_cleanup_failed", errors=errors)
 
+    def _close_logger(self) -> None:
+        """Drain and close the async event log; it owns its own writer thread."""
+        if self.event_logger is not None and hasattr(self.event_logger, "close"):
+            self.event_logger.close()
+
     # ---- control ---------------------------------------------------------
     def step(self) -> WallStep:
         now_s = float(self.clock())
         if self._stop_latched:
-            return WallStep(now_s, self.observer.latest(), "stopped", Twist2D(0.0, 0.0),
-                            "stopped", error=self._stop_reason)
+            return self._idle_step(now_s, "stopped", self._stop_reason)
         if self.mission.state in {RobocupMissionState.SAFE_STOP, RobocupMissionState.ERROR}:
-            return WallStep(now_s, self.observer.latest(), "stopped", Twist2D(0.0, 0.0),
-                            self.mission.state.value, error=self.mission.last_error)
+            return self._idle_step(now_s, "stopped", self.mission.last_error)
         snapshot = self.observer.latest()
         action = self.action
         if action is None:
-            return WallStep(now_s, snapshot, "idle", Twist2D(0.0, 0.0), "idle")
+            return self._idle_step(now_s, "idle", None)
         try:
             outcome = action.step(snapshot, now_s=now_s)
         except Exception as exc:
             self.mission.request_error(str(exc))
             self.request_stop(f"wall action failed: {exc}")
-            return WallStep(now_s, snapshot, "error", Twist2D(0.0, 0.0), "error", error=str(exc))
+            return self._idle_step(now_s, "error", str(exc))
         command = outcome.command
         fields = {key: value for key, value in outcome.fields.items()
                   if key not in {"command", "right_wall_normal"}}
@@ -1503,6 +1507,17 @@ class WallRuntime:
             state = "running"
         return WallStep(now_s, snapshot, self.mission.phase, command, state,
                         limited_command=limited, error=None)
+
+    def _idle_step(self, now_s: float, phase: str, error: str | None) -> WallStep:
+        """A tick with no action: go through the same zero-output gate.
+
+        The idle, stopped and error branches must not bypass the single output
+        gate, or a earlier non-zero command could stay latched in the drive while
+        the runtime reports that it is doing nothing.
+        """
+        self._send(Twist2D(0.0, 0.0), now_s)
+        return WallStep(now_s, self.observer.latest(), phase, Twist2D(0.0, 0.0), phase,
+                        limited_command=Twist2D(0.0, 0.0), error=error)
 
     def _send(self, command: Twist2D, now_s: float) -> Twist2D | None:
         """Single output gate. Re-checks the stop latch inside the lock."""

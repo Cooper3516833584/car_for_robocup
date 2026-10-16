@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yellow-model", type=Path, help="existing car YOLO weights path")
     parser.add_argument("--speed-scale", type=float, default=1,
                         help="shared motion speed multiplier; use 2 for the validated faster profile")
-    parser.add_argument("--max-seconds", type=float, default=300,
+    parser.add_argument("--max-seconds", type=float, default=COMPETITION_MAX_SECONDS,
                         help="competition motion task time limit, including nested search and detour")
     return parser
 
@@ -140,7 +140,7 @@ def stop_marker_signature(path: Path):
 
 def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None,
          on_runtime_ready=None, car_only_test=False, simulate_payload=False,
-         stop_file_baseline=None) -> int:
+         stop_file_baseline=None, run_started_at_s=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.log_dir)
     competition_enabled = args.competition or args.competition_stage is not None
@@ -259,7 +259,11 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                                  lookahead_base_m=config.navigation.lookahead_m,
                                  lookahead_max_extension_m=config.navigation.lookahead_max_extension_m,
                                  actuator="dual_servo")
-            deadline = runtime.clock() + args.max_seconds
+            # One shared deadline. When the listener accepted RUN it recorded
+            # that instant and passes it in, so the 20 s preparation and the 5 s
+            # beep are inside the budget instead of being added on top of it.
+            deadline = ((float(run_started_at_s) if run_started_at_s is not None
+                         else runtime.clock()) + args.max_seconds)
             stop_file = Path(args.log_dir or "logs/competition") / "STOP"
 
             def guard():

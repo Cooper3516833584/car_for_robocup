@@ -163,7 +163,10 @@ STAGES = ("full", "lane", "task-board", "hc-send", "corner1", "cross-lane",
 # Stage names of the wall chain; the fused diagnostic stages above remain
 # individually callable but are not part of any competition run.
 WALL_STAGES = ("wall-observe", "wall-leg", "wall-turn", "drop-standard", "drop-right",
-               "top-return")
+               "top-return", "finish")
+# How long the mission may hold zero waiting for the vision worker's first real
+# frame before calling it a failure.
+VISION_READY_TIMEOUT_S = 20.0
 WALL_MOTION_STAGES = ("wall-leg", "wall-turn", "drop-standard", "drop-right", "top-return")
 
 
@@ -982,11 +985,14 @@ class WallRouteLeg:
     name: str
     target_right_m: float
     direction: int
-    terminal_role: object | None      # predicate over WallLine, None for the search leg
+    terminal_role: object | None      # predicate over WallLine, None for no terminal
     terminal_target_m: float | None
     terminal_is_rear: bool
     terminal_name: str
     vision_active: bool
+    # The top-edge search stops as soon as its last pending target is released,
+    # rather than continuing left until the terminal wall.
+    must_finish_on_pending_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -999,15 +1005,20 @@ class MissionResult:
     pending_slots: tuple = ()
     simulated: bool = False
     reason: str = ""
+    simulated_slots: tuple = ()
+    attempted_slots: tuple = ()
 
 
 def build_wall_route(mount_x_m, mount_y_m):
-    """The four wall legs, with every distance converted once from the field set."""
+    """The four wall legs, with every distance converted once from the field set.
+
+    Every leg ends on a real front wall, including the top-edge search: with the
+    nose pointing left along the top edge, the map's left perimeter wall is
+    *ahead* of the chassis, so it is the same front-wall terminal as the other
+    legs. It must not be looked for as a body-left wall, which is a different
+    piece of geometry.
+    """
     desired = tuple(desired_right_base(index, mount_y_m) for index in range(4))
-    # After three left-hand corner turns the car is on the top edge with the
-    # right wall behind it; the left perimeter wall stands in for the remaining
-    # distance, and it is the only real observation that can end the search.
-    left_terminal = desired[0]
     legs = (
         WallRouteLeg(0, "left", desired[0], +1, is_front_wall, desired[1], False,
                      "front_wall", True),
@@ -1015,8 +1026,9 @@ def build_wall_route(mount_x_m, mount_y_m):
                      "front_wall", True),
         WallRouteLeg(2, "right", desired[2], +1, is_front_wall, desired[3], False,
                      "front_wall", True),
-        WallRouteLeg(3, "top_search", desired[3], +1, None, left_terminal, False,
-                     "left_wall", True),
+        WallRouteLeg(3, "top_search", desired[3], +1, is_front_wall, desired[0], False,
+                     "front_left_perimeter_wall", True,
+                     must_finish_on_pending_empty=True),
     )
     return legs, desired
 
@@ -1079,8 +1091,38 @@ def _reacquire_right_wall(runtime, tracker, target_right_m, *, phase):
     return seeded
 
 
-def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches,
-                    limits, simulate_release=False, on_release=None):
+def _wait_for_vision_ready(runtime, vision, *, timeout_s: float = VISION_READY_TIMEOUT_S):
+    """Hold zero until the vision worker has produced one real result.
+
+    ``YoloVision.start()`` only starts a thread: the first frame is still being
+    inferred (and the model deliberately drops an initial frame), so entering the
+    first leg immediately would make a normal warm-up look like "inference
+    unavailable or stale" and could even let one cruise command reach the motors
+    before the camera was usable.
+    """
+    started = float(runtime.clock())
+    runtime.record_event("competition_vision_wait", timeout_s=timeout_s)
+    while True:
+        try:
+            stamp, _colors = vision.observe_colours(runtime.clock())
+        except Exception as exc:
+            # A real inference failure is not "not ready yet": fail loudly.
+            if "unavailable or stale" not in str(exc) and "not ready" not in str(exc):
+                raise
+            stamp = None
+        if stamp is not None:
+            runtime.record_event("competition_vision_ready", waited_s=float(runtime.clock()) - started)
+            return stamp
+        if float(runtime.clock()) - started > timeout_s:
+            raise RuntimeError("competition vision did not produce a usable frame")
+        runtime.drive.stop()
+        runtime.action = None
+        _wall_step(runtime)
+        time.sleep(CONTROL_DT_S)
+
+
+def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches, limits,
+                    command_ledger, simulate_release=False, on_release=None):
     """One wall leg: visual triggering, terminal stop, then the corner turn.
 
     Returns ``(completed, exhausted)``. ``completed`` means the leg reached its
@@ -1093,34 +1135,43 @@ def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches,
     runtime.record_event("competition_route_leg_start", leg=leg.index + 1, leg_name=leg.name,
                          target_base_right_m=leg.target_right_m, direction=leg.direction,
                          terminal=leg.terminal_name, feedback_source="wall_scan")
-    follow = FollowRightWall(target_distance_m=leg.target_right_m, direction=leg.direction,
-                             limits=limits, tracker=tracker,
-                             terminal_role=leg.terminal_role,
-                             terminal_target_m=leg.terminal_target_m,
-                             terminal_tolerance_m=CORNER_TOLERANCE_M,
-                             clock=runtime.clock)
+    follow = _make_leg_follow(leg, tracker, limits, runtime)
     runtime.action = follow
     not_before = float(runtime.clock())
     last_stamp = None
     completed = False
     exhausted = False
     triggered = None
+    terminal_wall = None
     try:
         while True:
+            # Requirement order matters: guard and wall/vision are read first, the
+            # visible slow-down is applied, and only then is this tick's command
+            # computed and sent. The command must never go out at cruise speed
+            # and be corrected afterwards.
             _wall_step(runtime)
             snapshot = runtime.observer.latest()
             fresh = snapshot is not None and snapshot.is_fresh(float(runtime.clock()))
-            # 1. A centred, still-pending target stops the leg and runs the drop.
             if leg.vision_active and pending and vision is not None and fresh:
                 stamp, colored = vision.observe_colours(runtime.clock())
                 if stamp is not None and stamp > not_before and stamp != last_stamp:
                     last_stamp = stamp
                     width, height = vision.frame_size
-                    triggered = _select_centered(colored, pending, latches, width, height,
-                                                 visible_target, horizontal_target)
+                    centered, visible = _select_centered(
+                        colored, _eligible(pending, leg), latches, width, height,
+                        visible_target, horizontal_target)
+                    # A visible, still-unfinished target on this leg slows the leg
+                    # down. The cap is the same cruising profile the fused chain
+                    # used; it is a min() against the terminal braking cap, so it
+                    # can never make the approach faster.
+                    follow.speed_cap_m_s = (limits.vision_speed_m_s if visible
+                                            else None)
+                    if centered is not None:
+                        triggered = centered
             if triggered is not None:
                 color, box, slots = triggered
                 triggered = None
+                follow.speed_cap_m_s = None
                 runtime.action = None
                 runtime.drive.stop()
                 runtime.record_event("competition_target_centered", color=color,
@@ -1139,56 +1190,95 @@ def patrol_wall_leg(runtime, leg, tracker, *, pending, vision, latches,
                                      detour_completed=dropped is not None,
                                      feedback_source="wall_scan")
                 if dropped is not None:
-                    # The return restores the road heading, but the wall the leg
-                    # follows may have moved in the body frame: re-acquire the
-                    # right wall from the newest scan before resuming.
-                    runtime.action = follow
+                    # Book the slot out of pending here, so the same colour never
+                    # triggers a second detour just because it left the frame and
+                    # came back.
+                    _mark_dropped(pending, command_ledger, color, slots,
+                                  simulated=simulate_release)
                     _reacquire_right_wall(runtime, tracker, leg.target_right_m,
                                           phase=runtime.mission.phase)
+                    # A detour finished the old Follow. Reusing it would carry its
+                    # already-done outcome into the next corner decision, so the
+                    # leg continues with a fresh action that must re-measure the
+                    # corner from new scans.
+                    follow = _make_leg_follow(leg, tracker, limits, runtime)
+                    runtime.action = follow
                     not_before = float(runtime.clock())
                     last_stamp = None
                     latches[color].require_clear()
-            # 2. The terminal reference: a corner stop for legs 1..3, or the left
-            #    perimeter wall ending the top-edge search for leg 4.
-            terminal_reached = follow.outcome is not None and follow.outcome.done
-            if leg.terminal_role is None and fresh:
-                left = [line for line in snapshot.lines if line.normal_xy[1] >= 0.5]
-                if left:
-                    nearest = min(line.rho_base_m for line in left)
-                    if nearest - leg.terminal_target_m <= CORNER_TOLERANCE_M:
-                        runtime.record_event("top_search_exhausted", measured_base_m=nearest,
-                                             target_base_m=leg.terminal_target_m,
-                                             pending_colors=tuple(sorted(pending)))
-                        if pending:
-                            exhausted = True
+                    if leg.must_finish_on_pending_empty and not any(pending.values()):
                         completed = True
-            if terminal_reached:
+                        exhausted = False
+                        runtime.record_event("top_search_finished_early", leg=leg.index + 1,
+                                             pending_colors=())
+            # A terminal is only ever the wall the action actually measured.
+            if follow.terminal_wall is not None:
+                terminal_wall = follow.terminal_wall
+            if follow.outcome is not None and follow.outcome.done:
                 completed = True
+                if pending:
+                    exhausted = True
+                    runtime.record_event("top_search_exhausted",
+                                         measured_base_m=follow.outcome.fields.get(
+                                             "terminal_measured_m"),
+                                         target_base_m=leg.terminal_target_m,
+                                         pending_colors=tuple(sorted(pending)))
             if completed:
                 runtime.action = None
                 runtime.drive.stop()
-                follow.begin(float(runtime.clock()))
                 break
             if follow.finished and follow.outcome is not None and not follow.outcome.done:
-                raise RuntimeError(f"leg {leg.index + 1}: right wall was not usable "
+                raise RuntimeError(f"leg {leg.index + 1}: wall control failed "
                                    f"({follow.outcome.reason})")
             time.sleep(CONTROL_DT_S)
     finally:
         runtime.action = None
     runtime.record_event("competition_route_leg_done", leg=leg.index + 1, leg_name=leg.name,
                          completed=completed, exhausted=exhausted,
-                         top_search_exhausted=exhausted)
-    return completed, exhausted
+                         top_search_exhausted=exhausted,
+                         terminal_wall_rho_m=(None if terminal_wall is None
+                                              else terminal_wall.rho_base_m))
+    return completed, exhausted, terminal_wall
+
+
+def _make_leg_follow(leg, tracker, limits, runtime):
+    """A fresh leg action, so no previous done/terminal state is reused."""
+    return FollowRightWall(target_distance_m=leg.target_right_m, direction=leg.direction,
+                           limits=limits, tracker=tracker,
+                           terminal_role=leg.terminal_role,
+                           terminal_target_m=leg.terminal_target_m,
+                           terminal_tolerance_m=CORNER_TOLERANCE_M,
+                           clock=runtime.clock)
+
+
+def _eligible(pending, leg):
+    """The colours this leg may act on: yellow only on its mandated leg."""
+    if leg.index in YELLOW_SEARCH_LEGS:
+        return dict(pending)
+    return {color: slots for color, slots in pending.items() if color != "yellow"}
+
+
+def _mark_dropped(pending, ledger, color, slots, *, simulated):
+    """Remove the released slots from pending and record them in the ledger."""
+    remaining = tuple(slot for slot in pending.get(color, ()) if slot not in slots)
+    if remaining:
+        pending[color] = remaining
+    else:
+        pending.pop(color, None)
+    ledger.record(color, slots, simulated=simulated)
 
 
 def _select_centered(colored, pending, latches, width, height, visible_target,
                      horizontal_target):
-    """Deterministic pick of the centred, latched, still-pending target.
+    """Pick the centred, latched, still-pending target, plus whether any is visible.
 
     Ordering is nearest to horizontal centre, then colour name. A candidate only
-    consumes its latch when the caller actually accepts the drop.
+    consumes its latch when the caller actually accepts the drop. The second
+    return value reports a visible but not-yet-centred target, which is what the
+    caller uses to slow the leg down.
     """
     candidates = []
+    any_visible = False
     for color in sorted(pending):
         slots = pending[color]
         boxes = sorted((box for name, box in colored if name == color),
@@ -1197,22 +1287,66 @@ def _select_centered(colored, pending, latches, width, height, visible_target,
         middle = horizontal_target(boxes, width, YELLOW_MIN_CONF,
                                    center_width_ratio=2 * YELLOW_CX_TOL_PX / CAMERA_WIDTH)
         latches[color].update(visible, trigger=False)
+        if visible is not None:
+            any_visible = True
         if middle is not None and latches[color].armed:
             candidates.append((abs((middle[0] + middle[2]) / 2 - width / 2), color, middle, slots))
     if not candidates:
-        return None
+        return None, any_visible
     _, color, box, slots = min(candidates, key=lambda item: (item[0], item[1]))
-    return color, box, slots
+    return (color, box, slots), any_visible
 
 
-def turn_left_at_corner(runtime, tracker, leg, limits):
-    """Left turn so the wall just in front becomes the right wall of the next leg."""
-    wall = tracker.wall
-    if wall is None:
-        raise RuntimeError(f"leg {leg.index + 1}: no reference wall to turn on")
+class PayloadLedger:
+    """One run-wide release ledger, shared by every detour.
+
+    ``pending`` is derived from the plan minus what has been commanded here, so
+    an opened slot can never re-enter pending and a detour that failed after the
+    first of two releases keeps the first one recorded.
+    """
+
+    def __init__(self):
+        self.attempted: list = []
+        self.commanded: list = []
+        self.simulated: list = []
+
+    def record(self, color, slots, *, simulated=False):
+        for slot in slots:
+            if slot not in self.attempted:
+                self.attempted.append(slot)
+            if simulated:
+                if slot not in self.simulated:
+                    self.simulated.append(slot)
+            elif slot not in self.commanded:
+                self.commanded.append(slot)
+        LOG.info("payload ledger: color=%s slots=%s simulated=%s commanded=%s",
+                 color, slots, sorted(self.simulated), sorted(self.commanded))
+
+    @property
+    def commanded_slots(self):
+        return tuple(self.commanded)
+
+    @property
+    def handled_slots(self):
+        return tuple(self.commanded + self.simulated)
+
+
+def turn_left_at_corner(runtime, tracker, leg, limits, terminal_wall):
+    """Left turn so the wall just in front becomes the right wall of the next leg.
+
+    The reference is the terminal wall the leg actually measured -- not
+    ``tracker.wall``, which at the end of a leg is still the *old* road wall.
+    With the old wall the bearing would already equal the target and the turn
+    would compute a zero angle.
+    """
+    if terminal_wall is None:
+        raise RuntimeError(f"leg {leg.index + 1}: no verified terminal wall to turn on")
     runtime.mission.phase = f"corner_{leg.index + 1}"
-    turn = drop_turn(wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits, tracker=tracker,
-                     turn_direction=+1, clock=runtime.clock)
+    # Hand the next leg the wall that was in front: after the turn it is the
+    # right wall, and the tracker must follow that same physical line.
+    tracker.set_reference(terminal_wall)
+    turn = drop_turn(terminal_wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits,
+                     tracker=tracker, turn_direction=+1, clock=runtime.clock)
     outcome = _run_wall_action(runtime, turn, runtime.mission.phase)
     if not outcome.done:
         raise RuntimeError(f"leg {leg.index + 1}: corner turn failed ({outcome.reason})")
@@ -1230,18 +1364,24 @@ def reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits):
     outcome = _run_wall_action(runtime, follow, "top_reverse")
     if not outcome.done:
         raise RuntimeError(f"top reverse did not reach the return corner ({outcome.reason})")
-    return outcome
+    return follow
 
 
-def enter_finish_zone(runtime, tracker, desired, limits):
-    """Right turn to face up, then close the front-wall distance into the H zone."""
+def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
+    """Right turn to face up, then close the front-wall distance into the H zone.
+
+    As at a corner, the reference is the wall the reverse leg just measured. The
+    second element of ``terminal_wall`` is the wall astern, which becomes the
+    right wall once the chassis has turned to face up.
+    """
     target_right = desired[2]
-    wall = tracker.wall
-    if wall is None:
-        raise RuntimeError("finish approach has no reference wall")
+    rear_wall = terminal_wall
+    if rear_wall is None:
+        raise RuntimeError("finish approach has no verified rear wall to turn on")
     runtime.mission.phase = "finish_turn"
-    turn = drop_turn(wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits, tracker=tracker,
-                     turn_direction=-1, clock=runtime.clock)
+    tracker.set_reference(rear_wall)
+    turn = drop_turn(rear_wall.bearing_rad, RIGHT_BEARING_RAD, limits=limits,
+                     tracker=tracker, turn_direction=-1, clock=runtime.clock)
     outcome = _run_wall_action(runtime, turn, "finish_turn")
     if not outcome.done:
         raise RuntimeError(f"final right turn failed ({outcome.reason})")
@@ -1298,7 +1438,6 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                        if payload_log_dir is not None else None)
 
         def record_release(slot):
-            commanded.append(slot)
             if payload_log is None:
                 return
             try:
@@ -1324,6 +1463,9 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         limits = getattr(runtime, "limits", None) or WallActionLimits.from_config(runtime.config)
 
         from target_patrol import YoloVision, EntryLatch
+        # The ledger lives for the whole run and is the single source of truth for
+        # what has actually been released; ``pending`` is derived from it.
+        ledger = PayloadLedger()
         pending = {name: tuple(slots) for name, slots in plan.items()}
         latches = {name: EntryLatch() for name in pending}
         if detector is not None:
@@ -1331,36 +1473,40 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                                 target_region="frame", detector=detector,
                                 drop_center_width_ratio=2 * YELLOW_CX_TOL_PX / CAMERA_WIDTH)
             vision.start()
+            _wait_for_vision_ready(runtime, vision)
 
         tracker = WallTracker()
         exhausted = False
         for index, leg in enumerate(legs):
-            ok, leg_exhausted = patrol_wall_leg(
+            ok, leg_exhausted, terminal_wall = patrol_wall_leg(
                 runtime, leg, tracker, pending=pending, vision=vision, latches=latches,
-                limits=limits, simulate_release=simulate_release, on_release=record_release)
+                limits=limits, command_ledger=ledger,
+                simulate_release=simulate_release, on_release=record_release)
             if not ok:
                 raise RuntimeError(f"leg {index + 1} ({leg.name}) did not complete")
             exhausted = exhausted or leg_exhausted
             if index < len(legs) - 1:
-                turn_left_at_corner(runtime, tracker, leg, limits)
-                # A new leg consumes new observations only.
+                # The turn references the wall this leg actually measured, not
+                # whatever the tracker still holds from earlier in the leg.
+                turn_left_at_corner(runtime, tracker, leg, limits, terminal_wall)
                 runtime.record_event("vision_window_reset", not_before_s=float(runtime.clock()))
         result = MissionResult(route_done=True, parking_done=False,
-                              commanded_release_slots=tuple(commanded),
+                              commanded_release_slots=ledger.commanded_slots,
                               pending_slots=tuple(slot for slots in pending.values()
                                                   for slot in slots),
                               simulated=simulate_release,
+                              simulated_slots=tuple(ledger.simulated),
+                              attempted_slots=tuple(ledger.attempted),
                               reason="top_search_exhausted" if exhausted else "")
 
-        # Nothing left to search: skip the meaningless extra left-hand search run
-        # and go straight to the return/finish sequence from the same position.
-        reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits)
-        parking_done = enter_finish_zone(runtime, tracker, desired, limits)
+        # The reverse leg reports the rear wall it measured; the final right turn
+        # and the H-zone approach both reference that same wall.
+        reverse_follow = reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits)
+        parking_done = enter_finish_zone(runtime, tracker, desired, limits,
+                                         reverse_follow.terminal_wall)
         result = replace(result, parking_done=parking_done,
                          reason=result.reason if parking_done else "finish_parameter_missing")
         for target_color, slots in pending.items():
-            if any(slot in commanded for slot in slots):
-                continue
             runtime.record_event("payload_drop", actuator="payload_servo",
                                  cargo_count=len(slots), slot=slots[0], slots=slots,
                                  color=target_color, success=False, skipped=True,
@@ -1596,21 +1742,33 @@ def run_wall_stage(runtime, stage, *, leg=None, camera=None, detector=None,
         runtime.record_event("wall_stage_leg", leg=leg, leg_name=target.name,
                              target_base_right_m=target.target_right_m,
                              terminal_target_base_m=target.terminal_target_m)
-        ok, _ = patrol_wall_leg(runtime, target, tracker, pending={}, vision=None,
-                                latches={}, limits=limits,
-                                simulate_release=simulate_release, on_release=None)
+        ledger = PayloadLedger()
+        ok, _exhausted, _terminal = patrol_wall_leg(
+            runtime, target, tracker, pending={}, vision=None, latches={}, limits=limits,
+            command_ledger=ledger, simulate_release=simulate_release, on_release=None)
         return ok
     if stage == "wall-turn":
+        # A corner turn needs the wall that leg just measured, so this stage runs
+        # that leg first instead of turning on an empty tracker.
         target = legs[leg - 1]
         tracker = WallTracker()
-        outcome = turn_left_at_corner(runtime, tracker, target, limits)
+        ledger = PayloadLedger()
+        ok, _exhausted, terminal_wall = patrol_wall_leg(
+            runtime, target, tracker, pending={}, vision=None, latches={}, limits=limits,
+            command_ledger=ledger, simulate_release=simulate_release, on_release=None)
+        if not ok:
+            return False
+        outcome = turn_left_at_corner(runtime, tracker, target, limits, terminal_wall)
         return outcome.done
     if stage == "top-return":
         tracker = WallTracker()
         return reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits).done
     if stage == "finish":
+        # The H-zone approach references the wall the reverse leg measured, so the
+        # reverse is part of this stage rather than assumed to have happened.
         tracker = WallTracker()
-        return enter_finish_zone(runtime, tracker, desired, limits)
+        reverse = reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits)
+        return enter_finish_zone(runtime, tracker, desired, limits, reverse.terminal_wall)
     if stage in {"drop-standard", "drop-right"}:
         behavior = "standard" if stage == "drop-standard" else "right_mount"
         slots = (0,) if behavior == "standard" else (RIGHT_MOUNT_SLOT,)

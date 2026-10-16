@@ -119,8 +119,11 @@ class FieldParameterTests(unittest.TestCase):
         self.assertEqual([leg.direction for leg in legs], [1, 1, 1, 1])
         self.assertEqual([leg.target_right_m for leg in legs], [1.600, 1.895, 1.690, 2.330])
         # Three legs stop on the front wall; the top leg ends on the left wall.
+        # Including the top edge: with the nose left, the map's left perimeter
+        # wall is ahead of the chassis, so it is a front-wall terminal.
         self.assertEqual([leg.terminal_name for leg in legs],
-                         ["front_wall", "front_wall", "front_wall", "left_wall"])
+                         ["front_wall", "front_wall", "front_wall",
+                          "front_left_perimeter_wall"])
         self.assertEqual(desired[0], 1.600)
 
 
@@ -252,13 +255,14 @@ class WallRouteTests(unittest.TestCase):
         # The first three legs turn left at a front-wall corner; only the finish
         # entry turns right. The top edge never turns around.
         self.assertEqual([leg.terminal_name for leg in legs[:3]], ["front_wall"] * 3)
-        self.assertIsNone(legs[3].terminal_role)
+        self.assertIsNotNone(legs[3].terminal_role)
 
     def test_r07_the_top_leg_reverses_with_the_nose_unchanged(self):
         legs, desired = self.route_legs()
         top = legs[3]
         self.assertEqual(top.target_right_m, 2.330)
         self.assertEqual(top.direction, +1)  # the search itself still goes left
+        self.assertTrue(top.must_finish_on_pending_empty)
         # The return reverses: constructed by the reverse helper, not by the leg.
         from components.wall_navigation import FollowRightWall, WallTracker, is_rear_wall
         action = FollowRightWall(target_distance_m=desired[3], direction=-1,
@@ -324,8 +328,9 @@ class CentredTargetTests(unittest.TestCase):
 
     def pick(self, colored, pending, latches, width, height):
         from target_patrol import horizontal_target, visible_target
-        return task._select_centered(colored, pending, latches, width, height,
-                                     visible_target, horizontal_target)
+        centered, _visible = task._select_centered(colored, pending, latches, width, height,
+                                                   visible_target, horizontal_target)
+        return centered
 
     def test_p05_only_the_horizontal_middle_ten_percent_triggers(self):
         latches = self.latches('yellow')
@@ -389,10 +394,26 @@ class CentredTargetTests(unittest.TestCase):
         self.assertTrue(latches['yellow'].armed)
 
     def test_a_colour_with_no_pending_slots_is_never_chosen(self):
+        from target_patrol import horizontal_target, visible_target
         latches = self.latches('yellow')
         pending = {'yellow': (4,)}
         colored = (('red', (300.0, 0.0, 340.0, 40.0, 0.95, 2)),)
-        self.assertIsNone(self.pick(colored, pending, latches, 640, 480))
+        centered, visible = task._select_centered(colored, pending, latches, 640, 480,
+                                                  visible_target, horizontal_target)
+        self.assertIsNone(centered)
+        # A colour with no pending slot is not "visible" for slowdown either.
+        self.assertFalse(visible)
+
+    def test_a_visible_but_off_centre_target_only_reports_visibility(self):
+        from target_patrol import horizontal_target, visible_target
+        latches = self.latches('yellow')
+        pending = {'yellow': (4,)}
+        # Horizontally off-centre but well inside the frame: slowdown, no drop.
+        colored = (('yellow', (520.0, 0.0, 600.0, 40.0, 0.95, 1)),)
+        centered, visible = task._select_centered(colored, pending, latches, 640, 480,
+                                                  visible_target, horizontal_target)
+        self.assertIsNone(centered)
+        self.assertTrue(visible)
 
 
 # ---------------------------------------------------------------------------

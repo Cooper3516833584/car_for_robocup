@@ -119,6 +119,13 @@ def snapshot_of(*lines, seq=1, observed=1.0):
                         lines=tuple(lines), point_count=60)
 
 
+def wall(normal, rho, start, end):
+    """A wall line with explicit support endpoints, for corner geometry."""
+    return WallLine(normal_xy=normal, rho_base_m=rho, support_start_xy=start,
+                    support_end_xy=end, inlier_count=30,
+                    span_m=math.dist(start, end), rms_m=0.01)
+
+
 class PurePursuitSignTests(unittest.TestCase):
     def test_c06_a_forward_error_away_from_the_wall_steers_toward_it(self):
         # Right wall normal (0,-1); rho bigger than target means too far out.
@@ -383,18 +390,110 @@ class ActionStateMachineTests(unittest.TestCase):
         return LIMITS
 
     def test_a_follow_action_reports_a_corner_once_and_zero_speed(self):
+        # A real corner: the right wall and the front wall meet at (1.9, -1.6),
+        # so both observed supports reach the crossing point. Two walls that
+        # merely cross far from their supports are not a verified corner.
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
                                  terminal_role=is_front_wall, terminal_target_m=1.9,
                                  tracker=WallTracker())
-        right = make_wall(-math.pi / 2, 1.6)
-        front = make_wall(0.0, 1.9)
+        right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
+        front = wall((1.0, 0.0), 1.9, (1.9, 0.0), (-1.1, 0.0))
         outcome = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
         self.assertTrue(outcome.done)
         self.assertEqual(outcome.reason, "terminal_reached")
         self.assertEqual(outcome.command.linear_x_m_s, 0.0)
+        # The verified terminal is exposed for the mission layer's corner turn.
+        self.assertIsNotNone(action.terminal_wall)
+        self.assertAlmostEqual(action.terminal_wall.rho_base_m, 1.9, places=6)
         # Once per leg: a second call keeps returning the same finished outcome.
         self.assertTrue(action.step(snapshot_of(right, front, observed=1.08),
                                     now_s=1.1).done)
+
+    def test_a_wide_l_corner_is_a_terminal(self):
+        # Both lines cross near the origin, but neither support reaches the
+        # crossing, so this must not be accepted as the end of the leg.
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.9,
+                                 tracker=WallTracker())
+        right = wall((0.0, -1.0), 1.6, (0.0, -2.0), (0.0, 2.0))
+        front = wall((1.0, 0.0), 1.9, (-2.0, 0.0), (2.0, 0.0))
+        outcome = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
+        self.assertTrue(outcome.done)
+
+    def test_a_crossing_wall_far_outside_both_supports_is_not_a_terminal(self):
+        # The two infinite lines cross, but the crossing is a metre outside both
+        # observed supports. A small bounded extrapolation is tolerated because a
+        # real wall may stop just short of the corner; a metre is not.
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.9,
+                                 tracker=WallTracker())
+        right = wall((0.0, -1.0), 1.6, (0.0, -0.3), (0.0, 0.3))
+        front = wall((1.0, 0.0), 1.9, (-0.3, 0.0), (0.3, 0.0))
+        outcome = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
+        self.assertFalse(outcome.done)
+        self.assertFalse(outcome.fields.get("terminal_visible"))
+        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+        self.assertIsNone(action.terminal_wall)
+
+    def test_a_short_obstacle_ahead_is_not_a_terminal_wall(self):
+        # A short pillar ahead of the chassis looks like a front wall, but its
+        # support ends 1.4 m short of where the real corner must be, so it must
+        # not end the leg.
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.9,
+                                 tracker=WallTracker())
+        right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
+        pillar = wall((1.0, 0.0), 0.7, (0.7, 0.0), (0.9, 0.0))
+        outcome = action.step(snapshot_of(right, pillar, observed=0.98), now_s=1.0)
+        self.assertFalse(outcome.done)
+        self.assertFalse(outcome.fields.get("terminal_visible"))
+        # The leg keeps following the right wall rather than stopping on it.
+        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+
+    def test_the_right_wall_is_never_its_own_terminal(self):
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_right_wall, terminal_target_m=1.0,
+                                 tracker=WallTracker())
+        right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
+        outcome = action.step(snapshot_of(right, observed=0.98), now_s=1.0)
+        self.assertFalse(outcome.done)
+        self.assertFalse(outcome.fields.get("terminal_visible"))
+
+    def test_only_the_right_wall_is_a_normal_cruise(self):
+        # The far terminal wall is simply not in view yet: that is ordinary
+        # following, never a parameter error or a stop.
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=1.9,
+                                 tracker=WallTracker())
+        right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
+        outcome = action.step(snapshot_of(right, observed=0.98), now_s=1.0)
+        self.assertFalse(outcome.done)
+        self.assertEqual(outcome.reason, "")
+        self.assertFalse(outcome.fields["terminal_seen"])
+        self.assertGreater(outcome.command.linear_x_m_s, 0.0)
+
+    def test_a_terminal_seen_then_lost_holds_zero_and_then_fails_bounded(self):
+        # Once the terminal has been verified, losing it must not keep driving on
+        # the last distance -- that distance cannot shrink as the chassis moves.
+        action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
+                                 terminal_role=is_front_wall, terminal_target_m=0.5,
+                                 tracker=WallTracker(), lost_timeout_s=5.0)
+        right = wall((0.0, -1.0), 1.6, (0.0, -1.6), (0.0, 1.4))
+        front = wall((1.0, 0.0), 1.9, (1.9, 0.0), (-1.1, 0.0))
+        first = action.step(snapshot_of(right, front, observed=0.98), now_s=1.0)
+        self.assertFalse(first.done)
+        self.assertTrue(first.fields["terminal_seen"])
+        self.assertAlmostEqual(first.fields["terminal_measured_m"], 1.9, places=6)
+        # The terminal is gone but the right wall is still perfectly visible.
+        lost = action.step(snapshot_of(right, observed=1.05), now_s=1.1)
+        self.assertEqual(lost.command.linear_x_m_s, 0.0)
+        self.assertEqual(lost.command.angular_z_rad_s, 0.0)
+        self.assertEqual(lost.reason, "terminal_wall_lost")
+        # Bounded: it eventually gives up instead of waiting forever.
+        final = action.step(snapshot_of(right, seq=99, observed=7.0), now_s=7.0)
+        self.assertTrue(action.finished)
+        self.assertFalse(final.done)
+        self.assertEqual(final.reason, "terminal_wall_lost")
 
     def test_a_follow_action_waits_without_inventing_a_path_when_the_wall_is_gone(self):
         action = FollowRightWall(target_distance_m=1.6, direction=+1, limits=LIMITS,
@@ -487,14 +586,21 @@ class ActionStateMachineTests(unittest.TestCase):
                               observed_at_s=9.95, lines=(tracking,), point_count=40)
         self.assertFalse(action.step(before, now_s=10.1).done)
         self.assertEqual(action.gate.stable, 0)
-        # The first revolution that completes after the command counts.
-        after = WallSnapshot(scan_seq=2, scan_started_s=10.05, scan_completed_s=10.15,
-                             observed_at_s=10.10, lines=(tracking,), point_count=40)
-        self.assertFalse(action.step(after, now_s=10.16).done)
-        self.assertEqual(action.gate.stable, 1)
-        final = WallSnapshot(scan_seq=3, scan_started_s=10.17, scan_completed_s=10.27,
+        # A revolution that straddles the zero instant still contains samples from
+        # while the chassis was turning, so it cannot confirm the stop either.
+        straddling = WallSnapshot(scan_seq=2, scan_started_s=10.05,
+                                  scan_completed_s=10.15, observed_at_s=10.10,
+                                  lines=(tracking,), point_count=40)
+        self.assertFalse(action.step(straddling, now_s=10.16).done)
+        self.assertEqual(action.gate.stable, 0)
+        # The first revolution acquired entirely after the command counts.
+        after = WallSnapshot(scan_seq=3, scan_started_s=10.17, scan_completed_s=10.27,
                              observed_at_s=10.22, lines=(tracking,), point_count=40)
-        self.assertTrue(action.step(final, now_s=10.28).done)
+        self.assertFalse(action.step(after, now_s=10.28).done)
+        self.assertEqual(action.gate.stable, 1)
+        final = WallSnapshot(scan_seq=4, scan_started_s=10.29, scan_completed_s=10.39,
+                             observed_at_s=10.34, lines=(tracking,), point_count=40)
+        self.assertTrue(action.step(final, now_s=10.40).done)
 
     def test_t08_one_scan_inside_tolerance_then_one_outside_resets_the_count(self):
         action = TurnToWallBearing(reference_bearing_rad=-math.pi / 2,

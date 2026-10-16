@@ -109,9 +109,14 @@ class LineFittingTests(unittest.TestCase):
         self.assertEqual(extract_lines([(1.0, float('nan')), (float('inf'), 2.0)], rng=rng), ())
         # A single duplicated location is degenerate, not a wall.
         self.assertEqual(extract_lines([(1.0, 1.0)] * 40, rng=rng), ())
-        # Exactly collinear points are a degenerate orthogonal fit, by design.
-        self.assertEqual(extract_lines([(-1.5 + index * 0.05, -1.6)
-                                        for index in range(61)], rng=rng), ())
+        # Exactly collinear points are a perfectly good wall: zero
+        # perpendicular spread is the least ambiguous fit there is.
+        collinear = extract_lines([(-1.5 + index * 0.05, -1.6) for index in range(61)],
+                                  rng=rng)
+        self.assertEqual(len(collinear), 1)
+        self.assertAlmostEqual(collinear[0].rho_base_m, 1.6, delta=0.01)
+        # A set of one repeated location has no direction at all.
+        self.assertEqual(extract_lines([(1.0, 1.0)] * 4, rng=rng), ())
 
     def test_w04_l_shape_yields_two_orthogonal_lines(self):
         rng = random.Random(16)
@@ -167,9 +172,10 @@ class LineFittingTests(unittest.TestCase):
         rng = random.Random(21)
         blob = [(rng.uniform(-0.05, 0.05), rng.uniform(-0.05, 0.05)) for _ in range(80)]
         self.assertEqual(extract_lines(blob, rng=rng), ())
-        # A vanishing aspect ratio is a degenerate fit even with three points.
-        thin = [(1.0, 1.0), (1.0 + 1e-7, 1.01), (1.0 - 1e-7, 1.02)]
-        self.assertIsNone(fit_line_tls(thin))
+        # Fewer than three points cannot define a line.
+        self.assertIsNone(fit_line_tls([(1.0, 1.0), (1.0, 1.02)]))
+        # A line through the base origin has rho == 0 and is not an external wall.
+        self.assertIsNone(fit_line_tls([(i * 0.1, i * 0.1) for i in range(10)]))
 
     def test_w08_a_short_arc_cannot_masquerade_as_a_long_wall(self):
         rng = random.Random(22)
