@@ -11,6 +11,12 @@ sys.path.insert(0, str(ROOT))
 from workspace_temp import WorkspaceTempDir
 from tools import setup_payload_pwm_permissions as permissions
 from tools import payload_servo_test as cli
+from hal.pwm import PWMBackendError
+
+
+def missing_overlay(message='no exported PWM channel for this pin'):
+    """The exact error the chip lookup raises when an overlay is not enabled."""
+    return PWMBackendError(message)
 
 
 class PermissionTests(unittest.TestCase):
@@ -66,12 +72,23 @@ class PermissionTests(unittest.TestCase):
             self.assertEqual((chip / 'pwm0/enable').read_text(), '0')
 
     def test_missing_overlay_is_reported_and_other_nodes_attempted(self):
+        # A pin with no device-tree overlay is skipped, not fatal: this script is
+        # the listener's ExecStartPre, and failing here would stop the whole
+        # competition program instead of one payload axis.
         root = self.fixture()
-        self.resolve.side_effect = [RuntimeError('missing overlay'), *self.chips[1:]]
-        with self.assertRaisesRegex(RuntimeError, 'fd8b0000.pwm: missing overlay'):
-            permissions.setup(root)
+        self.resolve.side_effect = [missing_overlay('missing overlay'), *self.chips[1:]]
+        unavailable = permissions.setup(root)
+        self.assertEqual(unavailable, ('fd8b0000.pwm',))
         self.assertEqual(self.resolve.call_count, 6)
         self.assertEqual(self.chmod.call_count, 35)
+
+    def test_a_channel_that_exists_but_cannot_be_exported_is_still_fatal(self):
+        # The distinction that matters: an absent overlay is tolerated, a real
+        # export/permission fault is not.
+        root = self.fixture(False)
+        with patch.object(Path, 'write_text', side_effect=PermissionError('sysfs is read-only')):
+            with self.assertRaisesRegex(RuntimeError, 'sysfs is read-only'):
+                permissions.setup(root, sleep=lambda _: None)
 
     def test_chmod_error_and_ineffective_chmod_are_failures(self):
         root = self.fixture()
@@ -137,14 +154,29 @@ class PayloadCLITests(unittest.TestCase):
             cli.main(['open', '5'])
         opened.assert_not_called()
 
-    def test_missing_pwm6_reports_node_and_still_checks_camera(self):
+    def test_missing_pwm6_is_tolerated_and_the_camera_axis_is_still_checked(self):
+        # This is the real board state: PWM6_M0 (Pin 27, slot 4) has no overlay.
+        # The listener must still start, and every other axis including the
+        # camera must still be prepared.
         test = PermissionTests()
         self.addCleanup(test.doCleanups)
         root = test.fixture()
-        test.resolve.side_effect = [*test.chips[:4], RuntimeError('PWM6 overlay absent'), test.chips[5]]
-        with self.assertRaisesRegex(RuntimeError, 'febd0020.pwm: PWM6 overlay absent'):
-            permissions.setup(root)
+        test.resolve.side_effect = [*test.chips[:4], missing_overlay('PWM6 overlay absent'), test.chips[5]]
+        warnings = []
+        unavailable = permissions.setup(root, warn=warnings.append)
+        self.assertEqual(unavailable, ('febd0020.pwm',))
+        # The camera axis was still looked up and prepared after the gap.
         self.assertEqual(test.resolve.call_args_list[-1], call(root, 'febd0030.pwm'))
+        self.assertEqual(test.chmod.call_count, 35)
+        self.assertTrue(any('febd0020.pwm' in w for w in warnings))
+
+    def test_main_exits_zero_when_a_channel_is_absent(self):
+        with patch.object(permissions, 'setup', return_value=('febd0020.pwm',)):
+            self.assertEqual(permissions.main(), 0)
+        with patch.object(permissions, 'setup', return_value=()):
+            self.assertEqual(permissions.main(), 0)
+        with patch.object(permissions, 'setup', side_effect=RuntimeError('sysfs fault')):
+            self.assertEqual(permissions.main(), 1)
 
 
 if __name__ == '__main__': unittest.main()

@@ -1,14 +1,15 @@
-"""Workspace-local temporary directories for the offline tests.
+"""Temporary directories for the offline tests, outside the repository.
 
 ``tempfile.TemporaryDirectory()`` creates a directory with a restrictive ACL and
-then tries to reset permissions while removing it. Under the Windows sandbox the
-host denies both the write into that fresh directory and the permission reset, so
+then tries to reset permissions while removing it. Under the Windows sandbox both
+the write into that fresh directory and the permission reset were denied, so
 every test that used one failed with ``PermissionError`` for environmental
 reasons -- 97 of them at baseline, which made a real failure impossible to spot.
 
-Tracking counters and names write into ``logs/tmp``; temporary *directories* are
-created the same way, with the workspace's own permissions and with a best-effort
-cleanup that never turns a passing test into an error.
+``tempfile.mkdtemp`` plus ``shutil.rmtree(ignore_errors=True)`` avoids the ACL
+reset that failed, and it keeps the directory outside the repository, which some
+tools require: ``tools/closed_loop_motion.py`` deliberately refuses an ``--output``
+inside the repo so a live test cannot write artifacts into a tracked tree.
 """
 
 from __future__ import annotations
@@ -17,8 +18,8 @@ import atexit
 from itertools import count
 from pathlib import Path
 import shutil
+import tempfile
 
-TMP_ROOT = Path(__file__).resolve().parents[1] / "logs" / "tmp"
 _names = count()
 _created: list[str] = []
 
@@ -34,16 +35,14 @@ atexit.register(_sweep)
 
 
 def temp_dir(prefix: str = "tmp") -> str:
-    """Create and return a writable, randomly named directory in ``logs/tmp``."""
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    while True:
-        candidate = TMP_ROOT / ("%s%04d" % (prefix, next(_names)))
-        try:
-            candidate.mkdir()
-        except FileExistsError:
-            continue
-        _created.append(str(candidate))
-        return str(candidate)
+    """Create and return a writable, randomly named directory.
+
+    ``mkdtemp`` inherits the OS temp root's permissions, and cleanup never
+    resets them, which is exactly what the failing ``TemporaryDirectory`` did.
+    """
+    path = tempfile.mkdtemp(prefix="dsh_%s_" % prefix)
+    _created.append(path)
+    return path
 
 
 def cleanup_temp_dir(path) -> None:
@@ -57,14 +56,25 @@ def cleanup_temp_dir(path) -> None:
 
 
 class WorkspaceTempDir:
-    """Context manager shaped like ``tempfile.TemporaryDirectory``."""
+    """Context manager shaped like ``tempfile.TemporaryDirectory``.
+
+    ``TemporaryDirectory`` exposes a ``cleanup()`` method as well as the context
+    protocol, and tests call it directly via ``addCleanup(temporary.cleanup)``.
+    Omitting it turns a passing test into an ``AttributeError`` in teardown.
+    """
 
     def __init__(self, prefix: str = "tmp"):
         self.name = temp_dir(prefix)
+        self._cleaned = False
+
+    def cleanup(self) -> None:
+        if not self._cleaned:
+            self._cleaned = True
+            cleanup_temp_dir(self.name)
 
     def __enter__(self):
         return self.name
 
     def __exit__(self, *exc_info):
-        cleanup_temp_dir(self.name)
+        self.cleanup()
         return False
