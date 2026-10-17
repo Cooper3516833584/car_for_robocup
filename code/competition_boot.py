@@ -1,11 +1,10 @@
 """HC-15 competition listener; the mission worker shares its single radio owner.
 
 The car competition chain contacts no drone. This listener keeps the ground
-station's RUN / STOP / PING handling and their ACKs and the single radio owner;
-it creates no ``FleetTaskSender``, restarts no car SLAM sidecar and waits for no
-drone ACK, so a drone that is powered off, absent or on a broken link cannot
-block startup. After payload CLOSE, the mission starts immediately without a
-preparation wait or completion beep.
+station's RUN / STOP / PING handling and their ACKs, the single radio owner, the
+20 s preparation wait and the 5 s completion beep; it creates no
+``FleetTaskSender``, restarts no car SLAM sidecar and waits for no drone ACK, so
+a drone that is powered off, absent or on a broken link cannot block startup.
 """
 import logging
 from pathlib import Path
@@ -25,8 +24,8 @@ from components.serial_communication import HC15SerialDriver
 from components.sound_light_alarm import SoundLightAlarm
 
 LOG = logging.getLogger(__name__)
-RUN_DELAY_S = 0.0
-BUZZ_LAST_S = 0.0
+RUN_DELAY_S = 20.0
+BUZZ_LAST_S = 5.0
 PROMPT_BEEP_S = 0.15
 PROMPT_GAP_S = 0.15
 SLAM_SERVICE = 'robocup-slam.service'
@@ -242,14 +241,16 @@ class CompetitionBoot:
             LOG.info('RUN payload CLOSE %s run_id=%d (no mechanical feedback)',
                      'SIMULATED' if self._simulate_payload else 'written' if closed else 'failed; continuing', run_id)
             close_confirmed_at = self._clock()
-            LOG.info('CLOSE attempt finished; mission starts immediately at %.3f',
-                     close_confirmed_at)
-            if RUN_DELAY_S > 0 and stop.wait(RUN_DELAY_S):
+            LOG.info('CLOSE attempt finished; full %.1f s countdown starts at %.3f',
+                     RUN_DELAY_S, close_confirmed_at)
+            if stop.wait(RUN_DELAY_S):
                 return
             if stop.is_set():
                 return
-            # Keep the optional cues disabled for the car-only fast path.
-            if BUZZ_LAST_S > 0 and not self._beep(stop, label='payload_ready', duration=BUZZ_LAST_S):
+            # No drone CLOSE/REMAP wait and no SLAM sidecar restart: the wall
+            # chain needs neither a drone nor a rebuilt map. The 5 s beep is the
+            # completion cue and must not be shortened by anything in parallel.
+            if not self._beep(stop, label='payload_ready', duration=BUZZ_LAST_S):
                 return
 
             kwargs = dict(stop_event=stop, on_runtime_ready=self._runtime_ready,

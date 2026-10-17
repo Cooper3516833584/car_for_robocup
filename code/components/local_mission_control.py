@@ -101,7 +101,7 @@ def run_local(options=None):
             print('启动未接受：' + json.dumps(result, ensure_ascii=False), flush=True)
             return 1
         started = True
-        print('本机全流程已启动：关闭物资后立即运行；Ctrl+C 停止。', flush=True)
+        print('本机全流程已启动：关闭物资后计时 20 秒，蜂鸣 5 秒后运行；Ctrl+C 停止。', flush=True)
         while request_local('status')['running']:
             time.sleep(.5)
         print('本轮任务已结束，结果见上方任务日志。', flush=True)
