@@ -1,17 +1,20 @@
-"""Interruptible payload detour driven by one tracked field wall.
+"""Interruptible payload detour driven by measured field walls.
 
 The detour no longer uses a fused pose, a map origin, a global line or a
 ``Pose2D`` endpoint. It locks one *same physical wall* (the road wall the leg is
 patrolling), records the drive-axle-centre perpendicular distance ``d0`` to it,
-and then performs every move and turn against that wall's measured normal
+first advances 5 cm along the patrol heading using a front/rear wall, and then
+performs the side moves and turns against the road wall's measured normal
 distance and measured body bearing:
 
-  standard      left90 -> forward 0.43 m -> release -> reverse to d0 -> right90
-  right_mount   left90 -> forward 0.32 m -> left90 -> release -> right90
+  standard      patrol forward 0.05 m -> left90 -> forward 0.43 m -> release
+                -> reverse to d0 -> right90
+  right_mount   patrol forward 0.05 m -> left90 -> forward 0.32 m -> left90 -> release -> right90
                 -> reverse to d0 -> right90
 
-Both sequences come from ``docs/06_PAYLOAD_AND_ALLOCATION.md``. Nothing here
-reads a fused pose, and no move ever substitutes an elapsed time or an
+The side-drop sequences follow ``docs/06_PAYLOAD_AND_ALLOCATION.md``; the
+5 cm patrol advance is the operator's added offset. Nothing here reads a
+fused pose, and no move ever substitutes an elapsed time or an
 integrated command for a measured distance.
 """
 
@@ -31,13 +34,14 @@ from components.wall_navigation import (
     can_move_normal,
     drop_turn,
 )
-from components.wall_observer import WallLine
+from components.wall_observer import WallLine, WallTracker
 from mission_control import step_wall_runtime as _step
 from robocup_runtime import RobocupMissionState
 
 PERIOD_S = 0.05
 # Retained for the retired fused call sites; the wall path uses WallActionLimits.
 DEFAULT_APPROACH_M = 0.43
+PRE_TURN_FORWARD_M = 0.05
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,40 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
                              behavior=settings.behavior, feedback_source="wall_scan")
         runtime.mission.on_payload_action_start()
 
-        left = drop_turn(reference.bearing_rad, REAR_BEARING_RAD, limits=limits,
+        # A side wall alone cannot measure travel along the patrol direction.
+        # Lock a separate front/rear wall for this short move; never replace
+        # the road tracker or estimate these 5 cm from commanded speed/time.
+        _step(runtime)
+        snapshot = runtime.observer.latest()
+        if snapshot is None or not snapshot.is_fresh(float(clock())):
+            raise RuntimeError("pre-turn advance requires a fresh wall scan")
+        candidates = [wall for wall in snapshot.lines
+                      if abs(wall.normal_xy[0]) >= math.cos(math.radians(30))
+                      and abs(sum(a * b for a, b in zip(wall.normal_xy, reference.normal_xy)))
+                      <= math.sin(math.radians(20))]
+        if not candidates:
+            raise RuntimeError("pre-turn advance requires a visible front or rear wall")
+        forward_wall = max(candidates, key=lambda wall:
+                           (wall.normal_xy[0] > 0, wall.span_m, -wall.rms_m))
+        forward_tracker = WallTracker()
+        forward_tracker.set_reference(forward_wall)
+        forward_target = forward_wall.rho_base_m - PRE_TURN_FORWARD_M * forward_wall.normal_xy[0]
+        runtime.record_event("payload_pre_turn_advance", distance_m=PRE_TURN_FORWARD_M,
+                             reference_bearing_rad=forward_wall.bearing_rad,
+                             target_base_m=forward_target, feedback_source="wall_scan")
+        advance = MoveNormalToWall(target_distance_m=forward_target, direction=1,
+                                  reference_bearing_rad=forward_wall.bearing_rad,
+                                  desired_bearing_rad=forward_wall.bearing_rad,
+                                  limits=limits, tracker=forward_tracker, clock=clock,
+                                  terminal_range_m=0.015, tolerance_m=0.003)
+        run_action(advance, "forward_on_patrol_5cm")
+        snapshot = runtime.observer.latest()
+        road = tracker.track(snapshot.lines, expected_bearing_rad=reference.bearing_rad,
+                             expected_distance_m=tracker.last_rho_m)
+        if road is None:
+            raise RuntimeError("road wall lost after the pre-turn advance")
+
+        left = drop_turn(road.bearing_rad, REAR_BEARING_RAD, limits=limits,
                          tracker=tracker, turn_direction=1, clock=clock,
                          handoff=lambda wall: can_move_normal(wall, REAR_BEARING_RAD, limits))
         if not run_action(left, "left_90deg"):
