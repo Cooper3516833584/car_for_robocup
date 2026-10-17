@@ -62,7 +62,6 @@ class PayloadDropLog:
             index, COLOR_NAMES[color], len(slots), '、'.join(map(str, slots)))
             for index, (color, slots) in enumerate(self.targets, 1)))
         # The car alone carries all five payloads; no drone task is sent.
-        lines.append('无人机：通信已禁用，本次不分配、不发送任何任务')
         lines.append('小车投放记录')
         for index, (color, slots) in enumerate(self.targets, 1):
             for item, slot in enumerate(slots, 1):
