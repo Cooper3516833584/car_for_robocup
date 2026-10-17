@@ -13,10 +13,13 @@ WorkingDirectory=/home/radxa/car
 ExecStartPre=+/usr/bin/ip link set dev lo multicast on
 RuntimeDirectory=robocup-car
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
 ExecStartPre=+/usr/bin/python3 /home/radxa/car/tools/setup_payload_pwm_permissions.py
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/vision_env/bin/python
 ExecStartPre=/usr/bin/test -x /home/radxa/robocup_ros/bin/micromamba
-ExecStart=/home/radxa/robocup_ros/bin/micromamba run -p /home/radxa/robocup_ros/env /home/radxa/robocup_ros/vision_env/bin/python /home/radxa/car/code/competition_boot.py
+# Fresh micromamba registry per start; the launcher restores the child's cache
+# environment so vision model/settings caches retain their existing location.
+ExecStart=/usr/bin/python3 /home/radxa/car/tools/mamba_run_isolated.py --cache-root /run/robocup-car/mamba-cache /home/radxa/robocup_ros/bin/micromamba /home/radxa/robocup_ros/env /home/radxa/robocup_ros/vision_env/bin/python /home/radxa/car/code/competition_boot.py
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=40
