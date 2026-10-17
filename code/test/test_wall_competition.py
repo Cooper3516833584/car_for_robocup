@@ -6,12 +6,13 @@ the leg targets, the terminal references, the detour sequence and the ledger)
 are the production objects.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from contextlib import ExitStack
 import math
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -86,13 +87,13 @@ class _Counts:
 
 class FieldParameterTests(unittest.TestCase):
     def test_c01_the_four_measured_wall_distances_are_used_in_order(self):
-        self.assertEqual(WALL_RIGHT_DISTANCE_M, (1.550, 1.845, 1.640, 2.280))
+        self.assertEqual(WALL_RIGHT_DISTANCE_M, (1.530, 1.825, 1.620, 2.260))
         self.assertEqual(task.WALL_LEG_NAMES, ("left", "bottom", "right", "top"))
 
     def test_the_lidar_to_base_conversion_uses_the_live_mount_offset(self):
         # Lidar on the drive axis: no correction at all.
-        self.assertAlmostEqual(desired_right_base(0, 0.0), 1.550, places=9)
-        self.assertAlmostEqual(desired_right_base(3, 0.0), 2.280, places=9)
+        self.assertAlmostEqual(desired_right_base(0, 0.0), WALL_RIGHT_DISTANCE_M[0], places=9)
+        self.assertAlmostEqual(desired_right_base(3, 0.0), WALL_RIGHT_DISTANCE_M[3], places=9)
         # A radar 5 cm to the left of the drive axis shortens every base target
         # by exactly that 5 cm, in both directions.
         for index in range(4):
@@ -117,14 +118,14 @@ class FieldParameterTests(unittest.TestCase):
         self.assertEqual([leg.name for leg in legs],
                          ["left", "bottom", "right", "top_search"])
         self.assertEqual([leg.direction for leg in legs], [1, 1, 1, 1])
-        self.assertEqual([leg.target_right_m for leg in legs], [1.550, 1.845, 1.640, 2.280])
+        self.assertEqual([leg.target_right_m for leg in legs], list(WALL_RIGHT_DISTANCE_M))
         # Three legs stop on the front wall; the top leg ends on the left wall.
         # Including the top edge: with the nose left, the map's left perimeter
         # wall is ahead of the chassis, so it is a front-wall terminal.
         self.assertEqual([leg.terminal_name for leg in legs],
                          ["front_wall", "front_wall", "front_wall",
                           "front_left_perimeter_wall"])
-        self.assertEqual(desired[0], 1.550)
+        self.assertEqual(desired[0], WALL_RIGHT_DISTANCE_M[0])
 
 
 # ---------------------------------------------------------------------------
@@ -249,30 +250,29 @@ class WallRouteTests(unittest.TestCase):
         legs, desired = build_wall_route(0.0, 0.0)
         return legs, desired
 
-    def test_r01_the_route_has_three_cruise_left_turns_and_one_final_right(self):
+    def test_r01_route_geometry_defines_four_front_wall_corners(self):
         legs, _ = self.route_legs()
         self.assertEqual(len(legs), 4)
-        # The first three legs turn left at a front-wall corner; only the finish
-        # entry turns right. The top edge never turns around.
+        # All four road corners use the wall ahead for the same left turn.
         self.assertEqual([leg.terminal_name for leg in legs[:3]], ["front_wall"] * 3)
         self.assertIsNotNone(legs[3].terminal_role)
 
-    def test_r07_the_top_leg_reverses_with_the_nose_unchanged(self):
+    def test_r07_legacy_diagnostic_reverses_with_the_nose_unchanged(self):
         legs, desired = self.route_legs()
         top = legs[3]
-        self.assertEqual(top.target_right_m, 2.280)
+        self.assertEqual(top.target_right_m, desired[3])
         self.assertEqual(top.direction, +1)  # the search itself still goes left
         self.assertTrue(top.must_finish_on_pending_empty)
-        # The return reverses: constructed by the reverse helper, not by the leg.
+        # Only the standalone legacy diagnostic reverses along the top.
         from components.wall_navigation import FollowRightWall, WallTracker, is_rear_wall
         action = FollowRightWall(target_distance_m=desired[3], direction=-1,
                                  limits=_limits(), tracker=WallTracker(),
                                  terminal_role=is_rear_wall, terminal_target_m=desired[2])
         self.assertEqual(action.direction, -1)
-        self.assertEqual(action.target_distance_m, 2.280)
-        self.assertEqual(action.terminal_target_m, 1.640)
+        self.assertEqual(action.target_distance_m, desired[3])
+        self.assertEqual(action.terminal_target_m, desired[2])
 
-    def test_r08_the_return_looks_at_the_rear_wall_not_the_front_wall(self):
+    def test_r08_legacy_diagnostic_uses_the_rear_wall(self):
         from components.wall_navigation import FollowRightWall, WallTracker, is_rear_wall
         _, desired = self.route_legs()
         action = FollowRightWall(target_distance_m=desired[3], direction=-1,
@@ -482,6 +482,337 @@ class PatrolResumeTests(unittest.TestCase):
                         if e['type'] == 'wall_control' and e.get('terminal_visible')]
         self.assertTrue(all(d > 1.82 for d in measurements))
         self.assertAlmostEqual(terminal.rho_base_m, 1.845, delta=.02)
+
+
+class ForwardReturnMissionTests(unittest.TestCase):
+    """Exercise orchestration with real action factories and parking extraction."""
+
+    def run_mission(self, *, release_all=False, parking=True, fail_at=None, stop=False):
+        from components.competition_options import CompetitionOptions
+
+        h = MissionHarness()
+        h.runtime.start()
+        self.addCleanup(h.runtime.close)
+        h.runtime.config = replace(h.config, d500_mount=replace(
+            h.config.d500_mount, x_m=.12, y_m=.07))
+        h.runtime.competition_options = CompetitionOptions(
+            wall_right_distance_m=(1.4, 1.7, 1.8, 2.1), finish_front_m=.95)
+        legs, desired = build_wall_route(.12, .07, options=h.runtime.competition_options)
+        search, turns, returns, approaches = [], [], [], []
+        terminals = [make_wall(0, desired[(i + 1) % 4]) for i in range(4)]
+        return_terminals = [make_wall(0, legs[i].terminal_target_m) for i in range(3)]
+        right_walls = [make_wall(-math.pi / 2, leg.target_right_m) for leg in legs]
+        vision = Mock(frame_size=(640, 480))
+        vision.observe_colours.side_effect = AssertionError('return must not read vision')
+        servo = Mock(is_running=True)
+        shared = {}
+
+        def patrol(runtime, leg, tracker, **kwargs):
+            search.append(leg)
+            if shared:
+                for key in ('pending', 'command_ledger', 'latches', 'vision'):
+                    self.assertIs(kwargs[key], shared[key])
+            shared.update(kwargs)
+            self.assertFalse(leg.must_finish_on_pending_empty)
+            if leg.index == 0:
+                selected = list(kwargs['pending'].items()) if release_all else [('red', (2, 3))]
+                for color, slots in selected:
+                    task._mark_dropped(kwargs['pending'], kwargs['command_ledger'],
+                                       color, slots, simulated=False)
+            tracker.set_reference(right_walls[leg.index])
+            return True, bool(kwargs['pending']), terminals[leg.index]
+
+        def run_action(runtime, action, phase):
+            if phase.startswith('corner_'):
+                index = int(phase.split('_')[1]) - 1
+                expected = terminals[index] if len(turns) < 4 else return_terminals[index]
+                self.assertIs(action.tracker.wall, expected)
+                self.assertEqual(action.turn_direction, +1)
+                self.assertEqual(action.reference_bearing_rad, expected.bearing_rad)
+                self.assertTrue(action.handoff(make_wall(-math.pi / 2, legs[index].terminal_target_m)))
+                turns.append(index)
+                action.tracker.set_reference(right_walls[(index + 1) % 4])
+            elif phase.startswith('return_leg_'):
+                index = len(returns)
+                returns.append(action)
+                leg = legs[index]
+                self.assertEqual(action.target_distance_m, leg.target_right_m)
+                self.assertEqual(action.terminal_target_m, leg.terminal_target_m)
+                self.assertEqual(action.direction, +1)
+                self.assertIs(action.terminal_role, task.is_front_wall)
+                self.assertIsNone(action.speed_cap_m_s)
+                self.assertIsNone(action.outcome)
+                self.assertIsNone(action.terminal_wall)
+                if index == fail_at:
+                    if stop:
+                        raise KeyboardInterrupt('STOP')
+                    return Mock(done=False, reason='injected failure')
+                action.terminal_wall = return_terminals[index]
+                action.tracker.set_reference(right_walls[index])
+            elif phase == 'finish_approach':
+                approaches.append(action)
+                self.assertIs(action.tracker.wall, right_walls[2])
+                self.assertIsNot(action.tracker.wall, return_terminals[2])
+                self.assertEqual(action.direction, +1)
+                self.assertIs(action.terminal_role, task.is_front_wall)
+                self.assertAlmostEqual(action.target_distance_m, 1.73)
+                self.assertAlmostEqual(action.terminal_target_m, 1.07)
+            else:
+                self.fail(f'unexpected phase {phase}')
+            return Mock(done=True)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch('config.v2_factory.build_servo', return_value=servo))
+            stack.enter_context(patch('components.servo_positioning.park_servo'))
+            stack.enter_context(patch('target_patrol.YoloVision', return_value=vision))
+            stack.enter_context(patch.object(task, '_wait_for_vision_ready'))
+            stack.enter_context(patch.object(task, 'patrol_wall_leg', side_effect=patrol))
+            stack.enter_context(patch.object(task, '_run_wall_action', side_effect=run_action))
+            for name in ('reverse_top_to_finish_corner', 'enter_finish_zone', 'perform_payload_detour'):
+                stack.enter_context(patch.object(task, name, side_effect=AssertionError(name)))
+            finish = stack.enter_context(patch.object(h.runtime.mission, 'finish',
+                                                      wraps=h.runtime.mission.finish))
+            if not parking:
+                stack.enter_context(patch.object(task, 'finish_front_base', return_value=None))
+            if fail_at is None:
+                result = task.run_wall_mission(h.runtime, fixed_counts=(2, 1, 1), detector=object())
+                self.assertEqual(finish.call_count, int(parking))
+            else:
+                with self.assertRaises(KeyboardInterrupt if stop else RuntimeError):
+                    task.run_wall_mission(h.runtime, fixed_counts=(2, 1, 1), detector=object())
+                result = None
+                finish.assert_not_called()
+                self.assertEqual(turns, [0, 1, 2, 3] + list(range(fail_at)))
+                self.assertEqual(len(returns), fail_at + 1)
+                self.assertEqual(approaches, [])
+                self.assertFalse(any(e['type'] == 'competition_return_lap_done' for e in h.events))
+            vision.observe_colours.assert_not_called()
+            vision.close.assert_called_once()
+            servo.close.assert_called_once_with(hold=True)
+            self.assertIsNone(h.runtime.action)
+            self.assertEqual(h.drive.commands[-1], (0, 0))
+        return result, search, turns, returns, approaches, shared
+
+    def test_four_search_legs_six_left_turns_three_returns_and_forward_parking(self):
+        result, search, turns, returns, approaches, shared = self.run_mission()
+        self.assertEqual([leg.index for leg in search], [0, 1, 2, 3])
+        self.assertEqual(turns, [0, 1, 2, 3, 0, 1])
+        self.assertEqual(len({id(action) for action in returns}), 3)
+        self.assertEqual(len(approaches), 1)
+        self.assertTrue(result.route_done and result.parking_done)
+        self.assertEqual(result.commanded_release_slots, (2, 3))
+        self.assertEqual(result.attempted_slots, (2, 3))
+        self.assertEqual(result.pending_slots, (4, 1, 0))
+        self.assertEqual(shared['pending'], {'yellow': (4,), 'blue': (1,), 'green': (0,)})
+
+    def test_all_payload_released_before_top_still_completes_entire_route(self):
+        result, _, turns, returns, approaches, _ = self.run_mission(release_all=True)
+        self.assertFalse(result.pending_slots)
+        self.assertEqual(set(result.commanded_release_slots), set(range(5)))
+        self.assertEqual(turns, [0, 1, 2, 3, 0, 1])
+        self.assertEqual(len(returns), 3)
+        self.assertEqual(len(approaches), 1)
+
+    def test_missing_parking_distance_does_not_finish_mission(self):
+        result, _, _, _, approaches, _ = self.run_mission(parking=False)
+        self.assertTrue(result.route_done)
+        self.assertFalse(result.parking_done)
+        self.assertEqual(result.reason, 'finish_parameter_missing')
+        self.assertEqual(approaches, [])
+
+    def test_each_return_failure_or_stop_prevents_later_turns_and_parking(self):
+        for index in range(3):
+            for stop in (False, True):
+                with self.subTest(index=index, stop=stop):
+                    self.run_mission(fail_at=index, stop=stop)
+
+    def test_legacy_finish_turns_right_then_delegates_to_same_forward_helper(self):
+        h = MissionHarness()
+        tracker = task.WallTracker()
+        rear = make_wall(math.pi, 1.62)
+        _, desired = build_wall_route(0, 0)
+        sequence = []
+
+        def run(runtime, action, phase):
+            sequence.append(phase)
+            self.assertIs(action.tracker.wall, rear)
+            self.assertEqual(action.turn_direction, -1)
+            return Mock(done=True)
+
+        def forward(*args):
+            sequence.append('forward')
+            self.assertEqual(args, (h.runtime, tracker, desired, limits))
+            return True
+
+        limits = _limits()
+        with patch.object(task, '_run_wall_action', side_effect=run), \
+                patch.object(task, 'enter_finish_zone_forward', side_effect=forward):
+            self.assertTrue(task.enter_finish_zone(h.runtime, tracker, desired, limits, rear))
+        self.assertEqual(sequence, ['finish_turn', 'forward'])
+
+
+class ForwardReturnControlTests(unittest.TestCase):
+    """Real patrol, runtime, and follow controllers with scripted lidar scans."""
+
+    def test_complete_route_with_real_follow_turn_and_parking_controllers(self):
+        h = MissionHarness()
+        h.runtime.start()
+        self.addCleanup(h.runtime.close)
+        h.runtime.limits = _limits()
+        mount = h.runtime.config.d500_mount
+        _, desired = build_wall_route(mount.x_m, mount.y_m)
+        world = {'x': desired[0], 'y': 6.0, 'yaw': -math.pi / 2}
+        original_step = h.runtime.step
+        ticks = []
+        phases = []
+        corners = []
+        turn = task.turn_left_at_corner
+
+        def record_turn(runtime, tracker, leg, limits, terminal):
+            # The actual measured front wall must become this turn's reference.
+            self.assertIsNotNone(terminal)
+            self.assertTrue(task.is_front_wall(terminal))
+            corners.append(leg.index)
+            return turn(runtime, tracker, leg, limits, terminal)
+
+        def step():
+            self.assertLess(len(ticks), 20000, 'seven-leg route did not converge')
+            h.clock[0] += .05
+            x, y, yaw = world['x'], world['y'], world['yaw']
+            # Four fixed perimeter walls of an 8 m square, expressed in base_link.
+            h.observer.publish(*(make_wall(angle - yaw, distance, span=8.0)
+                                 for angle, distance in ((math.pi, x), (-math.pi / 2, y),
+                                                         (0, 8 - x), (math.pi / 2, 8 - y))))
+            result = original_step()
+            command = result.limited_command or result.command
+            ticks.append(command)
+            if not phases or phases[-1] != h.runtime.mission.phase:
+                phases.append(h.runtime.mission.phase)
+            world['x'] += command.linear_x_m_s * math.cos(yaw) * .05
+            world['y'] += command.linear_x_m_s * math.sin(yaw) * .05
+            world['yaw'] += command.angular_z_rad_s * .05
+            self.assertTrue(0 < world['x'] < 8 and 0 < world['y'] < 8)
+            return result
+
+        h.runtime.step = step
+        with patch('config.v2_factory.build_servo', return_value=None), \
+                patch.object(task.time, 'sleep'), \
+                patch.object(task, 'turn_left_at_corner', side_effect=record_turn), \
+                patch.object(task, 'reverse_top_to_finish_corner', side_effect=AssertionError('reverse')), \
+                patch.object(task, 'enter_finish_zone', side_effect=AssertionError('right turn')):
+            result = task.run_wall_mission(h.runtime, fixed_counts=(2, 1, 1))
+        self.assertTrue(result.route_done and result.parking_done)
+        self.assertEqual(corners, [0, 1, 2, 3, 0, 1])
+        self.assertEqual(phases, ['leg_1_left', 'corner_1', 'leg_2_bottom', 'corner_2',
+                                 'leg_3_right', 'corner_3', 'leg_4_top_search', 'corner_4',
+                                 'return_leg_1_left', 'corner_1', 'return_leg_2_bottom',
+                                 'corner_2', 'return_leg_3_right', 'finish_approach'])
+        self.assertAlmostEqual(world['x'], 8 - desired[2], delta=.05)
+        self.assertAlmostEqual(world['y'], 8 - finish_front_base(mount.x_m), delta=.03)
+        self.assertAlmostEqual(wrap(world['yaw']), math.pi / 2, delta=.05)
+        self.assertEqual(h.runtime.mission.state, RobocupMissionState.FINISHED)
+        self.assertEqual(h.drive.commands[-1], (0, 0))
+
+    def run_top(self, *, early=False, empty=False):
+        from target_patrol import EntryLatch
+        h = MissionHarness()
+        h.runtime.start()
+        self.addCleanup(h.runtime.close)
+        leg = replace(build_wall_route(0, 0)[0][3], must_finish_on_pending_empty=early)
+        tracker = task.WallTracker()
+        pending = {} if empty else {'red': (1,)}
+        ledger = task.PayloadLedger()
+        frames, commands = [], []
+        original_step = h.runtime.step
+
+        def step():
+            self.assertLess(len(frames), 4, 'top must stop at its real terminal')
+            h.clock[0] += .1
+            # Same physical terminal approaches continuously after the detour.
+            remaining = (.18, .12, .06, 0)[len(frames)]
+            front = make_wall(0, leg.terminal_target_m + remaining)
+            frames.append(front)
+            h.observer.publish(make_wall(-math.pi / 2, leg.target_right_m), front)
+            result = original_step()
+            commands.append(result.command)
+            return result
+
+        vision = Mock(frame_size=(640, 480))
+        vision.observe_colours.side_effect = lambda _now: (
+            h.clock[0], (('red', (305, 0, 335, 50, .95, 0)),))
+        h.runtime.step = step
+        with patch.object(task.time, 'sleep'), \
+                patch.object(task, 'perform_payload_detour', return_value=(1,)) as drop:
+            completed, exhausted, terminal = task.patrol_wall_leg(
+                h.runtime, leg, tracker, pending=pending, vision=vision,
+                latches={'red': EntryLatch()}, limits=_limits(), command_ledger=ledger)
+        self.assertTrue(completed)
+        self.assertFalse(exhausted)
+        self.assertFalse(pending)
+        self.assertEqual(drop.call_count, 0 if empty else 1)
+        self.assertEqual(vision.observe_colours.call_count, 0 if empty else 1)
+        self.assertEqual(ledger.commanded_slots, () if empty else (1,))
+        if early:
+            self.assertEqual(len(frames), 1)
+            self.assertIsNone(terminal)
+        else:
+            self.assertEqual(len(frames), 4)
+            self.assertIs(terminal, frames[-1])
+            self.assertTrue(all(command.linear_x_m_s > 0 for command in commands[:-1]))
+            self.assertEqual(commands[-1].linear_x_m_s, 0)
+
+    def test_top_continues_after_last_release_until_real_corner(self):
+        self.run_top()
+
+    def test_legacy_early_exit_control_demonstrates_same_input_stops_after_drop(self):
+        self.run_top(early=True)
+
+    def test_top_with_empty_pending_still_reaches_real_corner(self):
+        self.run_top(empty=True)
+
+    def test_return_and_search_emit_identical_commands_for_same_wall_measurements(self):
+        # Exercise normal correction, missing scans, terminal braking and stop.
+        for leg in build_wall_route(0, 0)[0][:3]:
+            traces = []
+            for returning in (False, True):
+                h = MissionHarness()
+                h.runtime.start()
+                tracker = task.WallTracker()
+                commands = []
+                original_step = h.runtime.step
+
+                def step():
+                    index = len(commands)
+                    self.assertLess(index, 6)
+                    h.clock[0] += .1
+                    if index == 1:
+                        h.observer.publish()
+                    else:
+                        h.observer.publish(
+                            make_wall(-math.pi / 2 + .02, leg.target_right_m + .03),
+                            make_wall(.02, leg.terminal_target_m + (.30, .30, .20, .10, .04, 0)[index]))
+                    result = original_step()
+                    commands.append(result.command)
+                    return result
+
+                h.runtime.step = step
+                try:
+                    with patch.object(task.time, 'sleep'):
+                        if returning:
+                            action = task._make_leg_follow(leg, tracker, _limits(), h.runtime)
+                            outcome = task._run_wall_action(h.runtime, action, 'return_leg')
+                            self.assertTrue(outcome.done)
+                        else:
+                            completed, _, _ = task.patrol_wall_leg(
+                                h.runtime, leg, tracker, pending={}, vision=None, latches={},
+                                limits=_limits(), command_ledger=task.PayloadLedger())
+                            self.assertTrue(completed)
+                finally:
+                    h.runtime.close()
+                traces.append(commands)
+            with self.subTest(leg=leg.index):
+                self.assertEqual(traces[0], traces[1])
+                self.assertEqual(len(traces[0]), 6)
 
 
 class WallDetourTests(unittest.TestCase):

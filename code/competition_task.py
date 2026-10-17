@@ -978,10 +978,10 @@ def patrol_leg_with_pending_targets(runtime, start_xy, end_xy, pending_payloads,
 # ===========================================================================
 # Wall-following competition chain
 #
-# Route topology is fixed; positions are not. Leg order is always
-# left -> bottom -> right -> top, each leg follows its measured wall distance and
-# stops on a reference wall, and the top edge reverses instead of turning
-# around. Nothing below reads a fused pose, a map origin or a global line.
+# The full mission follows left -> bottom -> right -> top, turns left at the
+# top-left corner, then repeats left -> bottom -> right and drives forward
+# into the original finish zone. Every leg keeps the existing wall controller.
+# Nothing below needs a fused pose, a map origin or a global route line.
 # ===========================================================================
 
 
@@ -1365,7 +1365,7 @@ def turn_left_at_corner(runtime, tracker, leg, limits, terminal_wall):
 
 
 def reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits):
-    """Top edge: keep the nose left and reverse until the rear wall is at leg 3."""
+    """Legacy diagnostic only: keep the nose left and reverse to the right corner."""
     runtime.mission.phase = "top_reverse"
     back_target = desired[2]
     follow = FollowRightWall(target_distance_m=desired[3], direction=-1, limits=limits,
@@ -1379,12 +1379,7 @@ def reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits):
 
 
 def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
-    """Right turn to face up, then close the front-wall distance into the H zone.
-
-    As at a corner, the reference is the wall the reverse leg just measured. The
-    second element of ``terminal_wall`` is the wall astern, which becomes the
-    right wall once the chassis has turned to face up.
-    """
+    """Legacy top-return diagnostic: turn right, then drive into the H zone."""
     target_right = desired[2]
     rear_wall = terminal_wall
     if rear_wall is None:
@@ -1397,6 +1392,12 @@ def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
     outcome = _run_wall_action(runtime, turn, "finish_turn")
     if not outcome.done:
         raise RuntimeError(f"final right turn failed ({outcome.reason})")
+    return enter_finish_zone_forward(runtime, tracker, desired, limits)
+
+
+def enter_finish_zone_forward(runtime, tracker, desired, limits):
+    """Already facing up: keep the right perimeter wall and drive into H."""
+    target_right = desired[2]
     _reacquire_right_wall(runtime, tracker, target_right, phase="finish_approach")
 
     front_target = finish_front_base(runtime.config.d500_mount.x_m,
@@ -1421,7 +1422,7 @@ def enter_finish_zone(runtime, tracker, desired, limits, terminal_wall):
 
 def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, detector=None,
                      color=TARGET_COLOR, simulate_release=False, payload_log_dir=None, fixed_counts=None):
-    """The competition chain: four wall legs, then the finish zone."""
+    """Four search legs, three forward return legs, then the finish zone."""
     from config.v2_factory import build_servo
     from components.servo_positioning import park_servo
 
@@ -1501,6 +1502,9 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
         tracker = WallTracker()
         exhausted = False
         for index, leg in enumerate(legs):
+            if index == 3:
+                # Continue to the left corner even if the last drop is done.
+                leg = replace(leg, must_finish_on_pending_empty=False)
             ok, leg_exhausted, terminal_wall = patrol_wall_leg(
                 runtime, leg, tracker, pending=pending, vision=vision, latches=latches,
                 limits=limits, command_ledger=ledger,
@@ -1508,11 +1512,22 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
             if not ok:
                 raise RuntimeError(f"leg {index + 1} ({leg.name}) did not complete")
             exhausted = exhausted or leg_exhausted
-            if index < len(legs) - 1:
-                # The turn references the wall this leg actually measured, not
-                # whatever the tracker still holds from earlier in the leg.
-                turn_left_at_corner(runtime, tracker, leg, limits, terminal_wall)
-                runtime.record_event("vision_window_reset", not_before_s=float(runtime.clock()))
+            # Every first-lap corner turns left, including top -> left.
+            turn_left_at_corner(runtime, tracker, leg, limits, terminal_wall)
+            runtime.record_event("vision_window_reset", not_before_s=float(runtime.clock()))
+
+        runtime.record_event("competition_return_lap_start")
+        for index, leg in enumerate(legs[:3]):
+            phase = f"return_leg_{index + 1}_{leg.name}"
+            follow = _make_leg_follow(leg, tracker, limits, runtime)
+            outcome = _run_wall_action(runtime, follow, phase)
+            if not outcome.done:
+                raise RuntimeError(f"return leg {index + 1} ({leg.name}) did not complete "
+                                   f"({outcome.reason})")
+            if index < 2:
+                turn_left_at_corner(runtime, tracker, leg, limits, follow.terminal_wall)
+        runtime.record_event("competition_return_lap_done")
+
         result = MissionResult(route_done=True, parking_done=False,
                               commanded_release_slots=ledger.commanded_slots,
                               pending_slots=tuple(slot for slots in pending.values()
@@ -1522,11 +1537,9 @@ def run_wall_mission(runtime, *, task_board_camera=None, yellow_camera=None, det
                               attempted_slots=tuple(ledger.attempted),
                               reason="top_search_exhausted" if exhausted else "")
 
-        # The reverse leg reports the rear wall it measured; the final right turn
-        # and the H-zone approach both reference that same wall.
-        reverse_follow = reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits)
-        parking_done = enter_finish_zone(runtime, tracker, desired, limits,
-                                         reverse_follow.terminal_wall)
+        # The right leg already faces up. Keep tracking the right perimeter;
+        # its measured terminal is the top perimeter and must not replace it.
+        parking_done = enter_finish_zone_forward(runtime, tracker, desired, limits)
         result = replace(result, parking_done=parking_done,
                          reason=result.reason if parking_done else "finish_parameter_missing")
         for target_color, slots in pending.items():
@@ -1780,11 +1793,12 @@ def run_wall_stage(runtime, stage, *, leg=None, camera=None, detector=None,
         outcome = turn_left_at_corner(runtime, tracker, target, limits, terminal_wall)
         return outcome.done
     if stage == "top-return":
+        # Legacy standalone diagnostic; the full mission uses forward return legs.
         tracker = WallTracker()
         return reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits).done
     if stage == "finish":
-        # The H-zone approach references the wall the reverse leg measured, so the
-        # reverse is part of this stage rather than assumed to have happened.
+        # Legacy standalone diagnostic: reverse and right-turn before parking.
+        # The full mission arrives facing up and calls enter_finish_zone_forward.
         tracker = WallTracker()
         reverse = reverse_top_to_finish_corner(runtime, tracker, desired, legs, limits)
         return enter_finish_zone(runtime, tracker, desired, limits, reverse.terminal_wall)

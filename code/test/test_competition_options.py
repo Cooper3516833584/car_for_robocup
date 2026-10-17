@@ -49,14 +49,14 @@ class OperatorSettingsTests(unittest.TestCase):
                                              finish_front_m=.9, task_counts=counts)
                 h.runtime.competition_options = options
                 wall = make_wall(0, 1.3)
-                reverse = Mock(terminal_wall=wall)
                 with patch('config.v2_factory.build_servo', return_value=Mock(is_running=False)), \
                         patch('components.servo_positioning.park_servo'), \
                         patch.object(task, 'read_task_board', return_value=TaskCounts(2, 1, 1)) as read, \
                         patch.object(task, 'patrol_wall_leg', return_value=(True, False, wall)) as patrol, \
                         patch.object(task, 'turn_left_at_corner'), \
-                        patch.object(task, 'reverse_top_to_finish_corner', return_value=reverse), \
-                        patch.object(task, 'enter_finish_zone', return_value=True):
+                        patch.object(task, '_run_wall_action', return_value=Mock(done=True)), \
+                        patch.object(task, 'reverse_top_to_finish_corner', side_effect=AssertionError('legacy return')), \
+                        patch.object(task, 'enter_finish_zone_forward', return_value=True):
                     result = task.run_wall_mission(h.runtime)
                 h.runtime.close()
                 self.assertTrue(result.parking_done)
