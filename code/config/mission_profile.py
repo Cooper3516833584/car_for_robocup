@@ -3,7 +3,7 @@
 from dataclasses import replace
 import math
 
-WALL_CRUISE_SPEED_M_S = 0.40
+WALL_CRUISE_SPEED_M_S = 0.20
 
 
 def route_speed_config(config, scale, *, wall_mission=False):
@@ -12,8 +12,7 @@ def route_speed_config(config, scale, *, wall_mission=False):
         raise ValueError("--speed-scale must be finite and positive")
     drive = config.drive
     if wall_mission:
-        # Operator-requested wall profile: permit 40 cm/s through both chassis
-        # and wheel limiting even with the board's older 20/30 cm/s TOML.
+        # Permit the operator's cruise target through chassis and wheel limiting.
         drive = replace(drive,
                         max_linear_speed_m_s=max(drive.max_linear_speed_m_s, WALL_CRUISE_SPEED_M_S),
                         max_wheel_speed_m_s=max(drive.max_wheel_speed_m_s, WALL_CRUISE_SPEED_M_S))
