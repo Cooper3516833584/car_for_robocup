@@ -31,6 +31,7 @@ from components.wall_observer import (
     wrap_to_pi,
 )
 from core.types import Twist2D
+from config.mission_profile import WALL_CRUISE_SPEED_M_S
 
 LOG = logging.getLogger("wall-navigation")
 
@@ -58,7 +59,7 @@ TERMINAL_TRACK_ANGLE_RAD = math.radians(30.0)
 MIN_TERMINAL_SPAN_M = MIN_SPAN_M
 TERMINAL_DISTINCT_LINES_M = 0.10
 DROP_TERMINAL_RANGE_M = 0.06
-DROP_FINE_SPEED_M_S = 0.05
+DROP_FINE_SPEED_M_S = 0.15
 DROP_TERMINAL_SPEED_M_S = 0.012
 # Heading hold while translating squarely toward or away from one wall. The band
 # is the allowed residual tilt; outside it the correction is proportional with a
@@ -67,9 +68,8 @@ DROP_HEADING_BAND_RAD = math.radians(5.0)
 DROP_HEADING_GAIN = 1.5
 TERMINAL_CREEP_SPEED_M_S = 0.008
 
-# Cruise profile derived from the field config, matching the retired patrol
-# numbers so the physical speed does not change.
-CRUISE_SPEED_FACTOR = 0.15
+# Operator-requested cruise target; the runtime profile sets the drive envelope.
+CRUISE_SPEED_FACTOR = WALL_CRUISE_SPEED_M_S
 VISION_SPEED_FACTOR = 0.08
 CRUISE_MIN_FACTOR = 0.045
 

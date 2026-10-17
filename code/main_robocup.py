@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None, *, stop_event=None, send_drone_task=None
                 args.relative_slam
                 or (mode is RuntimeMode.HARDWARE_MISSION and not args.localization_from_config)):
             config = accepted_relative_slam_profile(config)
-        config = route_speed_config(config, args.speed_scale)
+        config = route_speed_config(config, args.speed_scale, wall_mission=use_wall_runtime)
         if use_wall_runtime:
             runtime = build_wall_runtime(config, mode)
             from components.competition_options import CompetitionOptions

@@ -139,7 +139,7 @@ SHORT_MOVE_TOLERANCE_M = 0.005
 # ---- Central 10% trigger, then fixed blind side-drop ------------------------
 # Field tuning lives here; pixels never alter the blind approach endpoint.
 TARGET_COLOR = "yellow"
-DROP_FINE_SPEED_M_S = 0.05
+DROP_FINE_SPEED_M_S = 0.15
 DROP_TERMINAL_SPEED_M_S = 0.012
 DROP_TERMINAL_RANGE_M = 0.06
 DROP_FUSED_TOLERANCE_M = 0.003
