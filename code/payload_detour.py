@@ -184,16 +184,20 @@ def run_payload_detour(runtime, settings, *, guard=lambda: None,
         # A side wall alone cannot measure travel along the patrol direction.
         # Lock a separate front/rear wall for this short move; never replace
         # the road tracker or estimate these 5 cm from commanded speed/time.
-        _step(runtime)
-        snapshot = runtime.observer.latest()
-        if snapshot is None or not snapshot.is_fresh(float(clock())):
-            raise RuntimeError("pre-turn advance requires a fresh wall scan")
-        candidates = [wall for wall in snapshot.lines
-                      if abs(wall.normal_xy[0]) >= math.cos(math.radians(30))
-                      and abs(sum(a * b for a, b in zip(wall.normal_xy, reference.normal_xy)))
-                      <= math.sin(math.radians(20))]
-        if not candidates:
-            raise RuntimeError("pre-turn advance requires a visible front or rear wall")
+        runtime.action = None
+        while True:
+            check()
+            _step(runtime)  # Keep zero output and honour STOP while awaiting feedback.
+            snapshot = runtime.observer.latest()
+            candidates = []
+            if snapshot is not None and snapshot.is_fresh(float(clock())):
+                candidates = [wall for wall in snapshot.lines
+                              if abs(wall.normal_xy[0]) >= math.cos(math.radians(30))
+                              and abs(sum(a * b for a, b in zip(wall.normal_xy, reference.normal_xy)))
+                              <= math.sin(math.radians(20))]
+            if candidates:
+                break
+            sleep(PERIOD_S)
         forward_wall = max(candidates, key=lambda wall:
                            (wall.normal_xy[0] > 0, wall.span_m, -wall.rms_m))
         forward_tracker = WallTracker()
