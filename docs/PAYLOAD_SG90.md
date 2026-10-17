@@ -125,16 +125,16 @@ close 仅支持 all；正常退出保持最后 PWM。直接 drop 默认 OPEN 五
 
 ## 右侧抛投开环测试（不依赖定位与巡线）
 
-`tools/run_right_drop_test.py` 只验证 slot 4 的右侧抛投动作本身：不构造融合位姿、
+`code/run_right_drop_test.py` 只验证 slot 4 的右侧抛投动作本身：不构造融合位姿、
 不读 D500 墙面、不做巡线，整套动作由“指令量 + 时间”开环驱动，几何顺序与正式
 `payload_detour.py` 的 `right_mount` 一致——前进 2 s → 停车 → 左转 90° → 侧向约
 32 cm → 左转 90° → 停车释放 slot 4 并保持 0.5 s → 右转 90° → 侧向倒回 → 右转 90°
 回到巡线航向 → 再前进 2 s。
 
 ```sh
-python3 tools/run_right_drop_test.py --confirm-motor-test                 # 真实释放
-python3 tools/run_right_drop_test.py --confirm-motor-test --simulate-release  # 只验证动作
-python3 tools/run_right_drop_test.py --confirm-motor-test --detour-direction -1  # 先右转
+python3 code/run_right_drop_test.py --confirm-motor-test                 # 真实释放
+python3 code/run_right_drop_test.py --confirm-motor-test --simulate-release  # 只验证动作
+python3 code/run_right_drop_test.py --confirm-motor-test --detour-direction -1  # 先右转
 ```
 
 必须显式 `--confirm-motor-test`；`--simulate-release` 只跳过物资 PWM，动作仍会执行。
