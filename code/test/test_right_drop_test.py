@@ -202,16 +202,24 @@ class EntryTests(unittest.TestCase):
             self.addCleanup(patched.stop)
 
     def run_entry(self, *extra):
-        return entry.main(["--confirm-motor-test", "--log-dir", str(self.log_dir),
+        return entry.main(["--log-dir", str(self.log_dir),
                            "--forward-1-s", "0.05", "--forward-2-s", "0.05",
                            "--side-time-s", "0.05", "--turn-time-s", "0.05",
                            "--release-hold-s", "0.05", *extra])
 
-    def test_motor_test_requires_the_explicit_confirmation(self):
-        never_created = Path("logs") / "right-drop-test-never-created"
-        with self.assertRaises(SystemExit):
-            entry.main(["--log-dir", str(never_created)])
-        self.assertFalse(never_created.exists())
+    def test_the_parser_requires_no_arguments_at_all(self):
+        args = entry.build_parser().parse_args([])
+        self.assertFalse(args.simulate_release)
+        self.assertEqual(args.payload_slot, entry.PAYLOAD_SLOT)
+        self.assertEqual(args.detour_direction, entry.DETOUR_DIRECTION)
+        self.assertEqual(args.forward_1_s, entry.FORWARD_1_S)
+        self.assertEqual(args.forward_2_s, entry.FORWARD_2_S)
+        self.assertEqual(args.side_time_s, entry.SIDE_TIME_S)
+        self.assertEqual(args.turn_time_s, entry.TURN_TIME_S)
+        self.assertEqual(args.release_hold_s, entry.RELEASE_HOLD_S)
+        self.assertAlmostEqual(args.travel_speed_cm_s, entry.TRAVEL_SPEED_M_S * 100.0)
+        self.assertEqual(Path(args.config), entry.ROOT / "configs" / "robocup_diffdrive.toml")
+        self.assertIsNone(args.log_dir)
 
     def test_entry_closes_then_releases_the_configured_slot_and_opens_all_at_the_end(self):
         self.fixture()

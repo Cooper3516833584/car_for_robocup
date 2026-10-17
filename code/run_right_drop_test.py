@@ -15,9 +15,10 @@
 开环估计：转角没有陀螺反馈，侧向距离没有里程反馈。默认值取自实测记录的换算，
 首次现场运行必须实测核对并按需调整（见 ``docs/PAYLOAD_SG90.md``）。
 
-需要 ``--confirm-motor-test`` 才动车；``--simulate-release`` 只跳过物资 PWM，
-动作仍会执行。Ctrl+C / SIGTERM / 日志目录中的 ``STOP`` 文件都会立即停车。
-退出时先停车，再把五只物资全部 OPEN（除非显式模拟）。
+不带任何参数直接运行即为本测试：``python3 code/run_right_drop_test.py``。
+``--simulate-release`` 只跳过物资 PWM，动作仍会执行。Ctrl+C / SIGTERM /
+日志目录中的 ``STOP`` 文件都会立即停车。退出时先停车，再把五只物资全部 OPEN
+（除非显式模拟）。
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "code"))
 
 from components.diagnostics_log import JsonlEventLogger  # noqa: E402
 from components.payload_servos import close_payload, open_payload  # noqa: E402
@@ -172,8 +172,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="measured hardware profile; the board's own TOML, never the example")
     parser.add_argument("--log-dir", type=Path,
                         help="evidence directory; default logs/right-drop-test-<timestamp>")
-    parser.add_argument("--confirm-motor-test", action="store_true",
-                        help="required: this is an explicitly requested, operator-supervised motor test")
     parser.add_argument("--simulate-release", action="store_true",
                         help="run every motion step but skip the payload PWM command")
     parser.add_argument("--payload-slot", type=int, choices=(0, 1, 2, 3, 4), default=PAYLOAD_SLOT)
@@ -192,8 +190,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.confirm_motor_test:
-        parser.error("pass --confirm-motor-test for this explicitly requested hardware test")
     try:
         settings = RightDropSettings(
             payload_slot=args.payload_slot,

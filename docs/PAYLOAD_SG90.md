@@ -132,14 +132,15 @@ close 仅支持 all；正常退出保持最后 PWM。直接 drop 默认 OPEN 五
 回到巡线航向 → 再前进 2 s。
 
 ```sh
-python3 code/run_right_drop_test.py --confirm-motor-test                 # 真实释放
-python3 code/run_right_drop_test.py --confirm-motor-test --simulate-release  # 只验证动作
-python3 code/run_right_drop_test.py --confirm-motor-test --detour-direction -1  # 先右转
+python3 code/run_right_drop_test.py                          # 不带参数直接跑，真实释放
+python3 code/run_right_drop_test.py --simulate-release       # 只验证动作
+python3 code/run_right_drop_test.py --detour-direction -1    # 先右转
 ```
 
-必须显式 `--confirm-motor-test`；`--simulate-release` 只跳过物资 PWM，动作仍会执行。
-Ctrl+C、SIGTERM 或日志目录中的 `STOP` 文件都会立即停车；正常或异常退出都先停车，
-再把五只物资全部 OPEN（模拟模式不改动 PWM）。开始前若 CLOSE 五只失败则拒绝动车。
+不带任何参数即可运行，所有参数都有默认值；`--simulate-release` 只跳过物资 PWM，
+动作仍会执行。Ctrl+C、SIGTERM 或日志目录中的 `STOP` 文件都会立即停车；正常或异常
+退出都先停车，再把五只物资全部 OPEN（模拟模式不改动 PWM）。开始前若 CLOSE 五只失败
+则拒绝动车。
 
 转角与侧向距离没有反馈，默认值来自实测记录的换算（`WHEEL_TRACKING=0.889`、
 `TURN_RATE_RAD_S=0.50`、`TURN_TIME_S=3.6`），属于**未在现场复测的假设**：首跑必须
