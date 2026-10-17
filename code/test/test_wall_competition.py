@@ -86,13 +86,13 @@ class _Counts:
 
 class FieldParameterTests(unittest.TestCase):
     def test_c01_the_four_measured_wall_distances_are_used_in_order(self):
-        self.assertEqual(WALL_RIGHT_DISTANCE_M, (1.600, 1.895, 1.690, 2.330))
+        self.assertEqual(WALL_RIGHT_DISTANCE_M, (1.550, 1.845, 1.640, 2.280))
         self.assertEqual(task.WALL_LEG_NAMES, ("left", "bottom", "right", "top"))
 
     def test_the_lidar_to_base_conversion_uses_the_live_mount_offset(self):
         # Lidar on the drive axis: no correction at all.
-        self.assertAlmostEqual(desired_right_base(0, 0.0), 1.600, places=9)
-        self.assertAlmostEqual(desired_right_base(3, 0.0), 2.330, places=9)
+        self.assertAlmostEqual(desired_right_base(0, 0.0), 1.550, places=9)
+        self.assertAlmostEqual(desired_right_base(3, 0.0), 2.280, places=9)
         # A radar 5 cm to the left of the drive axis shortens every base target
         # by exactly that 5 cm, in both directions.
         for index in range(4):
@@ -117,14 +117,14 @@ class FieldParameterTests(unittest.TestCase):
         self.assertEqual([leg.name for leg in legs],
                          ["left", "bottom", "right", "top_search"])
         self.assertEqual([leg.direction for leg in legs], [1, 1, 1, 1])
-        self.assertEqual([leg.target_right_m for leg in legs], [1.600, 1.895, 1.690, 2.330])
+        self.assertEqual([leg.target_right_m for leg in legs], [1.550, 1.845, 1.640, 2.280])
         # Three legs stop on the front wall; the top leg ends on the left wall.
         # Including the top edge: with the nose left, the map's left perimeter
         # wall is ahead of the chassis, so it is a front-wall terminal.
         self.assertEqual([leg.terminal_name for leg in legs],
                          ["front_wall", "front_wall", "front_wall",
                           "front_left_perimeter_wall"])
-        self.assertEqual(desired[0], 1.600)
+        self.assertEqual(desired[0], 1.550)
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ class WallRouteTests(unittest.TestCase):
     def test_r07_the_top_leg_reverses_with_the_nose_unchanged(self):
         legs, desired = self.route_legs()
         top = legs[3]
-        self.assertEqual(top.target_right_m, 2.330)
+        self.assertEqual(top.target_right_m, 2.280)
         self.assertEqual(top.direction, +1)  # the search itself still goes left
         self.assertTrue(top.must_finish_on_pending_empty)
         # The return reverses: constructed by the reverse helper, not by the leg.
@@ -269,8 +269,8 @@ class WallRouteTests(unittest.TestCase):
                                  limits=_limits(), tracker=WallTracker(),
                                  terminal_role=is_rear_wall, terminal_target_m=desired[2])
         self.assertEqual(action.direction, -1)
-        self.assertEqual(action.target_distance_m, 2.330)
-        self.assertEqual(action.terminal_target_m, 1.690)
+        self.assertEqual(action.target_distance_m, 2.280)
+        self.assertEqual(action.terminal_target_m, 1.640)
 
     def test_r08_the_return_looks_at_the_rear_wall_not_the_front_wall(self):
         from components.wall_navigation import FollowRightWall, WallTracker, is_rear_wall
@@ -480,8 +480,8 @@ class PatrolResumeTests(unittest.TestCase):
         self.assertGreater(ticks[0].command.linear_x_m_s, 0)
         measurements = [e['terminal_measured_m'] for e in h.events
                         if e['type'] == 'wall_control' and e.get('terminal_visible')]
-        self.assertTrue(all(d > 1.87 for d in measurements))
-        self.assertAlmostEqual(terminal.rho_base_m, 1.895, delta=.02)
+        self.assertTrue(all(d > 1.82 for d in measurements))
+        self.assertAlmostEqual(terminal.rho_base_m, 1.845, delta=.02)
 
 
 class WallDetourTests(unittest.TestCase):
