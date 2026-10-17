@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # 快速调整区：距离单位米，右墙距离顺序为左边、底边、右边、顶边。
 # 无参数运行此文件：通过开机监听服务启动正式任务，保留任务板识别。
-WALL_RIGHT_DISTANCE_M = (1.550, 1.845, 1.640, 2.280)
+WALL_RIGHT_DISTANCE_M = (1.530, 1.825, 1.620, 2.260)
 STANDARD_DROP_M = 0.43       # 普通投放前进距离（槽位 0..3）
 RIGHT_MOUNT_DROP_M = 0.32    # 右侧投放前进距离（黄色，槽位 4）
 FINISH_FRONT_DISTANCE_M = 1.10

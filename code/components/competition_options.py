@@ -5,7 +5,7 @@ import math
 
 @dataclass(frozen=True)
 class CompetitionOptions:
-    wall_right_distance_m: tuple = (1.550, 1.845, 1.640, 2.280)
+    wall_right_distance_m: tuple = (1.530, 1.825, 1.620, 2.260)
     standard_drop_m: float = .43
     right_mount_drop_m: float = .32
     finish_front_m: float = 1.10

@@ -4,7 +4,7 @@ No task-board OCR. Uses the existing boot listener, real drive and five payload
 servos; Ctrl+C requests STOP. No command-line arguments are required.
 """
 # 快速调整区：距离单位米，顺序为左边、底边、右边、顶边。
-WALL_RIGHT_DISTANCE_M = (1.550, 1.845, 1.640, 2.280)
+WALL_RIGHT_DISTANCE_M = (1.530, 1.825, 1.620, 2.260)
 STANDARD_DROP_M = 0.43       # 普通投放前进距离（槽位 0..3）
 RIGHT_MOUNT_DROP_M = 0.32    # 右侧投放前进距离（黄色，槽位 4）
 FINISH_FRONT_DISTANCE_M = 1.10

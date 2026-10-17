@@ -56,8 +56,8 @@ from robocup_runtime import RobocupMissionState
 # 2026-10-16 revision: the operator re-measured every leg wall distance and
 # added 20 cm to each of the four original values (140/169.5/149/213 cm), and
 # supplied the final H-zone parking distance.
-# 2026-10-17: the operator reduced all four patrol distances by 5 cm.
-WALL_RIGHT_DISTANCE_M = (1.550, 1.845, 1.640, 2.280)
+# 2026-10-17: the operator reduced all four patrol distances by 7 cm in total.
+WALL_RIGHT_DISTANCE_M = (1.530, 1.825, 1.620, 2.260)
 WALL_LEG_NAMES = ("left", "bottom", "right", "top")
 # Lidar to top wall at the final upward parking pose.
 FINISH_FRONT_DISTANCE_M = 1.10
