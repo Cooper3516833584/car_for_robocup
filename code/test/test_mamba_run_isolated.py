@@ -95,7 +95,8 @@ class RealMambaIsolationTests(unittest.TestCase):
             proc.mkdir(parents=True)
             private = Path(directory) / 'private'
             probe = ('import json, os; print(json.dumps({key: os.environ.get(key) for key in '
-                     "('XDG_CACHE_HOME', 'CONDA_PREFIX', 'PYTHONPATH', 'ROS_LOCALHOST_ONLY')}))")
+                     "('XDG_CACHE_HOME', 'CONDA_PREFIX', 'PYTHONPATH', 'ROS_LOCALHOST_ONLY', "
+                     "'PATH', 'LD_LIBRARY_PATH', 'AMENT_PREFIX_PATH', 'ROS_DISTRO')}))")
             for damaged_data in (b'', b'{broken'):
                 (proc / '99999999.json').write_bytes(damaged_data)
                 for restore_existing in (False, True):
@@ -105,6 +106,16 @@ class RealMambaIsolationTests(unittest.TestCase):
                         environment.pop('XDG_CACHE_HOME', None)
                         if restore_existing:
                             environment['XDG_CACHE_HOME'] = str(shared)
+                        # The installed activation hooks legitimately prepend
+                        # Python/ROS paths. Compare against a healthy original
+                        # launch rather than assuming activation is a no-op.
+                        healthy = subprocess.run(
+                            [mamba, 'run', '-p', prefix, sys.executable, '-c', probe],
+                            env=dict(environment, XDG_CACHE_HOME=str(Path(directory) / 'healthy')),
+                            capture_output=True, text=True, timeout=20)
+                        self.assertEqual(healthy.returncode, 0, healthy.stderr)
+                        expected = json.loads(healthy.stdout.splitlines()[-1])
+                        expected['XDG_CACHE_HOME'] = str(shared) if restore_existing else None
                         baseline = subprocess.run(
                             [mamba, 'run', '-p', prefix, sys.executable, '-c', 'pass'],
                             env=dict(environment, XDG_CACHE_HOME=str(shared)),
@@ -118,10 +129,9 @@ class RealMambaIsolationTests(unittest.TestCase):
                             capture_output=True, text=True, timeout=20)
                         self.assertEqual(launched.returncode, 0, launched.stderr)
                         child = json.loads(launched.stdout.splitlines()[-1])
-                        self.assertEqual(child['XDG_CACHE_HOME'],
-                                         str(shared) if restore_existing else None)
+                        self.assertEqual(child, expected)
                         self.assertEqual(child['CONDA_PREFIX'], prefix)
-                        self.assertEqual(child['PYTHONPATH'], '/preserved/vision/path')
+                        self.assertIn('/preserved/vision/path', child['PYTHONPATH'].split(os.pathsep))
                         self.assertEqual(child['ROS_LOCALHOST_ONLY'], '1')
                         self.assertEqual((proc / '99999999.json').read_bytes(), damaged_data)
                         # Mimic a crashed earlier invocation in the private root.
