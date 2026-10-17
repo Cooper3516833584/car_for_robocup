@@ -255,28 +255,15 @@ class BootTests(unittest.TestCase):
         self.assertEqual(self.events,[('buzz_off',0.),('open',0.)])
         self.driver.start.assert_called_once()
 
-    def test_countdown_then_maps_then_full_beep_and_ocr_gate(self):
+    def test_mission_starts_immediately_after_close_without_beep(self):
         def mission(*args,**kwargs):
             self.events.append(('mission',self.now))
             self.assertNotIn('send_drone_task', kwargs)
             return 0
         self.mission.side_effect=mission
         self.run_worker()
-        # CLOSE at t=0, a full 20 s countdown, then a full 5 s beep, then the
-        # mission. No map rebuild and no drone handshake sits in between.
-        self.assertEqual([name for name, _ in self.events][:4],
-                         ['close', 'buzz_on', 'buzz_off', 'mission'])
-        self.assertAlmostEqual(dict(self.events)['buzz_on'], 20.)
-        self.assertAlmostEqual(dict(self.events)['buzz_off'], 25.)
-        self.assertAlmostEqual(dict(self.events)['mission'], 25.)
-        self.assertEqual(self.events[-1], ('open', 25.))
-
-    def test_stop_during_five_second_beep_prevents_the_mission(self):
-        self.run_worker(22.)
-        self.mission.assert_not_called()
-        self.assertIn(('buzz_on', 20.), self.events)
-        self.assertIn(('buzz_off', 22.), self.events)
-        self.assertEqual(self.events[-1], ('open', 22.))
+        self.assertEqual([name for name, _ in self.events], ['close', 'mission', 'open'])
+        self.assertEqual(dict(self.events)['mission'], 0.)
 
     def test_false_payload_close_is_reported_but_does_not_abort_mission(self):
         self.close.side_effect=None
