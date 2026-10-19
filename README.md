@@ -2,6 +2,41 @@
 
 This repository contains the RoboCup ground vehicle software for a differential-drive chassis with two driven center wheels and passive front/rear supports. The production stack uses C10B motor control, D500 lidar localization, optional Intel RealSense T265 odometry, canonical SI poses, and a separate mission runtime.
 
+## Project at a glance
+
+| Item | Value |
+|---|---|
+| Chassis | Differential drive, two driven centre wheels, passive front/rear supports |
+| Motor controller | C10B over serial (`/dev/ttyACM0`, 115200 8N1 on the current rig) |
+| Localization | D500 LiDAR (SLAM/ICP), optional Intel RealSense T265 odometry |
+| Compute | ROCK 5A-class host running the Python runtime |
+| Radio | HC-15 / HC-14 link for RUN / STOP / PING |
+| Payload | Five SG90 drop servos (see `docs/PAYLOAD_SG90.md`) |
+
+## Architecture
+
+- [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) — diagrams plus a
+  component-to-source evidence table.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layering rationale for
+  `DifferentialNavigation → Twist2D → DifferentialDrive → C10B`.
+
+The current runtime is a **directed-line Pure Pursuit** kernel; the relative-SLAM
+path does not plan around obstacles. Example geometry and sensor mounts are
+placeholders until measured.
+
+## Validation status
+
+- `dry-run` is the only mode exercised without a vehicle: fake sensors, fake drive
+  backend and a synthetic field goal.
+- `hardware-probe` starts sensors only and does not navigate.
+- `hardware-mission` checks localization readiness and rejects unverified
+  differential firmware when that protocol is selected.
+- Measured hardware values and acceptance records live in
+  `docs/HARDWARE_MEASUREMENTS.md`, `docs/INTEGRATION_ACCEPTANCE.md` and the dated
+  test logs. This README makes no success-rate or performance claim.
+- The `ackermann_firmware_compat` adapter remains until differential firmware is
+  physically verified; do not treat the example config as calibrated.
+
 ## Quick start
 
 On the car in VS Code Remote SSH, open either file and click **Run Python File**;
