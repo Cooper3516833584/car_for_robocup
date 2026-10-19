@@ -1,0 +1,13 @@
+# pip layer installed into the conda environment after the explicit conda lock.
+# Versions match /home/radxa/robocup_ros/env on the car board (2026-10-19).
+# RapidOCR, ONNX Runtime and OpenCV live in the parent env so the vision venv
+# (created with --system-site-packages) inherits them.
+rapidocr==3.9.2
+onnxruntime==1.30.0
+opencv-python==4.12.0
+opencv-python-headless==4.12.0
+PyYAML==6.0.3
+shapely==2.1.2
+pyclipper==1.4.0
+requests==2.34.2
+tqdm==4.70.1

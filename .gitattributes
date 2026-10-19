@@ -1,0 +1,13 @@
+# The car runs these files on Linux. Keep LF in the repository even when the
+# checkout is used from Windows (core.autocrlf=true would otherwise rewrite the
+# shell scripts and unit files with CRLF and break them on the board).
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+*.rules text eol=lf
+*.in text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.patch text eol=lf -whitespace
+*.md text eol=lf
+deploy/board/rock5a-pwm0-permissions text eol=lf

@@ -3,8 +3,10 @@
 现行入口是 `code/main_robocup.py`，配置只支持 schema v2。
 旧 task1/task2 入口、v1 loader、舵机参数和旧车辆 profile 已删除。
 
-从 `configs/robocup_diffdrive.example.toml` 复制到被 Git 忽略的
-`configs/robocup_diffdrive.toml`，录入真实测量值；示例值不能作为实机标定。
+`configs/robocup_diffdrive.toml` 自 2026-10-19 起纳入版本管理，保存本车实测值，
+新板拉取后可直接使用；示例文件 `configs/robocup_diffdrive.example.toml` 仍是
+占位模板。换板时按 `docs/BOARD_PORTING.md` 修改端口、引脚和标定值，
+不要用示例值覆盖实车配置。
 
 ```powershell
 Copy-Item configs\robocup_diffdrive.example.toml configs\robocup_diffdrive.toml

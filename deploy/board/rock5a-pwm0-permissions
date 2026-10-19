@@ -1,0 +1,29 @@
+#!/bin/sh
+# Grant the pwm group write access to the ROCK 5A PWM0 channel (physical pin 23).
+#
+# This file used to exist only at /usr/local/sbin/rock5a-pwm0-permissions on the
+# car board. It is tracked here so a replacement board can be provisioned from
+# the repository; install_board_setup.sh installs it with mode 0755.
+set -eu
+
+CHIP=/sys/class/pwm/pwmchip0
+PWM="$CHIP/pwm0"
+
+if [ ! -d "$PWM" ]; then
+    printf '0\n' > "$CHIP/export"
+    attempts=0
+    while [ ! -d "$PWM" ] && [ "$attempts" -lt 20 ]; do
+        sleep 0.05
+        attempts=$((attempts + 1))
+    done
+fi
+
+if [ ! -d "$PWM" ]; then
+    echo "pwm0 export failed" >&2
+    exit 1
+fi
+
+chgrp pwm "$CHIP/export" "$CHIP/unexport" \
+    "$PWM/enable" "$PWM/period" "$PWM/duty_cycle" "$PWM/polarity"
+chmod g+rw "$CHIP/export" "$CHIP/unexport" \
+    "$PWM/enable" "$PWM/period" "$PWM/duty_cycle" "$PWM/polarity"

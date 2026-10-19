@@ -5,7 +5,11 @@ __pycache__/
 .venv-task-board/
 venv/
 logs/
-configs/robocup_diffdrive.toml
+
+# The deployed runtime profile is tracked on purpose (2026-10-19): a freshly
+# pulled board must start with the real measured values, not the placeholders in
+# robocup_diffdrive.example.toml. Site-specific ports/pins are edited in place;
+# see docs/BOARD_PORTING.md.
 
 # On-site runtime state (现场可改，不属于车辆静态标定)
 runtime/

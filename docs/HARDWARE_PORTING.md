@@ -9,6 +9,9 @@
 [HARDWARE_COMMISSIONING.md](HARDWARE_COMMISSIONING.md) 验证后再设置 measured 标记。
 坐标原点位于两驱动轮轴线中点，yaw 逆时针为正。
 
+换一块 ROCK 5A 时的完整步骤、引脚/服务/环境配置见
+[BOARD_PORTING.md](BOARD_PORTING.md)；本文只讲软件接口与标定原则。
+
 C10B 的 `rear_motor.py` 帧编码、发送线程和 watchdog 保持不变。
 保留 `ackermann_firmware_compat` 直到实际验证差速 v/omega 固件；换车时不能
 根据底盘名称猜测协议，也不能改速度限制来掩盖轮距或电机方向问题。

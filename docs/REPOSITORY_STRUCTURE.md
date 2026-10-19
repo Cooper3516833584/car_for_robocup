@@ -24,9 +24,11 @@ car_for_robocup/
 │   ├── tools/                  scripts and hardware probes
 │   ├── legacy/                 archived code (reference only)
 │   └── ros2_ws/                optional ROS 2 utilities
-├── configs/                    example + local (ignored) TOML
+├── configs/                    tracked measured profile + example TOML
 ├── models/                     task-board YOLO weights
-├── launch/, deploy/            runtime launch and systemd/desktop assets
+├── launch/, deploy/            runtime launch, systemd units, board setup
+│   ├── board/                  ROCK 5A groups, udev, PWM0 helper
+│   └── ros_env/                pinned ROS 2 + vision environment recipe
 ├── docs/                       architecture, calibration, measurements, acceptance
 └── former_code/                earlier implementation (read-only)
 ```
@@ -52,12 +54,13 @@ structural change.
 
 ## Generated / ignored
 
-`configs/robocup_diffdrive.toml`, `runtime/`, `logs/`, `__pycache__/`,
-`code/radar_center_config.json` and test temp directories are ignored.
+`runtime/`, `logs/`, `__pycache__/`, `code/radar_center_config.json` and test
+temp directories are ignored. `configs/robocup_diffdrive.toml` is tracked since
+2026-10-19; see `docs/BOARD_PORTING.md` for the board-level layout.
 
 ## Related documents
 
 - `docs/SYSTEM_ARCHITECTURE.md`, `docs/ARCHITECTURE.md`
 - `docs/HARDWARE_MEASUREMENTS.md`, `docs/INTEGRATION_ACCEPTANCE.md`
-- `docs/REFERENCE_AND_LICENSE_NOTES.md`
+- `docs/BOARD_PORTING.md`, `docs/REFERENCE_AND_LICENSE_NOTES.md`
 - `docs/TESTING.md`

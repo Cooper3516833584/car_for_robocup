@@ -1,0 +1,8 @@
+# Packages installed into the vision venv on top of the parent conda env.
+# The venv is created with --system-site-packages, so ROS, OpenCV, RapidOCR,
+# ONNX Runtime and pyrealsense2 come from the parent environment.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+ultralytics==8.4.174
+matplotlib==3.11.2

@@ -1,0 +1,239 @@
+# RoboCup 差速底盘 —— 本车（ROCK 5A + WHEELTEC L150）实测配置
+#
+# 本文件自 2026-10-19 起纳入版本管理，是可部署的参考配置：
+# 新板拉取仓库后可直接使用；引脚、串口或标定不同时，按
+# docs/BOARD_PORTING.md 修改本文件后再运行。
+# 由 configs/robocup_diffdrive.example.toml 生成，只替换已实测值。
+# 依据 docs/CALIBRATION.md：本文件承载实测数据，模板保持占位值。
+# 有效性标记保持 false，直到动态复核与其余测量完成（见文件末尾）。
+
+# 机械尺寸以下两项已实测（2026-09-27）；其余仍为占位值。
+schema_version = 2
+robot_name = "robocup_diffdrive"
+
+[calibration]
+geometry_measured = false
+sensor_extrinsics_measured = false
+c10b_diff_firmware_verified = true
+
+[vehicle.geometry]
+# 实测：左右主动轮有效滚动接触中心线间距 198 mm
+drive_track_width_m = 0.198
+# 实测：车轮直径 67 mm（注意：当前代码无消费者，仅测量记录）
+wheel_diameter_m = 0.067
+body_length_m = 0.450
+body_width_m = 0.350
+drive_axle_to_body_center_x_m = 0.000
+front_support_x_m = 0.180
+rear_support_x_m = -0.180
+
+[vehicle.drive]
+kinematics = "differential"
+protocol_mode = "differential_vx_vz"
+max_wheel_speed_m_s = 0.30
+max_linear_speed_m_s = 0.20
+max_angular_speed_rad_s = 0.80
+max_linear_accel_m_s2 = 0.30
+max_angular_accel_rad_s2 = 1.00
+command_timeout_s = 0.25
+firmware_track_width_m = 0.164
+firmware_min_turn_radius_m = 0.350
+allow_in_place_rotation = true
+
+[devices.c10b]
+port = "/dev/ttyACM0"
+baudrate = 115200
+
+[devices.d500]
+enabled = true
+port = "/dev/ttyS6"
+baudrate = 230400
+
+[sensors.d500.mount]
+# 实测：雷达位于驱动轮中轴线正中心，正向朝车头
+#   x: 在主动轮轴线上 -> 0
+#   y: 正中心 -> 0
+#   z: 205 mm ground height, derived from T265 65 mm + 140 mm (2026-10-16).
+x_m = 0.0
+y_m = 0.0
+z_m = 0.20500
+roll_rad = 0.0
+pitch_rad = 0.0
+yaw_rad = 0.0
+
+[sensors.d500.localization]
+enable_icp = true
+enable_wall_absolute = true
+require_global_for_hardware = true
+# Placeholder field extent and wall references. Survey the actual barriers.
+reference_measured = false
+field_width_m = 10.0
+field_height_m = 10.0
+back_wall_x_m = 0.0
+right_wall_y_m = 0.0
+# Only back/right reference walls are assumed by default; opt in to others when verified.
+use_front_wall = false
+use_left_wall = false
+min_confidence = 0.65
+max_position_jump_m = 0.50
+max_yaw_jump_rad = 0.35
+
+[devices.t265]
+enabled = true
+serial = "230322111433"
+
+# LCUS USB relay (CH340, fixed 9600 8N1) used as a payload switch. Disabled by
+# default: enable it only after the port has been pinned with a udev rule, since
+# CH340 has the same USB ID as the HC-14 radio and /dev/ttyUSB* numbering moves.
+# Contacts stay latched after the process exits; the runtime requests all_off on
+# shutdown. See docs/RELAY_LCUS.md.
+
+# 单轴 PWM 舵机（MG90S）：ROCK 5A PWM7_IR_M0 = 物理 Pin 28。
+# 该引脚需要设备树 overlay rk3588-pwm7-m0；见 docs/SERVO_PWM7_M0.md。
+# 0 度 = 中位脉宽 1500 us，上电不会顶到机械限位。
+# 舵机电源必须走独立 5~6 V BEC，不要用排针 5V。
+[devices.servo]
+enabled = true
+chip_device_match = ["febd0030.pwm"]
+channel = 0
+pwm_path = ""
+period_us = 20000
+pulse_min_us = 500
+pulse_max_us = 2500
+travel_half_range_deg = 90.0
+home_angle_deg = 0.0
+settle_s = 0.35
+min_command_interval_s = 0.02
+
+[sensors.t265.mount]
+# 2026-10-16: Tracking origin 65 mm above ground; 140 mm left/below D500.
+# 2026-10-06: T265 位于车左侧；候选外参经过同原始数据 A/B 和实车复测。
+# 这是内部运动一致性验证，roll/pitch 保持 0，无外部姿态真值。
+x_m = -0.00910
+y_m = 0.14000
+z_m = 0.06500
+roll_rad = 0.0
+pitch_rad = 0.0
+yaw_rad = 1.5707963267948966
+
+[fusion]
+t265_max_age_s = 0.15
+d500_max_age_s = 0.50
+t265_min_tracker_confidence = 2
+
+[navigation]
+position_tolerance_m = 0.03
+yaw_tolerance_rad = 0.0523598776
+lookahead_m = 0.30
+rotate_in_place_threshold_rad = 0.70
+slowdown_distance_m = 0.50
+safety_margin_m = 0.05
+path_yaw_gain = 1.5
+final_yaw_gain = 1.5
+degraded_speed_scale = 0.4
+
+[navigation.map]
+# Survey these values before hardware mission use. They are a software placeholder.
+width_m = 10.0
+height_m = 10.0
+resolution_m = 0.05
+origin_x_m = 0.0
+origin_y_m = 0.0
+measured = false
+static_obstacles = []
+allowed_regions = []
+
+[navigation.footprint]
+# Provisional placeholder only; keep measured=false until the robot is measured.
+measured = false
+
+[safety]
+require_measured_geometry_for_hardware_mission = true
+require_verified_c10b_diff_firmware_for_curved_motion = true
+require_measured_extrinsics_for_hardware_mission = true
+require_measured_map_for_hardware_mission = true
+require_measured_footprint_for_hardware_mission = true
+require_measured_d500_reference_for_hardware_mission = true
+stop_if_pose_lost_s = 0.30
+hardware_probe_max_linear_speed_m_s = 0.10
+hardware_probe_max_angular_speed_rad_s = 0.35
+
+
+# ---------------------------------------------------------------------------
+# 尚未完成、标记因此仍为 false 的项目
+# ---------------------------------------------------------------------------
+# geometry_measured
+#   - 已实测 drive_track_width_m=0.198、wheel_diameter_m=0.067
+#   - 待测：body_length/width、footprint 四边、前后牛眼轮坐标
+#   - 待完成：多速度双方向原地旋转的动态拟合复核
+#
+# 2026-09-27 实测记录（探针见 tools/，均已验证校验与帧格式）
+#   - C10B 运行在固件差速分支 Car_Num=Diff_Car(0)，无最小转弯半径限制
+#   - 固件参数（源码 control.h）：Diff_Car_Wheel_diameter=0.0670 m,
+#     Diff_wheelspacing=0.164 m —— 与车辆实际一致
+#   - +Vz 使左轮后转、右轮前转 = 俯视逆时针，与 base_link 的 +Z/yaw 逆时针
+#     约定一致；backend 无需对角速度取反
+#   - C10B 遥测帧 24 字节：X_speed[2..3]，Z_speed[6..7]，
+#     校验 = XOR(buffer[0..21]) 存于 [22]，尾 [23]=0x7D，115200 8N1
+#   - 右轮曾完全无反馈，已由接线/插头处理排除
+#       处理前直行指令（两轮目标相同）解出：
+#         Vx=+80  -> 左 +73.6 (0.920)  右 -0.6 (-0.007)
+#         Vx=+140 -> 左 +133.5 (0.953) 右 -0.6 (-0.004)
+#         Vx=+1200 持续 10 s -> 左 1063.6 (0.886)  右 10.4 (0.009)
+#       处理后同一指令：左 1066.8 (0.889)  右 1066.2 (0.888)  -> 两轮对称
+#       结论：曾是接插件/线束接触问题，不是电机或编码器损坏。
+#
+#   - 轮速环跟踪率约 0.889（两轮一致），随速度略降
+#       固件参数本身正确：Diff_Car_Wheel_diameter=0.0670 m,
+#       Diff_wheelspacing=0.164 m（源码 control.h），与车辆一致。
+#       残差来自固件速度环未完全达到目标轮速，不是配置或几何错误。
+#
+#   - 陀螺绝对标定（T265，原地旋转，双向 3 档）
+#       Vz=+600  -> yaw +0.5002 rad/s (k=0.834)   -600 -> -0.4825 (0.804)
+#       Vz=+900  -> yaw +0.7092 rad/s (k=0.788)   -900 -> -0.7076 (0.786)
+#       Vz=+1100 -> yaw +0.8310 rad/s (k=0.755)   -1100 -> -0.8353 (0.759)
+#       双向对称度 0.2%..3.5%，过原点拟合 k = 0.7768
+#       理论 k = 0.164/0.198 = 0.8283（固件轮距/物理轮距）
+#       实测/理论 = 0.951
+#       k 随速度单调下降，与固件自报的同一趋势一致
+#       交叉验证：轮速环 0.889 x 0.8283 = 0.7364 预测 vs 0.7878 实测，
+#                 偏差 7%，两条独立路径在不确定度内一致
+#
+#   - 其他已确认事实
+#       纯旋转时 X_speed/Z_speed 比值 ~ -0.08；两轮恢复对称后该比值来自
+#         Z_speed 的微小零点偏移，不再是故障表征
+#       架空跟踪率与地面基本相同 -> 与负载/摩擦无关
+#       换满电 3S 电池后无改善 -> 与供电无关
+#       |Vz| <= 约 300 mrad/s 时可能完全不动（静摩擦死区）
+#       遥测电压字段标度不可信（3S 满电应 12.6 V，实测报 18.9 V / 8.8 V）
+#
+#   - 待决策：是否在主机侧补偿约 11% 的轮速环欠跟踪
+#       5% 级别以内的旋转误差对到点导航通常可接受；
+#       若比赛要求更高精度，应优先修固件速度环（PI/限幅），
+#       而不是把 firmware_track_width_m 或几何值改掉来掩盖。
+
+# ---------------------------------------------------------------------------
+# 传感器外参实测记录（2026-09-27）
+# ---------------------------------------------------------------------------
+# 机械量测（用户提供）
+#   D500: 位于驱动轮中轴线正中心，正向朝车头，顶部离地 170 mm
+#   T265: 相机中心距 D500 中心 258 mm、位于车尾方向、朝向车尾
+#         相机中心离地 76 mm；roll/pitch 未测，目视下垂极小
+#
+# 偏航的实测确认（tools/t265_forward_sign.py）
+#   旋转无法区分安装朝向：绕竖直轴旋转时四个候选偏航给出相同的累积偏航
+#   （实测均为 +141.1 deg），因此判据必须用平移符号：
+#     指令 Vx=+300 mm/s 直行 4 s（两轮同速正转 = base_link +X）
+#       yaw=0   -> dx=-1.065 m  反向
+#       yaw=180 -> dx=+1.061 m  正确   <-- 与本车安装一致
+#       yaw=+90 -> dy=-1.030 m  侧向
+#       yaw=-90 -> dy=+1.096 m  侧向
+#   行驶 4 s @300 mm/s 理论 1.2 m，实测 1.07 m，差 11%，
+#   与已测轮速环跟踪率 ~0.889 一致。
+#
+# 未验证 / 未测量项（保持标记 false 的原因）
+#   - T265 的 pitch 按 0 处理（用户明确要求，非测量值）
+#   - z 口径已统一为“中心离地”：D500 中心 166 mm，T265 中心 76 mm
+#   - CALIBRATION.md 要求的原地旋转验证（adapter 输出的 base_link 位姿
+#     应基本固定）尚未在完整融合链路上复测
+#   - D500 与 T265 的偏航一致性尚未做同步比对

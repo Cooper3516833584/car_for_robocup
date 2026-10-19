@@ -138,3 +138,6 @@ printf '  %-32s enabled=%s active=%s\n' \
 echo
 echo "enable one with: systemctl enable --now <unit>.service"
 echo "robocup-slam.service and competition-boot.service were installed, not enabled or started"
+echo
+echo "board-level groups/udev/PWM0 helper (once per board):"
+echo "  sudo sh $REPO_ROOT/deploy/board/install_board_setup.sh"

@@ -72,13 +72,22 @@ Run the complete synthetic runtime on Windows, Linux, or macOS without connectin
 py -3 code\main_robocup.py --config configs\robocup_diffdrive.example.toml --mode dry-run
 ```
 
-The dry-run uses fake sensors, a fake drive backend, and a synthetic open-field goal. The example geometry and mounts are unverified placeholders. To make a local profile, copy the example and edit only the local file:
+The dry-run uses fake sensors, a fake drive backend, and a synthetic open-field goal. The example geometry and mounts are unverified placeholders. To make a local profile, copy the example and edit only that file:
 
 ```powershell
 Copy-Item configs\robocup_diffdrive.example.toml configs\robocup_diffdrive.toml
 ```
 
-`configs/robocup_diffdrive.toml` is ignored by Git. Record and verify geometry and sensor mounts before relying on them for real motion; there are no geometry/extrinsics or map/footprint `measured` readiness flags. `hardware-mission` checks localization readiness and rejects unverified differential firmware when that protocol is selected. `hardware-probe` starts sensors only and does not run autonomous navigation.
+`configs/robocup_diffdrive.toml` is tracked (since 2026-10-19) and holds the
+measured values of the ROCK 5A car, so a freshly pulled board can run without a
+second setup step. On another chassis, edit the ports/pins/geometry in place and
+follow [docs/BOARD_PORTING.md](docs/BOARD_PORTING.md), which also documents the
+board-level groups, udev rules, overlays, systemd units and ROS environment.
+Record and verify geometry and sensor mounts before relying on them for real
+motion; there are no geometry/extrinsics or map/footprint `measured` readiness
+flags. `hardware-mission` checks localization readiness and rejects unverified
+differential firmware when that protocol is selected. `hardware-probe` starts
+sensors only and does not run autonomous navigation.
 
 ## Runtime modes
 
